@@ -1,0 +1,116 @@
+name: worktrips.doc — Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '20.x'
+  AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME }}
+
+jobs:
+  # ──────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB:       worktrips_doc_test
+          POSTGRES_USER:     postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run migrations (test DB)
+        env:
+          DB_HOST:     localhost
+          DB_PORT:     5432
+          DB_NAME:     worktrips_doc_test
+          DB_USER:     postgres
+          DB_PASSWORD: postgres
+          DB_SSL:      false
+          NODE_ENV:    test
+        run: npm run migrate
+
+      - name: Run tests
+        env:
+          DB_HOST:     localhost
+          DB_PORT:     5432
+          DB_NAME:     worktrips_doc_test
+          DB_USER:     postgres
+          DB_PASSWORD: postgres
+          DB_SSL:      false
+          NODE_ENV:    test
+          JWT_SECRET:  test_secret_min_64_chars_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        run: npm test
+
+  # ──────────────────────────────────────────────
+  deploy:
+    name: Deploy to Azure App Service
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Create deployment package
+        run: |
+          zip -r deploy.zip . \
+            --exclude "*.git*" \
+            --exclude "*.github*" \
+            --exclude "__tests__*" \
+            --exclude "coverage*" \
+            --exclude ".env*" \
+            --exclude "*.md"
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name:    ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_PUBLISH_PROFILE }}
+          package:     deploy.zip
+
+      - name: Run DB migrations on Azure
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az webapp ssh --name ${{ env.AZURE_WEBAPP_NAME }} \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --command "cd /home/site/wwwroot && node src/db/migrate.js"
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Health check
+        run: |
+          sleep 15
+          curl -f https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/health || exit 1
