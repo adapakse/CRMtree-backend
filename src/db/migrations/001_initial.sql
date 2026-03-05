@@ -183,13 +183,19 @@ CREATE INDEX idx_documents_doc_number    ON documents(doc_number);
 CREATE INDEX idx_documents_created_at    ON documents(created_at DESC);
 CREATE INDEX idx_documents_deleted_at    ON documents(deleted_at) WHERE deleted_at IS NOT NULL;
 
+-- IMMUTABLE wrapper needed for use inside GIN index
+CREATE OR REPLACE FUNCTION immutable_array_to_string(text[], text)
+RETURNS text AS $$
+  SELECT array_to_string($1, $2)
+$$ LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE;
+
 -- Full-text search index
 CREATE INDEX idx_documents_fts ON documents
   USING gin(
     to_tsvector('simple',
       coalesce(doc_number,'') || ' ' ||
       coalesce(name,'') || ' ' ||
-      coalesce(array_to_string(entities,' '),'')
+      coalesce(immutable_array_to_string(entities,' '),'')
     )
   )
   WHERE deleted_at IS NULL;

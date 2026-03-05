@@ -21,6 +21,8 @@ const userRoutes          = require('./routes/users');
 const groupRoutes         = require('./routes/groups');
 const documentGroupRoutes = require('./routes/documentGroups');
 const logRoutes           = require('./routes/logs');
+const attachmentRoutes    = require('./routes/attachments');
+const settingsRoutes      = require('./routes/settings');
 
 // Initialise SAML passport strategy (side-effect)
 require('./middleware/auth');
@@ -117,13 +119,16 @@ app.use('/api',                 signingRoutes);
 // Admin
 app.use('/api/admin/users',     userRoutes);
 app.use('/api/admin/logs',      logRoutes);
+app.use('/api/admin/settings',  settingsRoutes);
 
 // Shared
 app.use('/api/groups',          groupRoutes);
 app.use('/api/document-groups', documentGroupRoutes);
+app.use('/api/documents/:documentId/attachments', attachmentRoutes);
 
-// My workflow tasks (not under a document)
+// Workflow global endpoints (not under a document)
 const { requireAuth } = require('./middleware/auth');
+
 app.get('/api/workflow/my-tasks', requireAuth, injectAuditContext, async (req, res, next) => {
   try {
     const db = require('./config/database');
@@ -144,7 +149,104 @@ app.get('/api/workflow/my-tasks', requireAuth, injectAuditContext, async (req, r
   } catch (err) { next(err); }
 });
 
+app.get('/api/workflow/all-tasks', requireAuth, injectAuditContext, async (req, res, next) => {
+  try {
+    const db = require('./config/database');
+    const isAdmin = req.user.role === 'admin';
+
+    let query, params;
+    if (isAdmin) {
+      query = `
+        SELECT wt.*,
+               d.doc_number, d.name AS document_name, d.status AS document_status,
+               assignee.display_name AS assignee_name,
+               assigner.display_name AS assigner_name,
+               gp.name AS group_name, gp.display_name AS group_display
+        FROM workflow_tasks wt
+        JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL
+        LEFT JOIN users assignee ON assignee.id = wt.assigned_to
+        LEFT JOIN users assigner ON assigner.id = wt.assigned_by
+        LEFT JOIN group_profiles gp ON gp.id = d.group_id
+        ORDER BY wt.created_at DESC`;
+      params = [];
+    } else {
+      query = `
+        SELECT wt.*,
+               d.doc_number, d.name AS document_name, d.status AS document_status,
+               assignee.display_name AS assignee_name,
+               assigner.display_name AS assigner_name,
+               gp.name AS group_name, gp.display_name AS group_display
+        FROM workflow_tasks wt
+        JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL
+        LEFT JOIN users assignee ON assignee.id = wt.assigned_to
+        LEFT JOIN users assigner ON assigner.id = wt.assigned_by
+        LEFT JOIN group_profiles gp ON gp.id = d.group_id
+        WHERE d.group_id IN (
+          SELECT group_id FROM user_group_roles WHERE user_id = $1
+        )
+        ORDER BY wt.created_at DESC`;
+      params = [req.user.id];
+    }
+
+    const { rows } = await db.query(query, params);
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req, res, next) => {
+  try {
+    const db = require('./config/database');
+    const isAdmin = req.user.role === 'admin';
+
+    // Admins see all documents; regular users only see documents
+    // belonging to groups they are members of.
+    const groupFilter = isAdmin
+      ? ''
+      : `AND d.group_id IN (
+           SELECT group_id FROM user_group_roles WHERE user_id = $1
+         )`;
+    const params = isAdmin ? [] : [req.user.id];
+
+    const { rows } = await db.query(
+      `SELECT d.id, d.doc_number, d.name, d.status, d.expiration_date,
+              d.owner_id, u.display_name AS owner_name,
+              gp.name AS group_name, gp.display_name AS group_display,
+              (SELECT COUNT(*) FROM workflow_tasks wt
+               WHERE wt.document_id = d.id
+               AND wt.task_status IN ('pending','in_progress')) AS active_task_count,
+              (SELECT json_agg(json_build_object(
+                'id', wt.id, 'task_type', wt.task_type, 'task_status', wt.task_status,
+                'assignee_name', au.display_name, 'due_date', wt.due_date
+              )) FROM workflow_tasks wt
+               LEFT JOIN users au ON au.id = wt.assigned_to
+               WHERE wt.document_id = d.id
+               AND wt.task_status IN ('pending','in_progress')) AS active_tasks
+       FROM documents d
+       LEFT JOIN users u ON u.id = d.owner_id
+       LEFT JOIN group_profiles gp ON gp.id = d.group_id
+       WHERE d.deleted_at IS NULL
+       ${groupFilter}
+       ORDER BY d.updated_at DESC`,
+      params
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
 // ─── 404 & error handler ──────────────────────────────────
+
+// DEV ONLY - usuń przed produkcją
+if (process.env.NODE_ENV === 'development') {
+  app.post('/api/auth/dev-login', async (req, res) => {
+    const { rows } = await require('./config/database').query(
+      'SELECT * FROM users WHERE email = $1', [req.body.email]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    const { signAccessToken } = require('./middleware/auth');
+    res.json({ access_token: signAccessToken(rows[0]) });
+  });
+}
+
 app.use(notFound);
 app.use(errorHandler);
 

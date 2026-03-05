@@ -10,48 +10,51 @@ const audit    = require('../services/auditService');
 const logger   = require('../utils/logger');
 
 // ─── SAML Strategy ────────────────────────────────────────
-passport.use(
-  new SamlStrategy(
-    {
-      entryPoint:    config.saml.entryPoint,
-      issuer:        config.saml.issuer,
-      callbackUrl:   config.saml.callbackUrl,
-      idpCert:       config.saml.idpCert,
-      wantAssertionsSigned: true,
-      disableRequestedAuthnContext: true,
-    },
-    async (profile, done) => {
-      try {
-        const email     = profile.email || profile['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress'] || profile.nameID;
-        const firstName = profile.firstName || profile['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname']  || '';
-        const lastName  = profile.lastName  || profile['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname']    || '';
-
-        if (!email) return done(new Error('SAML: email attribute missing'));
+// SAML wyłączone na czas testów na localhost
+/*
+//const samlCert = config.saml?.idpCert;
+//if (samlCert && samlCert.length > 10) passport.use(
+//  new SamlStrategy(
+//    {
+//      entryPoint:    config.saml.entryPoint,
+//      issuer:        config.saml.issuer,
+//      callbackUrl:   config.saml.callbackUrl,
+//      idpCert:       config.saml.idpCert,
+//      wantAssertionsSigned: true,
+//      disableRequestedAuthnContext: true,
+//    },
+//    async (profile, done) => {
+//      try {
+//        const email     = profile.email || //profile['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress'] || profile.nameID;
+//        const firstName = profile.firstName || //profile['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname']  || '';
+//        const lastName  = profile.lastName  || //profile['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname']    || '';
+//
+//        if (!email) return done(new Error('SAML: email attribute missing'));
 
         // Upsert user
-        const { rows } = await db.query(
-          `INSERT INTO users (email, first_name, last_name, saml_subject, last_login_at)
-           VALUES ($1, $2, $3, $4, NOW())
-           ON CONFLICT (email) DO UPDATE
-             SET first_name    = EXCLUDED.first_name,
-                 last_name     = EXCLUDED.last_name,
-                 saml_subject  = EXCLUDED.saml_subject,
-                 last_login_at = NOW(),
-                 updated_at    = NOW()
-           RETURNING id, email, first_name, last_name, display_name, is_admin, is_active`,
-          [email, firstName, lastName, profile.nameID]
-        );
-        const user = rows[0];
-        if (!user.is_active) return done(new Error('Account inactive'));
+//        const { rows } = await db.query(
+//          `INSERT INTO users (email, first_name, last_name, saml_subject, last_login_at)
+//           VALUES ($1, $2, $3, $4, NOW())
+//           ON CONFLICT (email) DO UPDATE
+//             SET first_name    = EXCLUDED.first_name,
+//                 last_name     = EXCLUDED.last_name,
+//                 saml_subject  = EXCLUDED.saml_subject,
+//                 last_login_at = NOW(),
+//                 updated_at    = NOW()
+//           RETURNING id, email, first_name, last_name, display_name, is_admin, is_active`,
+//          [email, firstName, lastName, profile.nameID]
+//        );
+//        const user = rows[0];
+//        if (!user.is_active) return done(new Error('Account inactive'));
 
-        return done(null, user);
-      } catch (err) {
-        return done(err);
-      }
-    }
-  )
-);
-
+//        return done(null, user);
+//      } catch (err) {
+//        return done(err);
+//      }
+//   }
+// )
+//);
+*/
 passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser(async (id, done) => {
   try {

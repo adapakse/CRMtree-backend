@@ -155,7 +155,7 @@ router.post('/',
           `INSERT INTO documents
              (name, doc_type, gdpr_type, group_id, entities, owner_id,
               document_group_id, expiration_date, signing_date, created_by)
-           VALUES ($1,$2,$3::doc_type,$4,$5,$6,$7,$8,$9,$10)
+           VALUES ($1,$2::doc_type,$3::gdpr_type,$4,$5,$6,$7,$8,$9,$10)
            RETURNING *`,
           [
             name, doc_type, gdpr_type, group_id,
@@ -292,13 +292,13 @@ router.patch('/:id',
     body('name').optional().isString().trim().isLength({ max: 500 }),
     body('doc_type').optional().isIn(['partner_agreement','it_supplier_agreement','employee_agreement','nda','operator_agreement']),
     body('gdpr_type').optional().isIn(['data_processing_entrustment','data_administration','no_gdpr']),
-    body('status').optional().isIn(['new','being_edited','being_signed','signed','hold','completed','rejected']),
+    body('status').optional().isIn(['new','being_edited','being_signed','being_approved','signed','hold','completed','rejected']),
     body('entities').optional().isArray(),
     body('owner_id').optional().isUUID(),
     body('group_id').optional().isUUID(),
     body('document_group_id').optional().isUUID(),
-    body('expiration_date').optional().isISO8601().nullable(),
-    body('signing_date').optional().isISO8601().nullable(),
+    body('expiration_date').optional().isISO8601(),
+    body('signing_date').optional().isISO8601(),
   ],
   validate,
   async (req, res, next) => {
@@ -559,6 +559,37 @@ router.get('/:id/versions/:versionId/download',
         ipAddress: req.auditContext?.ipAddress,
       });
       res.send(buffer);
+    } catch (err) { next(err); }
+  }
+);
+
+
+// GET /api/documents/:id/history — audit log dla dokumentu
+router.get('/:id/history',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      const { rows: docRows } = await db.query(
+        `SELECT d.*, ugr.access_level AS _access
+         FROM documents d
+         LEFT JOIN user_group_roles ugr ON ugr.group_id = d.group_id AND ugr.user_id = $2
+         WHERE d.id = $1 AND d.deleted_at IS NULL`,
+        [req.params.id, req.user.id]
+      );
+      if (!docRows.length) return res.status(404).json({ error: 'Document not found' });
+      const doc = docRows[0];
+      const access = req.user.is_admin ? 'full' : doc._access;
+      if (!access) return res.status(403).json({ error: 'Access denied' });
+
+      const { rows } = await db.query(
+        `SELECT id, action, user_name, user_email, after_state, metadata, created_at
+         FROM audit_logs
+         WHERE document_id = $1
+         ORDER BY created_at DESC
+         LIMIT 200`,
+        [req.params.id]
+      );
+      res.json(rows);
     } catch (err) { next(err); }
   }
 );

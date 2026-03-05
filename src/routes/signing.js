@@ -56,7 +56,8 @@ router.post('/documents/:id/sign/initiate',
       });
 
       res.json(result);
-    } catch (err) { next(err); }
+    } catch (err) { console.error('[settings GET]', err.message); next(err); }
+
   }
 );
 

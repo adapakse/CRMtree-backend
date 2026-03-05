@@ -10,6 +10,46 @@ const { validate, injectAuditContext } = require('../middleware/errorHandler');
 router.use(requireAuth, requireAdmin, injectAuditContext);
 
 // ────────────────────────────────────────────────────────────
+// POST /api/admin/users — create user manually
+// ────────────────────────────────────────────────────────────
+router.post('/',
+  [
+    body('email').notEmpty().isEmail().normalizeEmail(),
+    body('first_name').notEmpty().isString().trim().isLength({ max: 100 }),
+    body('last_name').notEmpty().isString().trim().isLength({ max: 100 }),
+    body('is_active').optional({ nullable: true }).isBoolean(),
+    body('is_admin').optional({ nullable: true }).isBoolean(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { email, first_name, last_name, is_active = true, is_admin = false } = req.body;
+
+      const { rows } = await db.query(
+        `INSERT INTO users (email, first_name, last_name, is_active, is_admin)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, email, first_name, last_name, display_name, is_active, is_admin, created_at`,
+        [email, first_name, last_name, is_active, is_admin]
+      );
+
+      await audit.log({
+        user:       req.user,
+        action:     'user_created',
+        afterState: { email, first_name, last_name, is_admin },
+        ipAddress:  req.auditContext?.ipAddress,
+      });
+
+      res.status(201).json(rows[0]);
+    } catch (err) {
+      if (err.code === '23505') {
+        return res.status(409).json({ error: 'User with this email already exists' });
+      }
+      next(err);
+    }
+  }
+);
+
+// ────────────────────────────────────────────────────────────
 // GET /api/admin/users — list all users
 // ────────────────────────────────────────────────────────────
 router.get('/',

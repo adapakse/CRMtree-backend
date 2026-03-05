@@ -55,13 +55,20 @@ module.exports = {
   },
 
   email: {
-    host:     optional('SMTP_HOST', 'smtp.sendgrid.net'),
-    port:     parseInt(optional('SMTP_PORT', '587')),
-    secure:   optional('SMTP_SECURE', 'false') === 'true',
-    user:     optional('SMTP_USER'),
-    pass:     optional('SMTP_PASS'),
     from:     optional('EMAIL_FROM', 'noreply@worktrips.com'),
     fromName: optional('EMAIL_FROM_NAME', 'worktrips.doc'),
+  },
+
+  // ─── Google Workspace / Gmail API ─────────────────────────────────────────
+  // Używamy Service Account z Domain-Wide Delegation do wysyłki przez Gmail API.
+  // Jeden z dwóch sposobów podania klucza serwisowego:
+  //   GOOGLE_SERVICE_ACCOUNT_JSON  — cała zawartość pliku JSON (do użycia w env secrets)
+  //   GOOGLE_SERVICE_ACCOUNT_FILE  — ścieżka do pliku JSON na dysku (do użycia lokalnie)
+  google: {
+    serviceAccountJson: optional('GOOGLE_SERVICE_ACCOUNT_JSON'),
+    serviceAccountFile: optional('GOOGLE_SERVICE_ACCOUNT_FILE'),
+    impersonateEmail:   optional('GOOGLE_IMPERSONATE_EMAIL', 'noreply@worktrips.com'),
+    sendInDev:          optional('GOOGLE_SEND_IN_DEV', 'false') === 'true',
   },
 
   signus: {

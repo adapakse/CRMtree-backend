@@ -50,7 +50,7 @@ router.post('/',
     body('assigned_to').notEmpty().isUUID(),
     body('task_type').notEmpty().isIn(['read','edit','approve','sign']),
     body('message').optional().isString().trim().isLength({ max: 2000 }),
-    body('due_date').optional().isISO8601().nullable(),
+    body('due_date').optional({ nullable: true }).isISO8601(),
   ],
   validate,
   async (req, res, next) => {
@@ -122,7 +122,7 @@ router.patch('/:taskId',
     param('taskId').isUUID(),
     body('task_status').optional().isIn(['pending','in_progress','completed','cancelled']),
     body('message').optional().isString().trim(),
-    body('due_date').optional().isISO8601().nullable(),
+    body('due_date').optional({ nullable: true }).isISO8601(),
   ],
   validate,
   async (req, res, next) => {
@@ -204,6 +204,28 @@ router.delete('/:taskId', [param('taskId').isUUID()], validate, async (req, res,
       ipAddress:   req.auditContext?.ipAddress,
     });
     res.json({ message: 'Task cancelled', id: req.params.taskId });
+  } catch (err) { next(err); }
+});
+
+// GET /api/workflow/all-tasks — all tasks (kanban)
+
+router.get('/all-tasks', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT wt.*,
+              d.doc_number, d.name AS document_name, d.status AS document_status,
+              assignee.display_name AS assignee_name,
+              assigner.display_name AS assigner_name,
+              gp.name AS group_name
+       FROM workflow_tasks wt
+       JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL
+       LEFT JOIN users assignee ON assignee.id = wt.assigned_to
+       LEFT JOIN users assigner ON assigner.id = wt.assigned_by
+       LEFT JOIN group_profiles gp ON gp.id = d.group_id
+       ORDER BY wt.created_at DESC`,
+      []
+    );
+    res.json(rows);
   } catch (err) { next(err); }
 });
 
