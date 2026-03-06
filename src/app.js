@@ -24,7 +24,6 @@ const logRoutes           = require('./routes/logs');
 const attachmentRoutes    = require('./routes/attachments');
 const settingsRoutes      = require('./routes/settings');
 
-// Initialise SAML passport strategy (side-effect)
 require('./middleware/auth');
 
 const app = express();
@@ -65,7 +64,6 @@ app.use('/api/', rateLimit({
 }));
 
 // ─── Request parsing ──────────────────────────────────────
-// For Signus webhook: capture raw body before JSON parsing
 app.use((req, res, next) => {
   if (req.path === '/api/signing/webhook') {
     let data = '';
@@ -109,26 +107,23 @@ app.get('/health', async (req, res) => {
 app.use('/api/auth',            authRoutes);
 app.use('/api/documents',       documentRoutes);
 
-// Document sub-resources (mergeParams in those routers)
 app.use('/api/documents/:documentId/tags',     tagRoutes);
 app.use('/api/documents/:documentId/workflow', workflowRoutes);
 
-// Signing
 app.use('/api',                 signingRoutes);
 
-// Admin
 app.use('/api/admin/users',     userRoutes);
 app.use('/api/admin/logs',      logRoutes);
 app.use('/api/admin/settings',  settingsRoutes);
 
-// Shared
 app.use('/api/groups',          groupRoutes);
 app.use('/api/document-groups', documentGroupRoutes);
 app.use('/api/documents/:documentId/attachments', attachmentRoutes);
 
-// Workflow global endpoints (not under a document)
+// ─── Workflow global endpoints ─────────────────────────────
 const { requireAuth } = require('./middleware/auth');
 
+// ── GET /api/workflow/my-tasks ────────────────────────────
 app.get('/api/workflow/my-tasks', requireAuth, injectAuditContext, async (req, res, next) => {
   try {
     const db = require('./config/database');
@@ -149,6 +144,7 @@ app.get('/api/workflow/my-tasks', requireAuth, injectAuditContext, async (req, r
   } catch (err) { next(err); }
 });
 
+// ── GET /api/workflow/all-tasks ───────────────────────────
 app.get('/api/workflow/all-tasks', requireAuth, injectAuditContext, async (req, res, next) => {
   try {
     const db = require('./config/database');
@@ -193,17 +189,26 @@ app.get('/api/workflow/all-tasks', requireAuth, injectAuditContext, async (req, 
   } catch (err) { next(err); }
 });
 
+// ── GET /api/workflow/kanban-docs ─────────────────────────
+// Non-admins see:
+//   a) docs in groups they belong to (existing behaviour)
+//   b) docs where they have an active (pending/in_progress) task — NEW
 app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req, res, next) => {
   try {
     const db = require('./config/database');
-    const isAdmin = req.user.role === 'admin';
+    const isAdmin = req.user.is_admin;
 
-    // Admins see all documents; regular users only see documents
-    // belonging to groups they are members of.
     const groupFilter = isAdmin
       ? ''
-      : `AND d.group_id IN (
-           SELECT group_id FROM user_group_roles WHERE user_id = $1
+      : `AND (
+           d.group_id IN (
+             SELECT group_id FROM user_group_roles WHERE user_id = $1
+           )
+           OR d.id IN (
+             SELECT document_id FROM workflow_tasks
+             WHERE assigned_to = $1
+               AND task_status IN ('pending','in_progress')
+           )
          )`;
     const params = isAdmin ? [] : [req.user.id];
 
@@ -211,16 +216,25 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
       `SELECT d.id, d.doc_number, d.name, d.status, d.expiration_date,
               d.owner_id, u.display_name AS owner_name,
               gp.name AS group_name, gp.display_name AS group_display,
-              (SELECT COUNT(*) FROM workflow_tasks wt
+              (SELECT COUNT(*)
+               FROM workflow_tasks wt
                WHERE wt.document_id = d.id
-               AND wt.task_status IN ('pending','in_progress')) AS active_task_count,
+                 AND wt.task_status IN ('pending','in_progress')) AS active_task_count,
               (SELECT json_agg(json_build_object(
-                'id', wt.id, 'task_type', wt.task_type, 'task_status', wt.task_status,
-                'assignee_name', au.display_name, 'due_date', wt.due_date
-              )) FROM workflow_tasks wt
+                'id',          wt.id,
+                'task_type',   wt.task_type,
+                'task_status', wt.task_status,
+                'assigned_to', wt.assigned_to,
+                'assignee_name', au.display_name,
+                'assigner_name', ab.display_name,
+                'due_date',    wt.due_date,
+                'message',     wt.message
+              ) ORDER BY wt.created_at)
+               FROM workflow_tasks wt
                LEFT JOIN users au ON au.id = wt.assigned_to
+               LEFT JOIN users ab ON ab.id = wt.assigned_by
                WHERE wt.document_id = d.id
-               AND wt.task_status IN ('pending','in_progress')) AS active_tasks
+                 AND wt.task_status IN ('pending','in_progress')) AS active_tasks
        FROM documents d
        LEFT JOIN users u ON u.id = d.owner_id
        LEFT JOIN group_profiles gp ON gp.id = d.group_id
@@ -234,8 +248,6 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
 });
 
 // ─── 404 & error handler ──────────────────────────────────
-
-// DEV ONLY - usuń przed produkcją
 if (process.env.NODE_ENV === 'development') {
   app.post('/api/auth/dev-login', async (req, res) => {
     const { rows } = await require('./config/database').query(

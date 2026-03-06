@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+credentials/
+*.pem
+*.key
+*.p12
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Runtime
+dist/
+build/
+.tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

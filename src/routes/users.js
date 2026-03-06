@@ -143,11 +143,12 @@ router.get('/:id', [param('id').isUUID()], validate, async (req, res, next) => {
 });
 
 // ────────────────────────────────────────────────────────────
-// PATCH /api/admin/users/:id — update user (name, active, admin)
+// PATCH /api/admin/users/:id — update user
 // ────────────────────────────────────────────────────────────
 router.patch('/:id',
   [
     param('id').isUUID(),
+    body('email').optional().isEmail().normalizeEmail(),      // ★ dodane
     body('first_name').optional().isString().trim().isLength({ max: 100 }),
     body('last_name').optional().isString().trim().isLength({ max: 100 }),
     body('is_active').optional().isBoolean(),
@@ -159,7 +160,7 @@ router.patch('/:id',
       const { rows: before } = await db.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
       if (!before.length) return res.status(404).json({ error: 'User not found' });
 
-      const allowed = ['first_name', 'last_name', 'is_active', 'is_admin'];
+      const allowed = ['email', 'first_name', 'last_name', 'is_active', 'is_admin']; // ★ email dodane
       const setClauses = [];
       const params     = [];
       let   p          = 1;
@@ -177,6 +178,7 @@ router.patch('/:id',
         `UPDATE users SET ${setClauses.join(',')} WHERE id = $${p} RETURNING *`,
         params
       );
+
       await audit.log({
         user:        req.user,
         action:      'user_updated',
@@ -185,8 +187,14 @@ router.patch('/:id',
         metadata:    { target_user_id: req.params.id },
         ipAddress:   req.auditContext?.ipAddress,
       });
+
       res.json(rows[0]);
-    } catch (err) { next(err); }
+    } catch (err) {
+      if (err.code === '23505') {                             // ★ obsługa duplicate email
+        return res.status(409).json({ error: 'User with this email already exists' });
+      }
+      next(err);
+    }
   }
 );
 
@@ -204,7 +212,6 @@ router.post('/:id/roles',
     try {
       const { group_id, access_level } = req.body;
 
-      // Validate user and group exist
       const { rows: userRows } = await db.query('SELECT id FROM users WHERE id = $1', [req.params.id]);
       if (!userRows.length) return res.status(404).json({ error: 'User not found' });
 
