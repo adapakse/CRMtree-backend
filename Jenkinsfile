@@ -5,7 +5,6 @@ pipeline {
     agent any
 
     parameters {
-        choice(name: "ENVIRONMENT", choices: ["PROD", "PREPROD", "HTCD"])
         choice(name: "NODEJS_VERSION", choices: ["~v22", "~v18"], description: "Wersja Node.js (nazwa narzędzia w Jenkins)")
     }
 
@@ -23,7 +22,7 @@ pipeline {
             steps {
                 script {
                     env.NODEJS = params.NODEJS_VERSION ?: "~v22"
-                    echo "Node.js: ${env.NODEJS} | Środowisko: ${ENVIRONMENT}"
+                    echo "Node.js: ${env.NODEJS}"
                 }
             }
         }
@@ -54,16 +53,6 @@ pipeline {
             }
         }       
 
-        stage("Sprawdzenie parametrów") {
-            steps {
-                script {
-                    def allowed = ["PROD", "PREPROD", "HTCD"]
-                    if (!(ENVIRONMENT in allowed)) {
-                        error "Niedozwolone środowisko: ${ENVIRONMENT}. Dozwolone: ${allowed}"
-                    }
-                }
-            }
-        }
 
         stage("Instalacja zależności") {
             steps {
@@ -102,12 +91,6 @@ pipeline {
         stage("Budowa obrazu Docker") {
             steps {
                 script {
-                    if (ENVIRONMENT == 'PROD') {
-                        def tag = sh(script: "jq -r '.version' package.json", returnStdout: true).trim()
-                        env.IMAGE_TAG = tag
-                    } else {
-                        env.IMAGE_TAG = "${ENVIRONMENT}-${BUILD_NUMBER}"
-                    }
 
                     docker.withRegistry(BASTION_REGISTRY_URL, BASTION_REGISTRY_ACCOUNT_CREDENTIAL_ID) {
                         def image = docker.build("${BASTION_NCA_REGISTRY_URL}",
@@ -157,13 +140,12 @@ pipeline {
         }
 
         stage("Aktualizacja tagu w AKS (HTCD/PREPROD)") {
-            when { expression { ENVIRONMENT in ["HTCD", "PREPROD"] } }
             steps {
                 build job: 'update_image_tag_chelm_charts',
                     parameters: [
                         string(name: 'TARGET_COMPONENT_NAME', value: "docs_app"),
                         string(name: 'NEW_TAG', value: "latest"),
-                        string(name: 'ENV', value: "${ENVIRONMENT}")
+                        string(name: 'ENV', value: "HTCD")
                     ]
             }
         }
