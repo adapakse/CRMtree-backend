@@ -57,7 +57,7 @@ pipeline {
         stage("Instalacja zależności") {
             steps {
                 timeout(time: 10, unit: 'MINUTES') {
-                    nodejs(nodeJSInstallationName: env.NODEJS, configId: NPM_READ_CONFIG) {
+                    nodejs(nodeJSInstallationName: env.NODEJS) {
                         sh "npm ci --prefer-offline --no-audit"
                     }
                 }
