@@ -1,7 +1,7 @@
-'use strict';
+"use strict";
 
-const multer = require('multer');
-const config = require('../config');
+const multer = require("multer");
+const config = require("../config");
 
 const storage = multer.memoryStorage(); // buffer in RAM → upload to Azure
 

@@ -1,7 +1,7 @@
-'use strict';
+"use strict";
 
-const db     = require('../config/database');
-const logger = require('../utils/logger');
+const db = require("../config/database");
+const logger = require("../utils/logger");
 
 /**
  * Write an audit log entry.
@@ -39,23 +39,23 @@ async function log({
           ip_address, user_agent)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
-        user?.id         || null,
-        user?.email      || null,
+        user?.id || null,
+        user?.email || null,
         user?.display_name || user?.name || null,
-        document?.id         || null,
+        document?.id || null,
         document?.doc_number || null,
-        document?.name       || null,
+        document?.name || null,
         action,
         beforeState ? JSON.stringify(beforeState) : null,
-        afterState  ? JSON.stringify(afterState)  : null,
-        metadata    ? JSON.stringify(metadata)    : null,
-        ipAddress   || null,
-        userAgent   || null,
-      ]
+        afterState ? JSON.stringify(afterState) : null,
+        metadata ? JSON.stringify(metadata) : null,
+        ipAddress || null,
+        userAgent || null,
+      ],
     );
   } catch (err) {
     // Audit failures must never crash the main request
-    logger.error('Failed to write audit log', { action, error: err.message });
+    logger.error("Failed to write audit log", { action, error: err.message });
   }
 }
 
@@ -71,21 +71,42 @@ async function queryLogs({
   documentId,
   documentName,
   action,
-  search,   // free text — searches user_name, document_name, action
-  page    = 1,
-  limit   = 50,
+  search, // free text — searches user_name, document_name, action
+  page = 1,
+  limit = 50,
 }) {
   const conditions = [];
-  const params     = [];
-  let   p          = 1;
+  const params = [];
+  let p = 1;
 
-  if (dateFrom) { conditions.push(`created_at >= $${p++}`); params.push(dateFrom); }
-  if (dateTo)   { conditions.push(`created_at <= $${p++}`); params.push(dateTo); }
-  if (userId)   { conditions.push(`user_id = $${p++}`);     params.push(userId); }
-  if (userEmail){ conditions.push(`user_email ILIKE $${p++}`); params.push(`%${userEmail}%`); }
-  if (documentId){ conditions.push(`document_id = $${p++}`); params.push(documentId); }
-  if (documentName){ conditions.push(`document_name ILIKE $${p++}`); params.push(`%${documentName}%`); }
-  if (action)   { conditions.push(`action = $${p++}`);      params.push(action); }
+  if (dateFrom) {
+    conditions.push(`created_at >= $${p++}`);
+    params.push(dateFrom);
+  }
+  if (dateTo) {
+    conditions.push(`created_at <= $${p++}`);
+    params.push(dateTo);
+  }
+  if (userId) {
+    conditions.push(`user_id = $${p++}`);
+    params.push(userId);
+  }
+  if (userEmail) {
+    conditions.push(`user_email ILIKE $${p++}`);
+    params.push(`%${userEmail}%`);
+  }
+  if (documentId) {
+    conditions.push(`document_id = $${p++}`);
+    params.push(documentId);
+  }
+  if (documentName) {
+    conditions.push(`document_name ILIKE $${p++}`);
+    params.push(`%${documentName}%`);
+  }
+  if (action) {
+    conditions.push(`action = $${p++}`);
+    params.push(action);
+  }
   if (search) {
     conditions.push(`(
       user_name     ILIKE $${p}   OR
@@ -96,7 +117,7 @@ async function queryLogs({
     p++;
   }
 
-  const where  = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  const where = conditions.length ? "WHERE " + conditions.join(" AND ") : "";
   const offset = (page - 1) * limit;
 
   const [dataResult, countResult] = await Promise.all([
@@ -109,13 +130,13 @@ async function queryLogs({
        ${where}
        ORDER BY created_at DESC
        LIMIT $${p} OFFSET $${p + 1}`,
-      [...params, limit, offset]
+      [...params, limit, offset],
     ),
     db.query(`SELECT COUNT(*) FROM audit_logs ${where}`, params),
   ]);
 
   return {
-    data:  dataResult.rows,
+    data: dataResult.rows,
     total: parseInt(countResult.rows[0].count),
     page,
     limit,

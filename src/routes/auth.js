@@ -1,23 +1,30 @@
-'use strict';
+"use strict";
 
-const router  = require('express').Router();
-const passport = require('passport');
-const crypto   = require('crypto');
-const db       = require('../config/database');
-const audit    = require('../services/auditService');
-const { requireAuth, signAccessToken, signRefreshToken, saveRefreshToken } = require('../middleware/auth');
-const { injectAuditContext } = require('../middleware/errorHandler');
-const config   = require('../config');
+const router = require("express").Router();
+const passport = require("passport");
+const crypto = require("crypto");
+const db = require("../config/database");
+const audit = require("../services/auditService");
+const {
+  requireAuth,
+  signAccessToken,
+  signRefreshToken,
+  saveRefreshToken,
+} = require("../middleware/auth");
+const { injectAuditContext } = require("../middleware/errorHandler");
+const config = require("../config");
 
 // ─── GET /api/auth/saml — redirect to GCP IdP ────────────
-router.get('/saml',
-  passport.authenticate('saml', { session: false })
-);
+router.get("/saml", passport.authenticate("saml", { session: false }));
 
 // ─── POST /api/auth/saml/callback — handle SAML assertion ─
-router.post('/saml/callback',
+router.post(
+  "/saml/callback",
   injectAuditContext,
-  passport.authenticate('saml', { session: false, failureRedirect: `${config.frontendUrl}/login?error=saml_failed` }),
+  passport.authenticate("saml", {
+    session: false,
+    failureRedirect: `${config.frontendUrl}/login?error=saml_failed`,
+  }),
   async (req, res) => {
     try {
       const user = req.user;
@@ -26,9 +33,13 @@ router.post('/saml/callback',
       await saveRefreshToken(user.id, hash);
 
       await audit.log({
-        user:      { id: user.id, email: user.email, display_name: user.display_name },
-        action:    'user_login',
-        metadata:  { method: 'saml' },
+        user: {
+          id: user.id,
+          email: user.email,
+          display_name: user.display_name,
+        },
+        action: "user_login",
+        metadata: { method: "saml" },
         ipAddress: req.auditContext?.ipAddress,
         userAgent: req.auditContext?.userAgent,
       });
@@ -37,64 +48,95 @@ router.post('/saml/callback',
       // (frontend should immediately store them and strip URL)
       res.redirect(
         `${config.frontendUrl}/auth/callback?` +
-        `access_token=${encodeURIComponent(accessToken)}&` +
-        `refresh_token=${encodeURIComponent(refreshToken)}`
+          `access_token=${encodeURIComponent(accessToken)}&` +
+          `refresh_token=${encodeURIComponent(refreshToken)}`,
       );
     } catch (err) {
       res.redirect(`${config.frontendUrl}/login?error=auth_failed`);
     }
-  }
+  },
 );
 
 // ─── POST /api/auth/refresh — exchange refresh token ──────
-router.post('/refresh', injectAuditContext, async (req, res, next) => {
+router.post("/refresh", injectAuditContext, async (req, res, next) => {
   try {
     const { refresh_token } = req.body;
-    if (!refresh_token) return res.status(400).json({ error: 'refresh_token required' });
+    if (!refresh_token)
+      return res.status(400).json({ error: "refresh_token required" });
 
-    const hash = crypto.createHash('sha256').update(refresh_token).digest('hex');
+    const hash = crypto
+      .createHash("sha256")
+      .update(refresh_token)
+      .digest("hex");
     const { rows } = await db.query(
       `SELECT rt.*, u.id AS uid, u.email, u.first_name, u.last_name, u.display_name, u.is_admin, u.is_active
        FROM refresh_tokens rt
        JOIN users u ON u.id = rt.user_id
        WHERE rt.token_hash = $1 AND rt.revoked = FALSE AND rt.expires_at > NOW()`,
-      [hash]
+      [hash],
     );
-    if (!rows.length) return res.status(401).json({ error: 'Invalid or expired refresh token' });
+    if (!rows.length)
+      return res
+        .status(401)
+        .json({ error: "Invalid or expired refresh token" });
     const row = rows[0];
-    if (!row.is_active) return res.status(401).json({ error: 'Account inactive' });
+    if (!row.is_active)
+      return res.status(401).json({ error: "Account inactive" });
 
     // Rotate: revoke old, issue new
-    await db.query('UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1', [hash]);
-    const user = { id: row.uid, email: row.email, display_name: row.display_name, is_admin: row.is_admin };
-    const newAccess  = signAccessToken(user);
+    await db.query(
+      "UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1",
+      [hash],
+    );
+    const user = {
+      id: row.uid,
+      email: row.email,
+      display_name: row.display_name,
+      is_admin: row.is_admin,
+    };
+    const newAccess = signAccessToken(user);
     const { token: newRefresh, hash: newHash } = signRefreshToken(user);
     await saveRefreshToken(user.id, newHash);
 
     res.json({ access_token: newAccess, refresh_token: newRefresh });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ─── POST /api/auth/logout ────────────────────────────────
-router.post('/logout', requireAuth, injectAuditContext, async (req, res, next) => {
-  try {
-    const { refresh_token } = req.body;
-    if (refresh_token) {
-      const hash = crypto.createHash('sha256').update(refresh_token).digest('hex');
-      await db.query('UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1', [hash]);
+router.post(
+  "/logout",
+  requireAuth,
+  injectAuditContext,
+  async (req, res, next) => {
+    try {
+      const { refresh_token } = req.body;
+      if (refresh_token) {
+        const hash = crypto
+          .createHash("sha256")
+          .update(refresh_token)
+          .digest("hex");
+        await db.query(
+          "UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1",
+          [hash],
+        );
+      }
+      await audit.log({
+        user: req.user,
+        action: "user_logout",
+        ipAddress: req.auditContext?.ipAddress,
+        userAgent: req.auditContext?.userAgent,
+      });
+      res.json({ message: "Logged out" });
+    } catch (err) {
+      next(err);
     }
-    await audit.log({
-      user:      req.user,
-      action:    'user_logout',
-      ipAddress: req.auditContext?.ipAddress,
-      userAgent: req.auditContext?.userAgent,
-    });
-    res.json({ message: 'Logged out' });
-  } catch (err) { next(err); }
-});
+  },
+);
 
 // ─── GET /api/auth/me — current user info ────────────────
-router.get('/me', requireAuth, async (req, res, next) => {
+router.get("/me", requireAuth, async (req, res, next) => {
   try {
     const { rows } = await db.query(
       `SELECT u.id, u.email, u.first_name, u.last_name, u.display_name,
@@ -111,10 +153,12 @@ router.get('/me', requireAuth, async (req, res, next) => {
        LEFT JOIN group_profiles gp    ON gp.id = ugr.group_id AND gp.is_active = TRUE
        WHERE u.id = $1
        GROUP BY u.id`,
-      [req.user.id]
+      [req.user.id],
     );
     res.json(rows[0] || req.user);
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 });
 
 module.exports = router;

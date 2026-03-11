@@ -67,7 +67,7 @@ pipeline {
         stage("Lint") {
             steps {
                 nodejs(nodeJSInstallationName: env.NODEJS) {
-                    sh "npm run lint:report"
+                    sh "npm run lint"
                 }
             }
         }

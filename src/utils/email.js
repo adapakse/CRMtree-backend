@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 /**
  * email.js — Gmail API via Service Account + Domain-Wide Delegation
@@ -7,10 +7,10 @@
  * Nie wymaga haseł ani OAuth per użytkownik.
  */
 
-const { google }  = require('googleapis');
-const path        = require('path');
-const config      = require('../config');
-const logger      = require('./logger');
+const { google } = require("googleapis");
+const path = require("path");
+const config = require("../config");
+const logger = require("./logger");
 
 // ─── Inicjalizacja klienta Gmail ─────────────────────────────────────────────
 
@@ -26,83 +26,92 @@ async function getGmailClient() {
   } else if (config.google.serviceAccountFile) {
     credentials = require(path.resolve(config.google.serviceAccountFile));
   } else {
-    throw new Error('Brak konfiguracji Google Service Account (GOOGLE_SERVICE_ACCOUNT_JSON lub GOOGLE_SERVICE_ACCOUNT_FILE)');
+    throw new Error(
+      "Brak konfiguracji Google Service Account (GOOGLE_SERVICE_ACCOUNT_JSON lub GOOGLE_SERVICE_ACCOUNT_FILE)",
+    );
   }
 
   const auth = new google.auth.GoogleAuth({
     credentials,
-    scopes: ['https://www.googleapis.com/auth/gmail.send'],
+    scopes: ["https://www.googleapis.com/auth/gmail.send"],
   });
 
   // Impersonacja — wysyłamy jako noreply@worktrips.com
   const authClient = await auth.getClient();
   authClient.subject = config.google.impersonateEmail;
 
-  _gmailClient = google.gmail({ version: 'v1', auth: authClient });
+  _gmailClient = google.gmail({ version: "v1", auth: authClient });
   return _gmailClient;
 }
 
 // ─── Budowanie wiadomości RFC 2822 ───────────────────────────────────────────
 
 function buildRawMessage({ to, subject, html, text }) {
-  const from     = `${config.email.fromName} <${config.email.from}>`;
+  const from = `${config.email.fromName} <${config.email.from}>`;
   const boundary = `boundary_${Date.now()}`;
 
   const headers = [
     `From: ${from}`,
     `To: ${to}`,
-    `Subject: =?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`,
-    'MIME-Version: 1.0',
+    `Subject: =?UTF-8?B?${Buffer.from(subject).toString("base64")}?=`,
+    "MIME-Version: 1.0",
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
-    '',
-  ].join('\r\n');
+    "",
+  ].join("\r\n");
 
   const textPart = [
     `--${boundary}`,
-    'Content-Type: text/plain; charset=UTF-8',
-    'Content-Transfer-Encoding: base64',
-    '',
-    Buffer.from(text || stripHtml(html)).toString('base64'),
-  ].join('\r\n');
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    Buffer.from(text || stripHtml(html)).toString("base64"),
+  ].join("\r\n");
 
   const htmlPart = [
     `--${boundary}`,
-    'Content-Type: text/html; charset=UTF-8',
-    'Content-Transfer-Encoding: base64',
-    '',
-    Buffer.from(html).toString('base64'),
-  ].join('\r\n');
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    Buffer.from(html).toString("base64"),
+  ].join("\r\n");
 
   const raw = `${headers}\r\n${textPart}\r\n\r\n${htmlPart}\r\n\r\n--${boundary}--`;
-  return Buffer.from(raw).toString('base64url');
+  return Buffer.from(raw).toString("base64url");
 }
 
 function stripHtml(html) {
-  return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  return html
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // ─── Główna funkcja wysyłki ───────────────────────────────────────────────────
 
 async function sendMail({ to, subject, html, text }) {
   if (!to) {
-    logger.warn('email.sendMail: brak adresata, pomijam');
+    logger.warn("email.sendMail: brak adresata, pomijam");
     return;
   }
 
   // W trybie dev tylko loguj — nie wysyłaj
   if (config.isDev && !config.google.sendInDev) {
-    logger.info(`[DEV] Email NIE wysłany (ustaw GOOGLE_SEND_IN_DEV=true aby wysyłać w dev)`, {
-      to, subject,
-    });
+    logger.info(
+      `[DEV] Email NIE wysłany (ustaw GOOGLE_SEND_IN_DEV=true aby wysyłać w dev)`,
+      {
+        to,
+        subject,
+      },
+    );
     return;
   }
 
   try {
     const gmail = await getGmailClient();
-    const raw   = buildRawMessage({ to, subject, html, text });
+    const raw = buildRawMessage({ to, subject, html, text });
 
     await gmail.users.messages.send({
-      userId: 'me',
+      userId: "me",
       requestBody: { raw },
     });
 
@@ -174,15 +183,24 @@ function template(content) {
 /**
  * Zadanie workflow przypisane do użytkownika
  */
-async function sendTaskAssigned({ to, assigneeName, taskType, documentName, docNumber, assignerName, dueDate, documentId }) {
+async function sendTaskAssigned({
+  to,
+  assigneeName,
+  taskType,
+  documentName,
+  docNumber,
+  assignerName,
+  dueDate,
+  documentId,
+}) {
   const taskLabels = {
-    read:    { label: 'Do przeczytania', badge: 'badge-blue' },
-    edit:    { label: 'Do edycji',       badge: 'badge-orange' },
-    approve: { label: 'Do akceptacji',   badge: 'badge-purple' },
-    sign:    { label: 'Do podpisania',   badge: 'badge-purple' },
+    read: { label: "Do przeczytania", badge: "badge-blue" },
+    edit: { label: "Do edycji", badge: "badge-orange" },
+    approve: { label: "Do akceptacji", badge: "badge-purple" },
+    sign: { label: "Do podpisania", badge: "badge-purple" },
   };
-  const task = taskLabels[taskType] || { label: taskType, badge: 'badge-blue' };
-  const url  = `${BASE_URL}/documents`;
+  const task = taskLabels[taskType] || { label: taskType, badge: "badge-blue" };
+  const url = `${BASE_URL}/documents`;
 
   await sendMail({
     to,
@@ -204,10 +222,14 @@ async function sendTaskAssigned({ to, assigneeName, taskType, documentName, docN
           <span class="info-label">Typ zadania</span>
           <span class="info-val"><span class="badge ${task.badge}">${task.label}</span></span>
         </div>
-        ${dueDate ? `<div class="info-row">
+        ${
+          dueDate
+            ? `<div class="info-row">
           <span class="info-label">Termin</span>
-          <span class="info-val">${new Date(dueDate).toLocaleDateString('pl-PL')}</span>
-        </div>` : ''}
+          <span class="info-val">${new Date(dueDate).toLocaleDateString("pl-PL")}</span>
+        </div>`
+            : ""
+        }
         <div class="info-row">
           <span class="info-label">Zlecający</span>
           <span class="info-val">${assignerName}</span>
@@ -221,20 +243,35 @@ async function sendTaskAssigned({ to, assigneeName, taskType, documentName, docN
 /**
  * Zmiana statusu dokumentu
  */
-async function sendDocumentStatusChanged({ to, recipientName, documentName, docNumber, oldStatus, newStatus, changedByName, documentId }) {
+async function sendDocumentStatusChanged({
+  to,
+  recipientName,
+  documentName,
+  docNumber,
+  oldStatus,
+  newStatus,
+  changedByName,
+  documentId,
+}) {
   const statusLabels = {
-    new:             { label: 'Nowy',              badge: 'badge-blue' },
-    being_edited:    { label: 'W edycji',           badge: 'badge-orange' },
-    being_signed:    { label: 'Do podpisania',      badge: 'badge-purple' },
-    being_approved:  { label: 'Do akceptacji',      badge: 'badge-purple' },
-    signed:          { label: 'Podpisany',          badge: 'badge-green' },
-    completed:       { label: 'Zakończony',         badge: 'badge-green' },
-    hold:            { label: 'Wstrzymany',         badge: 'badge-orange' },
-    rejected:        { label: 'Odrzucony',          badge: 'badge-red' },
+    new: { label: "Nowy", badge: "badge-blue" },
+    being_edited: { label: "W edycji", badge: "badge-orange" },
+    being_signed: { label: "Do podpisania", badge: "badge-purple" },
+    being_approved: { label: "Do akceptacji", badge: "badge-purple" },
+    signed: { label: "Podpisany", badge: "badge-green" },
+    completed: { label: "Zakończony", badge: "badge-green" },
+    hold: { label: "Wstrzymany", badge: "badge-orange" },
+    rejected: { label: "Odrzucony", badge: "badge-red" },
   };
-  const nStatus = statusLabels[newStatus] || { label: newStatus, badge: 'badge-blue' };
-  const oStatus = statusLabels[oldStatus] || { label: oldStatus, badge: 'badge-blue' };
-  const url     = `${BASE_URL}/documents`;
+  const nStatus = statusLabels[newStatus] || {
+    label: newStatus,
+    badge: "badge-blue",
+  };
+  const oStatus = statusLabels[oldStatus] || {
+    label: oldStatus,
+    badge: "badge-blue",
+  };
+  const url = `${BASE_URL}/documents`;
 
   await sendMail({
     to,
@@ -273,12 +310,23 @@ async function sendDocumentStatusChanged({ to, recipientName, documentName, docN
 /**
  * Zadanie workflow ukończone (powiadomienie dla właściciela dokumentu)
  */
-async function sendTaskCompleted({ to, ownerName, taskType, documentName, docNumber, completedByName, comment }) {
+async function sendTaskCompleted({
+  to,
+  ownerName,
+  taskType,
+  documentName,
+  docNumber,
+  completedByName,
+  comment,
+}) {
   const taskLabels = {
-    read: 'przeczytał', edit: 'edytował', approve: 'zaakceptował', sign: 'podpisał',
+    read: "przeczytał",
+    edit: "edytował",
+    approve: "zaakceptował",
+    sign: "podpisał",
   };
-  const action = taskLabels[taskType] || 'wykonał zadanie dla';
-  const url    = `${BASE_URL}/documents`;
+  const action = taskLabels[taskType] || "wykonał zadanie dla";
+  const url = `${BASE_URL}/documents`;
 
   await sendMail({
     to,
@@ -300,10 +348,14 @@ async function sendTaskCompleted({ to, ownerName, taskType, documentName, docNum
           <span class="info-label">Wykonał</span>
           <span class="info-val">${completedByName}</span>
         </div>
-        ${comment ? `<div class="info-row">
+        ${
+          comment
+            ? `<div class="info-row">
           <span class="info-label">Komentarz</span>
           <span class="info-val">${comment}</span>
-        </div>` : ''}
+        </div>`
+            : ""
+        }
       </div>
       <a href="${url}" class="btn">Otwórz dokument →</a>
     `),
@@ -313,7 +365,14 @@ async function sendTaskCompleted({ to, ownerName, taskType, documentName, docNum
 /**
  * Dokument odrzucony w workflow
  */
-async function sendTaskRejected({ to, ownerName, documentName, docNumber, rejectedByName, comment }) {
+async function sendTaskRejected({
+  to,
+  ownerName,
+  documentName,
+  docNumber,
+  rejectedByName,
+  comment,
+}) {
   const url = `${BASE_URL}/documents`;
 
   await sendMail({
@@ -336,10 +395,14 @@ async function sendTaskRejected({ to, ownerName, documentName, docNumber, reject
           <span class="info-label">Odrzucił</span>
           <span class="info-val">${rejectedByName}</span>
         </div>
-        ${comment ? `<div class="info-row">
+        ${
+          comment
+            ? `<div class="info-row">
           <span class="info-label">Powód</span>
           <span class="info-val" style="color:#DC2626">${comment}</span>
-        </div>` : ''}
+        </div>`
+            : ""
+        }
       </div>
       <a href="${url}" class="btn">Otwórz dokument →</a>
     `),
@@ -349,7 +412,13 @@ async function sendTaskRejected({ to, ownerName, documentName, docNumber, reject
 /**
  * Dokument podpisany przez Signus
  */
-async function sendDocumentSigned({ to, recipientName, documentName, docNumber, signedByName }) {
+async function sendDocumentSigned({
+  to,
+  recipientName,
+  documentName,
+  docNumber,
+  signedByName,
+}) {
   const url = `${BASE_URL}/documents`;
 
   await sendMail({
@@ -385,10 +454,15 @@ async function sendDocumentSigned({ to, recipientName, documentName, docNumber, 
 /**
  * Zaproszenie nowego użytkownika
  */
-async function sendUserInvitation({ to, displayName, invitedByName, loginUrl }) {
+async function sendUserInvitation({
+  to,
+  displayName,
+  invitedByName,
+  loginUrl,
+}) {
   await sendMail({
     to,
-    subject: '[worktrips.doc] Zaproszenie do systemu',
+    subject: "[worktrips.doc] Zaproszenie do systemu",
     html: template(`
       <h2>Witaj w worktrips.doc!</h2>
       <p>Cześć ${displayName},</p>

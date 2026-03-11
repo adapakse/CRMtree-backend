@@ -13,7 +13,8 @@
     "seed": "node src/db/seed.js",
     "test": "jest --runInBand --forceExit",
     "test:watch": "jest --watch",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "format:check": "prettier --check 'src/**/*.js'"
   },
   "dependencies": {
     "@azure/identity": "^4.4.0",

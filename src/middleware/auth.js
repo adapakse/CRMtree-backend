@@ -1,13 +1,13 @@
-'use strict';
+"use strict";
 
-const jwt      = require('jsonwebtoken');
-const crypto   = require('crypto');
-const passport = require('passport');
-const { Strategy: SamlStrategy } = require('passport-saml');
-const config   = require('../config');
-const db       = require('../config/database');
-const audit    = require('../services/auditService');
-const logger   = require('../utils/logger');
+const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const passport = require("passport");
+const { Strategy: SamlStrategy } = require("passport-saml");
+const config = require("../config");
+const db = require("../config/database");
+const audit = require("../services/auditService");
+const logger = require("../utils/logger");
 
 // ─── SAML Strategy ────────────────────────────────────────
 // SAML wyłączone na czas testów na localhost
@@ -59,72 +59,78 @@ passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser(async (id, done) => {
   try {
     const { rows } = await db.query(
-      'SELECT id, email, first_name, last_name, display_name, is_admin, is_active FROM users WHERE id = $1',
-      [id]
+      "SELECT id, email, first_name, last_name, display_name, is_admin, is_active FROM users WHERE id = $1",
+      [id],
     );
     done(null, rows[0] || null);
-  } catch (err) { done(err); }
+  } catch (err) {
+    done(err);
+  }
 });
 
 // ─── JWT helpers ──────────────────────────────────────────
 function signAccessToken(user) {
   return jwt.sign(
     {
-      sub:      user.id,
-      email:    user.email,
-      name:     user.display_name,
+      sub: user.id,
+      email: user.email,
+      name: user.display_name,
       is_admin: user.is_admin,
     },
     config.jwt.secret,
-    { expiresIn: config.jwt.expiresIn, algorithm: 'HS256' }
+    { expiresIn: config.jwt.expiresIn, algorithm: "HS256" },
   );
 }
 
 function signRefreshToken(user) {
-  const token = crypto.randomBytes(64).toString('hex');
-  const hash  = crypto.createHash('sha256').update(token).digest('hex');
+  const token = crypto.randomBytes(64).toString("hex");
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
   return { token, hash };
 }
 
 async function saveRefreshToken(userId, hash) {
   const expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000);
   await db.query(
-    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1,$2,$3)',
-    [userId, hash, expiresAt]
+    "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1,$2,$3)",
+    [userId, hash, expiresAt],
   );
 }
 
 // ─── requireAuth middleware ────────────────────────────────
 async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'No token provided' });
+  if (!authHeader?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "No token provided" });
   }
   const token = authHeader.slice(7);
   try {
-    const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
+    const decoded = jwt.verify(token, config.jwt.secret, {
+      algorithms: ["HS256"],
+    });
     // Load fresh user from DB to capture role changes
     const { rows } = await db.query(
-      'SELECT id, email, first_name, last_name, display_name, is_admin, is_active FROM users WHERE id = $1',
-      [decoded.sub]
+      "SELECT id, email, first_name, last_name, display_name, is_admin, is_active FROM users WHERE id = $1",
+      [decoded.sub],
     );
     if (!rows.length || !rows[0].is_active) {
-      return res.status(401).json({ error: 'User not found or inactive' });
+      return res.status(401).json({ error: "User not found or inactive" });
     }
     req.user = rows[0];
     next();
   } catch (err) {
-    if (err.name === 'TokenExpiredError') {
-      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    if (err.name === "TokenExpiredError") {
+      return res
+        .status(401)
+        .json({ error: "Token expired", code: "TOKEN_EXPIRED" });
     }
-    return res.status(401).json({ error: 'Invalid token' });
+    return res.status(401).json({ error: "Invalid token" });
   }
 }
 
 // ─── requireAdmin middleware ───────────────────────────────
 function requireAdmin(req, res, next) {
   if (!req.user?.is_admin) {
-    return res.status(403).json({ error: 'Admin access required' });
+    return res.status(403).json({ error: "Admin access required" });
   }
   next();
 }
