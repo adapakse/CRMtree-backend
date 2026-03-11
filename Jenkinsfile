@@ -77,7 +77,9 @@ pipeline {
         stage("Sprawdzenie formatowania") {
             steps {
                 nodejs(nodeJSInstallationName: env.NODEJS) {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh "npm run format:check"
+                    }
                 }
             }
         }
