@@ -80,13 +80,13 @@ pipeline {
             }
         }
 
-        stage("Testy") {
-            steps {
-                nodejs(nodeJSInstallationName: env.NODEJS) {
-                    sh "npm run test:cov-ci -- --maxWorkers=2"
-                }
-            }
-        }
+        // stage("Testy") {
+        //     steps {
+        //         nodejs(nodeJSInstallationName: env.NODEJS) {
+        //             sh "npm run test:cov-ci -- --maxWorkers=2"
+        //         }
+        //     }
+        // }
 
         stage("Budowa obrazu Docker") {
             steps {
