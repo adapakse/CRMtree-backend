@@ -10,7 +10,7 @@ pipeline {
 
     environment {
         BASTION_REGISTRY_URL          = credentials("BASTION_REGISTRY")
-        BASTION_NCA_REGISTRY_URL       = "registry.org.hotailors.com/hotailors/travel-platform/frontend/client"
+        BASTION_NCA_REGISTRY_URL       = "registry.org.hotailors.com/hotailors/travel-platform/docs/worktripsdoc"
         TEAMS_SUCCESS_WEBHOOK_URL      = credentials("TEAMS_SUCCESS_WEBHOOK_URL")
         TEAMS_FAILURE_WEBHOOK_URL      = credentials("TEAMS_FAILURE_WEBHOOK_URL")
         GITLAB_REGISTRY_ACCOUNT_CREDENTIAL_ID = credentials("GITLAB_REGISTRY_ACCOUNT_CREDENTIAL_ID")
