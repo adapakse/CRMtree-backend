@@ -97,7 +97,7 @@ pipeline {
                 script {
 
                     docker.withRegistry(BASTION_REGISTRY_URL, BASTION_REGISTRY_ACCOUNT_CREDENTIAL_ID) {
-                        def image = docker.build("${BASTION_NCA_REGISTRY_URL}",
+                        def image = docker.build("${BASTION_NCA_REGISTRY_URL}:${BUILD_NUMBER}",
                             ".")
                         env.BASTION_IMAGE = image.id
                     }
@@ -143,16 +143,30 @@ pipeline {
             }
         }
 
-        stage("Aktualizacja tagu w AKS (HTCD/PREPROD)") {
+
+        stage("Prepare job") {
             steps {
-                build job: 'update_image_tag_chelm_charts',
-                    parameters: [
-                        string(name: 'TARGET_COMPONENT_NAME', value: "docs_app"),
-                        string(name: 'NEW_TAG', value: "latest"),
-                        string(name: 'ENV', value: "HTCD")
-                    ]
+                sshagent(credentials: [params.GIT_IDENTITY]) {
+                    sh """
+                        git clone --branch master git@bastion.org.hotailors.com:worktrips-admin/kubernetes.git argo_commit_workspace
+                        cd argo_commit_workspace
+                        git checkout master
+                        git config pull.rebase false
+                        git pull
+                        cd docs_app
+
+                        FILE_TO_EDIT="values-htcd.yaml"
+
+                        sed -i "/^docs-back:/,/^[^ ]/ s/\(tag: *\).*/\1\"${BUILD_NUMBER}\"/" values.yaml
+
+                        git add \$FILE_TO_EDIT
+                        git commit -m "bump image version for ${params.ENV}"
+                        git push
+                    """
+                }
             }
         }
+
     }
 
     post {
