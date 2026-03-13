@@ -147,6 +147,7 @@ pipeline {
         stage("Update tag") {
             steps {
                 sshagent(credentials: [params.GIT_IDENTITY]) {
+                    withEnv(["FILE_TO_EDIT=values-htcd.yaml"]) {
                     sh """
                         git clone --branch master git@bastion.org.hotailors.com:worktrips-admin/kubernetes.git argo_commit_workspace
                         cd argo_commit_workspace
@@ -155,13 +156,13 @@ pipeline {
                         git pull
                         cd docs_app
 
-                        FILE_TO_EDIT="values-htcd.yaml"
-                        sed -i "/^docs-back:/,/^[^ ]/ s/\\(tag: *\\).*/\\1\"'"$BUILD_NUMBER"'\"/" $FILE_TO_EDIT
+                        sed -i "/^docs-back:/,/^[^ ]/ s/\\(tag: *\\).*/\\1\"'"$BUILD_NUMBER"'\"/" "$FILE_TO_EDIT"
 
-                        git add $FILE_TO_EDIT
+                        git add "$FILE_TO_EDIT"
                         git commit -m "bump image version for ${params.ENV}"
                         git push
                     """
+                    }
                 }
             }
         }
