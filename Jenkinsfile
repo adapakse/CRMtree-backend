@@ -144,7 +144,7 @@ pipeline {
         }
 
 
-        stage("Prepare job") {
+        stage("Update tag") {
             steps {
                 sshagent(credentials: [params.GIT_IDENTITY]) {
                     sh """
@@ -158,7 +158,7 @@ pipeline {
                         FILE_TO_EDIT="values-htcd.yaml"
                         sed -i "/^docs-back:/,/^[^ ]/ s/\\(tag: *\\).*/\\1\"'"$BUILD_NUMBER"'\"/" $FILE_TO_EDIT
 
-                        git add \$FILE_TO_EDIT
+                        git add $FILE_TO_EDIT
                         git commit -m "bump image version for ${params.ENV}"
                         git push
                     """
