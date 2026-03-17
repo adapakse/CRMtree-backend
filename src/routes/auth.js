@@ -14,18 +14,42 @@ const {
 const { injectAuditContext } = require("../middleware/errorHandler");
 const config = require("../config");
 
-// ─── GET /api/auth/saml — redirect to GCP IdP ────────────
-router.get("/saml", passport.authenticate("saml", { session: false }));
+// ─── GET /api/auth/saml — redirect to Entra IdP ──────────
+router.get("/saml", (req, res, next) => {
+  console.log("[SAML] GET /saml hit");
+  console.log("[SAML] Config check:", {
+    entryPoint: config.saml?.entryPoint,
+    issuer: config.saml?.issuer,
+    callbackUrl: config.saml?.callbackUrl,
+    certDefined: !!config.saml?.idpCert,
+    certLength: config.saml?.idpCert?.length,
+  });
+
+  passport.authenticate("saml", { session: false }, (err, user, info) => {
+    if (err) {
+      console.error("[SAML] authenticate error:", err);
+      return next(err);
+    }
+    console.log("[SAML] authenticate result — user:", user, "info:", info);
+  })(req, res, next);
+});
 
 // ─── POST /api/auth/saml/callback — handle SAML assertion ─
 router.post(
   "/saml/callback",
   injectAuditContext,
+  (req, res, next) => {
+    console.log("[SAML] POST /saml/callback hit");
+    console.log("[SAML] Body keys:", Object.keys(req.body || {}));
+    console.log("[SAML] SAMLResponse present:", !!req.body?.SAMLResponse);
+    next();
+  },
   passport.authenticate("saml", {
     session: false,
     failureRedirect: `${config.frontendUrl}/login?error=saml_failed`,
   }),
   async (req, res) => {
+    console.log("[SAML] Callback success — req.user:", req.user);
     try {
       const user = req.user;
       const accessToken = signAccessToken(user);
@@ -52,6 +76,7 @@ router.post(
           `refresh_token=${encodeURIComponent(refreshToken)}`,
       );
     } catch (err) {
+      console.error("[SAML] Callback handler error:", err);
       res.redirect(`${config.frontendUrl}/login?error=auth_failed`);
     }
   },
