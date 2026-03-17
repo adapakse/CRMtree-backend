@@ -13,6 +13,10 @@ const logger = require("../utils/logger");
 // SAML wyłączone na czas testów na localhost
 const samlCert = config.saml?.idpCert;
 
+console.log("[SAML] idpCert value:", JSON.stringify(samlCert));
+console.log("[SAML] idpCert length:", samlCert?.length);
+console.log("[SAML] condition passes:", !!(samlCert && samlCert.length > 10));
+
 if (samlCert && samlCert.length > 10) {
   passport.use(
     new SamlStrategy(
