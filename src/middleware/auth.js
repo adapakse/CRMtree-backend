@@ -24,7 +24,7 @@ if (samlCert && samlCert.length > 10) {
         entryPoint: config.saml.entryPoint,
         issuer: config.saml.issuer,
         callbackUrl: config.saml.callbackUrl,
-        idpCert: config.saml.idpCert.replace(/\s+/g, ''),
+        cert: config.saml.idpCert.replace(/\s+/g, ''),
         wantAssertionsSigned: true,
         disableRequestedAuthnContext: true,
       },
