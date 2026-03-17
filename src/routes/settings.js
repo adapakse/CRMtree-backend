@@ -12,11 +12,11 @@ const { injectAuditContext }        = require('../middleware/errorHandler');
 router.get('/', requireAuth, async (req, res, next) => {
   try {
     const { rows } = await db.query(
-      `SELECT s.key, s.value, s.label, s.description, s.value_type, s.category,
+      `SELECT key, value, label, description, value_type, category,
               s.updated_at, u.display_name AS updated_by_name
        FROM app_settings s
        LEFT JOIN users u ON u.id = s.updated_by
-       ORDER BY s.category, s.key`
+       ORDER BY category, key`
     );
 
     // Build flat map for easy consumption: { expiration_red_days: 90, ... }
@@ -73,11 +73,11 @@ router.put('/', requireAuth, requireAdmin, injectAuditContext, async (req, res, 
 
     // Return fresh settings
     const { rows } = await db.query(
-      `SELECT s.key, s.value, s.label, s.description, s.value_type, s.category,
+      `SELECT key, value, label, description, value_type, category,
               s.updated_at, u.display_name AS updated_by_name
        FROM app_settings s
        LEFT JOIN users u ON u.id = s.updated_by
-       ORDER BY s.category, s.key`
+       ORDER BY category, key`
     );
 
     const flat = {};

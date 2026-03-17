@@ -19,23 +19,25 @@ router.post('/',
     body('last_name').notEmpty().isString().trim().isLength({ max: 100 }),
     body('is_active').optional({ nullable: true }).isBoolean(),
     body('is_admin').optional({ nullable: true }).isBoolean(),
+    // ★ CRM role
+    body('crm_role').optional({ nullable: true }).isIn(['salesperson', 'sales_manager']),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const { email, first_name, last_name, is_active = true, is_admin = false } = req.body;
+      const { email, first_name, last_name, is_active = true, is_admin = false, crm_role = null } = req.body;
 
       const { rows } = await db.query(
-        `INSERT INTO users (email, first_name, last_name, is_active, is_admin)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, email, first_name, last_name, display_name, is_active, is_admin, created_at`,
-        [email, first_name, last_name, is_active, is_admin]
+        `INSERT INTO users (email, first_name, last_name, is_active, is_admin, crm_role)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, email, first_name, last_name, display_name, is_active, is_admin, crm_role, created_at`,
+        [email, first_name, last_name, is_active, is_admin, crm_role]
       );
 
       await audit.log({
         user:       req.user,
         action:     'user_created',
-        afterState: { email, first_name, last_name, is_admin },
+        afterState: { email, first_name, last_name, is_admin, crm_role },
         ipAddress:  req.auditContext?.ipAddress,
       });
 
@@ -57,13 +59,15 @@ router.get('/',
     query('search').optional().isString().trim(),
     query('group_id').optional().isUUID(),
     query('is_active').optional().isBoolean().toBoolean(),
+    // ★ filtr po roli CRM
+    query('crm_role').optional().isIn(['salesperson', 'sales_manager']),
     query('page').optional().isInt({ min: 1 }).toInt(),
     query('limit').optional().isInt({ min: 1, max: 200 }).toInt(),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const { search, group_id, is_active, page = 1, limit = 50 } = req.query;
+      const { search, group_id, is_active, crm_role, page = 1, limit = 50 } = req.query;
       const conditions = [];
       const params = [];
       let p = 1;
@@ -81,6 +85,11 @@ router.get('/',
         conditions.push(`u.is_active = $${p++}`);
         params.push(is_active);
       }
+      // ★ filtr CRM
+      if (crm_role) {
+        conditions.push(`u.crm_role = $${p++}`);
+        params.push(crm_role);
+      }
 
       const where  = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
       const offset = (page - 1) * limit;
@@ -88,7 +97,7 @@ router.get('/',
       const [data, count] = await Promise.all([
         db.query(
           `SELECT u.id, u.email, u.first_name, u.last_name, u.display_name,
-                  u.is_admin, u.is_active, u.last_login_at, u.created_at,
+                  u.is_admin, u.is_active, u.crm_role, u.last_login_at, u.created_at,
                   json_agg(json_build_object(
                     'role_id',     ugr.id,
                     'group_id',    ugr.group_id,
@@ -148,11 +157,13 @@ router.get('/:id', [param('id').isUUID()], validate, async (req, res, next) => {
 router.patch('/:id',
   [
     param('id').isUUID(),
-    body('email').optional().isEmail().normalizeEmail(),      // ★ dodane
+    body('email').optional().isEmail().normalizeEmail(),
     body('first_name').optional().isString().trim().isLength({ max: 100 }),
     body('last_name').optional().isString().trim().isLength({ max: 100 }),
     body('is_active').optional().isBoolean(),
     body('is_admin').optional().isBoolean(),
+    // ★ CRM role (null = usuń rolę CRM)
+    body('crm_role').optional({ nullable: true }).isIn(['salesperson', 'sales_manager', null]),
   ],
   validate,
   async (req, res, next) => {
@@ -160,7 +171,7 @@ router.patch('/:id',
       const { rows: before } = await db.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
       if (!before.length) return res.status(404).json({ error: 'User not found' });
 
-      const allowed = ['email', 'first_name', 'last_name', 'is_active', 'is_admin']; // ★ email dodane
+      const allowed = ['email', 'first_name', 'last_name', 'is_active', 'is_admin', 'crm_role']; // ★ crm_role
       const setClauses = [];
       const params     = [];
       let   p          = 1;
@@ -190,7 +201,7 @@ router.patch('/:id',
 
       res.json(rows[0]);
     } catch (err) {
-      if (err.code === '23505') {                             // ★ obsługa duplicate email
+      if (err.code === '23505') {
         return res.status(409).json({ error: 'User with this email already exists' });
       }
       next(err);

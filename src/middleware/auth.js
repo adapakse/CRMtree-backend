@@ -59,7 +59,7 @@ passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser(async (id, done) => {
   try {
     const { rows } = await db.query(
-      'SELECT id, email, first_name, last_name, display_name, is_admin, is_active FROM users WHERE id = $1',
+      'SELECT id, email, first_name, last_name, display_name, is_admin, is_active, crm_role FROM users WHERE id = $1',
       [id]
     );
     done(null, rows[0] || null);
@@ -105,7 +105,7 @@ async function requireAuth(req, res, next) {
     const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
     // Load fresh user from DB to capture role changes
     const { rows } = await db.query(
-      'SELECT id, email, first_name, last_name, display_name, is_admin, is_active FROM users WHERE id = $1',
+      'SELECT id, email, first_name, last_name, display_name, is_admin, is_active, crm_role FROM users WHERE id = $1',
       [decoded.sub]
     );
     if (!rows.length || !rows[0].is_active) {
