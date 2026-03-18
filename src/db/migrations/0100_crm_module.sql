@@ -261,10 +261,10 @@ CREATE TABLE IF NOT EXISTS crm_api_keys (
 );
 
 -- ── App Settings dla CRM ─────────────────────────────────────────────
-INSERT INTO app_settings (key, value, description) VALUES
-  ('crm_hot_lead_days',        '7',              'Dni bez kontaktu → lead oznaczyć jako zimny'),
-  ('crm_renewal_warning_days', '90',             'Alert X dni przed wygaśnięciem umowy'),
-  ('crm_adoption_target_pct',  '75',             'Docelowy % aktywnych użytkowników u partnera'),
-  ('crm_csv_max_rows',         '5000',           'Limit wierszy w pojedynczym imporcie CSV'),
-  ('crm_platform_api_key',     '',               'Klucz API platformy transakcyjnej (plain, zmień po wdrożeniu)')
+INSERT INTO app_settings (key, value, label, description) VALUES
+  ('crm_hot_lead_days',        '7',    'Dni bez kontaktu (zimny lead)',      'Dni bez kontaktu → lead oznaczyć jako zimny'),
+  ('crm_renewal_warning_days', '90',   'Alert wygaśnięcia umowy (dni)',      'Alert X dni przed wygaśnięciem umowy'),
+  ('crm_adoption_target_pct',  '75',   'Cel adopcji użytkowników (%)',       'Docelowy % aktywnych użytkowników u partnera'),
+  ('crm_csv_max_rows',         '5000', 'Limit wierszy importu CSV',          'Limit wierszy w pojedynczym imporcie CSV'),
+  ('crm_platform_api_key',     '',     'Klucz API platformy transakcyjnej', 'Klucz API platformy transakcyjnej (plain, zmień po wdrożeniu)')
 ON CONFLICT (key) DO NOTHING;

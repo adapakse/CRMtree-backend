@@ -1,3 +1,8 @@
+-- Upewnij się że kolumny value_type i category istnieją w app_settings
+ALTER TABLE app_settings
+  ADD COLUMN IF NOT EXISTS value_type TEXT    NOT NULL DEFAULT 'string',
+  ADD COLUMN IF NOT EXISTS category   TEXT    NOT NULL DEFAULT 'general';
+
 -- Migration: 0106_crm_activities_edit_and_settings
 -- 1. Dodaje kolumnę updated_at do tabel aktywności (potrzebna do edycji)
 -- 2. Dodaje parametry słownikowe CRM do app_settings (kategoria: crm)
