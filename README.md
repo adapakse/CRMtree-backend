@@ -6,17 +6,17 @@ Node.js / Express / PostgreSQL backend for the worktrips.doc Document Management
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Runtime | Node.js 20 LTS |
-| Framework | Express 4 |
-| Database | PostgreSQL 15 (Azure Database for PostgreSQL Flexible Server) |
-| File Storage | Azure Blob Storage |
-| Auth | SAML 2.0 (GCP Workspace) + JWT (access) + opaque refresh tokens |
-| Email | Nodemailer / SendGrid |
-| E-Signing | Signus API |
-| Monitoring | Azure Application Insights |
-| CI/CD | GitHub Actions → Azure App Service |
+| Layer        | Technology                                                      |
+| ------------ | --------------------------------------------------------------- |
+| Runtime      | Node.js 20 LTS                                                  |
+| Framework    | Express 4                                                       |
+| Database     | PostgreSQL 15 (Azure Database for PostgreSQL Flexible Server)   |
+| File Storage | Azure Blob Storage                                              |
+| Auth         | SAML 2.0 (GCP Workspace) + JWT (access) + opaque refresh tokens |
+| Email        | Nodemailer / SendGrid                                           |
+| E-Signing    | Signus API                                                      |
+| Monitoring   | Azure Application Insights                                      |
+| CI/CD        | GitHub Actions → Azure App Service                              |
 
 ---
 
@@ -95,6 +95,7 @@ JWT_SECRET   (min 64 chars)
 ```
 
 For production (all required):
+
 ```
 SAML_ENTRY_POINT, SAML_IDP_CERT, SAML_CALLBACK_URL
 AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_ACCOUNT_KEY, AZURE_STORAGE_CONTAINER
@@ -108,95 +109,95 @@ SMTP_USER, SMTP_PASS
 
 ### Authentication
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/auth/saml` | Redirect to GCP Workspace SSO |
-| POST | `/api/auth/saml/callback` | SAML assertion → JWT tokens |
-| POST | `/api/auth/refresh` | Exchange refresh token |
-| POST | `/api/auth/logout` | Revoke refresh token |
-| GET | `/api/auth/me` | Current user + roles |
+| Method | Path                      | Description                   |
+| ------ | ------------------------- | ----------------------------- |
+| GET    | `/api/auth/saml`          | Redirect to GCP Workspace SSO |
+| POST   | `/api/auth/saml/callback` | SAML assertion → JWT tokens   |
+| POST   | `/api/auth/refresh`       | Exchange refresh token        |
+| POST   | `/api/auth/logout`        | Revoke refresh token          |
+| GET    | `/api/auth/me`            | Current user + roles          |
 
 ### Documents
 
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| GET | `/api/documents` | read | List + search (visibility-filtered) |
-| POST | `/api/documents` | full* | Create + optional file upload |
-| GET | `/api/documents/:id` | read | Get full document detail |
-| PATCH | `/api/documents/:id` | full | Update metadata / status |
-| DELETE | `/api/documents/:id` | full | Soft delete |
-| POST | `/api/documents/:id/file` | full | Upload new file version |
-| GET | `/api/documents/:id/preview` | read | Stream PDF (proxied) |
-| GET | `/api/documents/:id/download` | full | Download file |
-| GET | `/api/documents/:id/versions/:vId/preview` | read | Version PDF preview |
-| GET | `/api/documents/:id/versions/:vId/download` | full | Version download |
+| Method | Path                                        | Auth   | Description                         |
+| ------ | ------------------------------------------- | ------ | ----------------------------------- |
+| GET    | `/api/documents`                            | read   | List + search (visibility-filtered) |
+| POST   | `/api/documents`                            | full\* | Create + optional file upload       |
+| GET    | `/api/documents/:id`                        | read   | Get full document detail            |
+| PATCH  | `/api/documents/:id`                        | full   | Update metadata / status            |
+| DELETE | `/api/documents/:id`                        | full   | Soft delete                         |
+| POST   | `/api/documents/:id/file`                   | full   | Upload new file version             |
+| GET    | `/api/documents/:id/preview`                | read   | Stream PDF (proxied)                |
+| GET    | `/api/documents/:id/download`               | full   | Download file                       |
+| GET    | `/api/documents/:id/versions/:vId/preview`  | read   | Version PDF preview                 |
+| GET    | `/api/documents/:id/versions/:vId/download` | full   | Version download                    |
 
-\* *full = must have `full` access level for at least one group*
+\* _full = must have `full` access level for at least one group_
 
 ### Tags
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/documents/:id/tags` | List tags |
-| POST | `/api/documents/:id/tags` | Add tag `{ key, value }` |
-| PATCH | `/api/documents/:id/tags/:tagId` | Update tag value |
-| DELETE | `/api/documents/:id/tags/:tagId` | Delete tag |
+| Method | Path                             | Description              |
+| ------ | -------------------------------- | ------------------------ |
+| GET    | `/api/documents/:id/tags`        | List tags                |
+| POST   | `/api/documents/:id/tags`        | Add tag `{ key, value }` |
+| PATCH  | `/api/documents/:id/tags/:tagId` | Update tag value         |
+| DELETE | `/api/documents/:id/tags/:tagId` | Delete tag               |
 
 ### Workflow
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/documents/:id/workflow` | Task history (timeline) |
-| POST | `/api/documents/:id/workflow` | Assign task + email notification |
-| PATCH | `/api/documents/:id/workflow/:taskId` | Update task status |
-| DELETE | `/api/documents/:id/workflow/:taskId` | Cancel task |
-| GET | `/api/workflow/my-tasks` | Current user's pending tasks |
+| Method | Path                                  | Description                      |
+| ------ | ------------------------------------- | -------------------------------- |
+| GET    | `/api/documents/:id/workflow`         | Task history (timeline)          |
+| POST   | `/api/documents/:id/workflow`         | Assign task + email notification |
+| PATCH  | `/api/documents/:id/workflow/:taskId` | Update task status               |
+| DELETE | `/api/documents/:id/workflow/:taskId` | Cancel task                      |
+| GET    | `/api/workflow/my-tasks`              | Current user's pending tasks     |
 
 ### E-Signing (Signus)
 
-| Method | Path | Description |
-|---|---|---|
-| POST | `/api/documents/:id/sign/initiate` | Start signing envelope |
-| POST | `/api/signing/webhook` | Signus webhook callback |
+| Method | Path                               | Description             |
+| ------ | ---------------------------------- | ----------------------- |
+| POST   | `/api/documents/:id/sign/initiate` | Start signing envelope  |
+| POST   | `/api/signing/webhook`             | Signus webhook callback |
 
 ### Groups & Roles
 
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| GET | `/api/groups` | all | List groups |
-| GET | `/api/groups/:id` | all | Group detail with members |
-| POST | `/api/groups` | admin | Create group |
-| PATCH | `/api/groups/:id` | admin | Update group |
-| DELETE | `/api/groups/:id` | admin | Deactivate group |
-| POST | `/api/admin/users/:id/roles` | admin | Assign role to user |
-| DELETE | `/api/admin/users/:id/roles/:roleId` | admin | Remove role |
+| Method | Path                                 | Auth  | Description               |
+| ------ | ------------------------------------ | ----- | ------------------------- |
+| GET    | `/api/groups`                        | all   | List groups               |
+| GET    | `/api/groups/:id`                    | all   | Group detail with members |
+| POST   | `/api/groups`                        | admin | Create group              |
+| PATCH  | `/api/groups/:id`                    | admin | Update group              |
+| DELETE | `/api/groups/:id`                    | admin | Deactivate group          |
+| POST   | `/api/admin/users/:id/roles`         | admin | Assign role to user       |
+| DELETE | `/api/admin/users/:id/roles/:roleId` | admin | Remove role               |
 
 ### Document Groups (Bundles)
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/document-groups` | List all bundles |
-| GET | `/api/document-groups/:id` | Bundle detail |
-| POST | `/api/document-groups` | Create bundle |
-| PATCH | `/api/document-groups/:id` | Update bundle |
-| POST | `/api/document-groups/:id/documents` | Add document to bundle |
-| DELETE | `/api/document-groups/:id/documents/:docId` | Remove document |
-| DELETE | `/api/document-groups/:id` | Delete bundle |
+| Method | Path                                        | Description            |
+| ------ | ------------------------------------------- | ---------------------- |
+| GET    | `/api/document-groups`                      | List all bundles       |
+| GET    | `/api/document-groups/:id`                  | Bundle detail          |
+| POST   | `/api/document-groups`                      | Create bundle          |
+| PATCH  | `/api/document-groups/:id`                  | Update bundle          |
+| POST   | `/api/document-groups/:id/documents`        | Add document to bundle |
+| DELETE | `/api/document-groups/:id/documents/:docId` | Remove document        |
+| DELETE | `/api/document-groups/:id`                  | Delete bundle          |
 
 ### Admin — Users
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/admin/users` | List all users |
-| GET | `/api/admin/users/:id` | User detail |
-| PATCH | `/api/admin/users/:id` | Update user (name / active / admin) |
+| Method | Path                   | Description                         |
+| ------ | ---------------------- | ----------------------------------- |
+| GET    | `/api/admin/users`     | List all users                      |
+| GET    | `/api/admin/users/:id` | User detail                         |
+| PATCH  | `/api/admin/users/:id` | Update user (name / active / admin) |
 
 ### Admin — Audit Logs
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/admin/logs` | Query logs with filters |
-| GET | `/api/admin/logs/actions` | List all action types |
+| Method | Path                      | Description             |
+| ------ | ------------------------- | ----------------------- |
+| GET    | `/api/admin/logs`         | Query logs with filters |
+| GET    | `/api/admin/logs/actions` | List all action types   |
 
 **Audit log query parameters:**
 `date_from`, `date_to`, `user_id`, `user_email`, `document_id`, `document_name`, `action`, `search`, `page`, `limit`
@@ -261,12 +262,12 @@ Set env vars or they default to `localhost:5432/worktrips_doc_test`.
 
 ### Required GitHub Secrets
 
-| Secret | Description |
-|---|---|
-| `AZURE_WEBAPP_NAME` | App Service name |
+| Secret                  | Description                  |
+| ----------------------- | ---------------------------- |
+| `AZURE_WEBAPP_NAME`     | App Service name             |
 | `AZURE_PUBLISH_PROFILE` | Downloaded from Azure portal |
-| `AZURE_CREDENTIALS` | Service principal JSON |
-| `AZURE_RESOURCE_GROUP` | Resource group name |
+| `AZURE_CREDENTIALS`     | Service principal JSON       |
+| `AZURE_RESOURCE_GROUP`  | Resource group name          |
 
 ### App Service Configuration
 

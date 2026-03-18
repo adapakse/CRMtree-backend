@@ -1,25 +1,33 @@
-'use strict';
+"use strict";
 
-const { BlobServiceClient, StorageSharedKeyCredential, generateBlobSASQueryParameters, BlobSASPermissions, SASProtocol } = require('@azure/storage-blob');
-const { v4: uuidv4 } = require('uuid');
-const path   = require('path');
-const config = require('../config');
-const logger = require('../utils/logger');
+const {
+  BlobServiceClient,
+  StorageSharedKeyCredential,
+  generateBlobSASQueryParameters,
+  BlobSASPermissions,
+  SASProtocol,
+} = require("@azure/storage-blob");
+const { v4: uuidv4 } = require("uuid");
+const path = require("path");
+const config = require("../config");
+const logger = require("../utils/logger");
 
 let blobServiceClient;
 
 function getClient() {
   if (blobServiceClient) return blobServiceClient;
   if (config.storage.connectionString) {
-    blobServiceClient = BlobServiceClient.fromConnectionString(config.storage.connectionString);
+    blobServiceClient = BlobServiceClient.fromConnectionString(
+      config.storage.connectionString,
+    );
   } else {
     const credential = new StorageSharedKeyCredential(
       config.storage.accountName,
-      config.storage.accountKey
+      config.storage.accountKey,
     );
     blobServiceClient = new BlobServiceClient(
       `https://${config.storage.accountName}.blob.core.windows.net`,
-      credential
+      credential,
     );
   }
   return blobServiceClient;
@@ -33,8 +41,14 @@ function getContainerClient() {
  * Upload a file buffer to Azure Blob Storage.
  * @returns {{ blobPath, blobName, blobSizeBytes }}
  */
-async function uploadDocument(buffer, originalName, mimeType, documentId, versionNumber = 1) {
-  const ext      = path.extname(originalName);
+async function uploadDocument(
+  buffer,
+  originalName,
+  mimeType,
+  documentId,
+  versionNumber = 1,
+) {
+  const ext = path.extname(originalName);
   const blobName = `documents/${documentId}/v${versionNumber}_${uuidv4()}${ext}`;
   const container = getContainerClient();
 
@@ -48,7 +62,7 @@ async function uploadDocument(buffer, originalName, mimeType, documentId, versio
     },
   });
 
-  logger.info('Blob uploaded', { blobName, size: buffer.length });
+  logger.info("Blob uploaded", { blobName, size: buffer.length });
   return {
     blobPath: blobName,
     blobName: originalName,
@@ -61,15 +75,15 @@ async function uploadDocument(buffer, originalName, mimeType, documentId, versio
  */
 async function downloadDocument(blobPath) {
   const blockBlobClient = getContainerClient().getBlockBlobClient(blobPath);
-  const response        = await blockBlobClient.download(0);
+  const response = await blockBlobClient.download(0);
   const chunks = [];
   for await (const chunk of response.readableStreamBody) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return {
-    buffer:      Buffer.concat(chunks),
+    buffer: Buffer.concat(chunks),
     contentType: response.contentType,
-    size:        response.contentLength,
+    size: response.contentLength,
   };
 }
 
@@ -79,23 +93,23 @@ async function downloadDocument(blobPath) {
  * @param {number} expiresInMinutes  default 15
  */
 async function generateSasUrl(blobPath, expiresInMinutes = 15) {
-  const credential  = new StorageSharedKeyCredential(
+  const credential = new StorageSharedKeyCredential(
     config.storage.accountName,
-    config.storage.accountKey
+    config.storage.accountKey,
   );
-  const startsOn  = new Date();
+  const startsOn = new Date();
   const expiresOn = new Date(startsOn.getTime() + expiresInMinutes * 60 * 1000);
 
   const sasParams = generateBlobSASQueryParameters(
     {
       containerName: config.storage.container,
-      blobName:      blobPath,
-      permissions:   BlobSASPermissions.parse('r'),
+      blobName: blobPath,
+      permissions: BlobSASPermissions.parse("r"),
       startsOn,
       expiresOn,
-      protocol:      SASProtocol.Https,
+      protocol: SASProtocol.Https,
     },
-    credential
+    credential,
   );
 
   return `https://${config.storage.accountName}.blob.core.windows.net/${config.storage.container}/${blobPath}?${sasParams}`;
@@ -105,20 +119,20 @@ async function generateSasUrl(blobPath, expiresInMinutes = 15) {
  * Generate a SAS URL with write permissions (for Signus to retrieve document).
  */
 async function generateWriteSasUrl(blobPath, expiresInMinutes = 60) {
-  const credential  = new StorageSharedKeyCredential(
+  const credential = new StorageSharedKeyCredential(
     config.storage.accountName,
-    config.storage.accountKey
+    config.storage.accountKey,
   );
   const expiresOn = new Date(Date.now() + expiresInMinutes * 60 * 1000);
   const sasParams = generateBlobSASQueryParameters(
     {
       containerName: config.storage.container,
-      blobName:      blobPath,
-      permissions:   BlobSASPermissions.parse('rw'),
+      blobName: blobPath,
+      permissions: BlobSASPermissions.parse("rw"),
       expiresOn,
-      protocol:      SASProtocol.Https,
+      protocol: SASProtocol.Https,
     },
-    credential
+    credential,
   );
   return `https://${config.storage.accountName}.blob.core.windows.net/${config.storage.container}/${blobPath}?${sasParams}`;
 }
@@ -129,7 +143,13 @@ async function generateWriteSasUrl(blobPath, expiresInMinutes = 60) {
 async function deleteBlob(blobPath) {
   const blockBlobClient = getContainerClient().getBlockBlobClient(blobPath);
   await blockBlobClient.deleteIfExists();
-  logger.info('Blob deleted', { blobPath });
+  logger.info("Blob deleted", { blobPath });
 }
 
-module.exports = { uploadDocument, downloadDocument, generateSasUrl, generateWriteSasUrl, deleteBlob };
+module.exports = {
+  uploadDocument,
+  downloadDocument,
+  generateSasUrl,
+  generateWriteSasUrl,
+  deleteBlob,
+};
