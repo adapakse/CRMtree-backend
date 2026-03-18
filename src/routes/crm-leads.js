@@ -18,6 +18,7 @@ router.get('/',
   crmScope,
   [
     query('stage').optional().isString(),
+    query('source').optional().isString().trim(),
     query('assigned_to').optional().isUUID(),
     query('hot').optional().isBoolean().toBoolean(),
     query('search').optional().isString().trim(),
@@ -39,6 +40,10 @@ router.get('/',
       if (req.query.stage) {
         params.push(req.query.stage);
         where += ` AND l.stage = $${params.length}`;
+      }
+      if (req.query.source) {
+        params.push(req.query.source);
+        where += ` AND l.source = $${params.length}`;
       }
       if (req.query.assigned_to && req.isCrmManager) {
         params.push(req.query.assigned_to);
@@ -92,6 +97,8 @@ router.post('/',
     body('source').optional().trim(),
     body('stage').optional().isIn(['new','qualification','presentation','offer','negotiation','closed_won','closed_lost']),
     body('value_pln').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('annual_turnover_currency').optional({ nullable: true }).isString(),
+    body('online_pct').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
     body('probability').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
     body('close_date').optional({ nullable: true }).isDate(),
     body('industry').optional().trim(),
@@ -105,7 +112,7 @@ router.post('/',
     try {
       const {
         company, contact_name, contact_title, email, phone, source,
-        stage = 'new', value_pln, probability, close_date, industry,
+        stage = 'new', value_pln, annual_turnover, annual_turnover_currency, online_pct, probability, close_date, industry,
         assigned_to, tags, notes, hot = false,
       } = req.body;
 
@@ -115,14 +122,14 @@ router.post('/',
       const { rows } = await db.query(`
         INSERT INTO crm_leads
           (company, contact_name, contact_title, email, phone, source, stage,
-           value_pln, probability, close_date, industry, assigned_to,
+           value_pln, annual_turnover, annual_turnover_currency, online_pct, probability, close_date, industry, assigned_to,
            tags, notes, hot, created_by)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         RETURNING *
       `, [
         company, contact_name||null, contact_title||null, email||null,
         phone||null, source||null, stage,
-        value_pln||null, probability||null, close_date||null, industry||null,
+        value_pln||null, annual_turnover||null, annual_turnover_currency||'PLN', online_pct||null, probability||null, close_date||null, industry||null,
         ownerId, tags||[], notes||null, hot, req.user.id,
       ]);
 
@@ -484,6 +491,8 @@ router.patch('/:id',
     body('email').optional().isEmail().normalizeEmail(),
     body('stage').optional().isIn(['new','qualification','presentation','offer','negotiation','closed_won','closed_lost']),
     body('value_pln').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('annual_turnover_currency').optional({ nullable: true }).isString(),
+    body('online_pct').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
     body('probability').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
     body('assigned_to').optional().isUUID(),
     body('hot').optional().isBoolean(),
@@ -502,7 +511,7 @@ router.patch('/:id',
       if (!req.isCrmManager) delete req.body.assigned_to;
 
       const allowed = ['company','contact_name','contact_title','email','phone','source',
-                       'stage','value_pln','probability','close_date','industry',
+                       'stage','value_pln','annual_turnover_currency','online_pct','probability','close_date','industry',
                        'assigned_to','tags','notes','hot','lost_reason'];
 
       const setClauses = [];
@@ -760,8 +769,9 @@ router.post('/:id/convert',
           INSERT INTO crm_partners
             (company, contact_name, contact_title, email, phone, industry,
              lead_id, group_id, manager_id, contract_doc_id, contract_signed,
-             contract_value, notes, created_by, status)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'onboarding')
+             contract_value, notes, created_by, status,
+             annual_turnover, annual_turnover_currency, online_pct, tags)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'onboarding',$15,$16,$17,$18)
           RETURNING *
         `, [
           lead.company, lead.contact_name, lead.contact_title, lead.email,
@@ -769,6 +779,8 @@ router.post('/:id/convert',
           req.body.group_id||null, lead.assigned_to,
           req.body.contract_doc_id||null, req.body.contract_signed||null,
           req.body.contract_value||null, lead.notes, req.user.id,
+          lead.value_pln||null, lead.annual_turnover_currency||'PLN',
+          lead.online_pct||null, lead.tags||[],
         ]);
 
         await client.query(
