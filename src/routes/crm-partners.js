@@ -19,6 +19,8 @@ router.get('/',
   [
     query('status').optional().isString(),
     query('group_id').optional().isInt().toInt(),
+    query('manager_id').optional().isUUID(),
+    query('industry').optional().isString().trim(),
     query('search').optional().isString().trim(),
     query('page').optional().isInt({ min: 1 }).toInt(),
     query('limit').optional().isInt({ min: 1, max: 200 }).toInt(),
@@ -42,6 +44,14 @@ router.get('/',
       if (req.query.group_id) {
         params.push(req.query.group_id);
         where += ` AND p.group_id = $${params.length}`;
+      }
+      if (req.query.manager_id && req.isCrmManager) {
+        params.push(req.query.manager_id);
+        where += ` AND p.manager_id = $${params.length}`;
+      }
+      if (req.query.industry) {
+        params.push(req.query.industry);
+        where += ` AND p.industry ILIKE $${params.length}`;
       }
       if (req.query.search) {
         params.push(`%${req.query.search}%`);
@@ -212,7 +222,7 @@ router.get('/:id',
           l.company       AS lead_company,
           COALESCE(
             json_agg(DISTINCT jsonb_build_object(
-              'id',gm.id,'company',gm.company,'status',gm.status,'arr',gm.arr
+              'id',gm.id,'company',gm.company,'status',gm.status,'annual_turnover',gm.annual_turnover
             )) FILTER (WHERE gm.id IS NOT NULL AND gm.id != p.id), '[]'
           ) AS group_siblings,
           COALESCE(
@@ -275,7 +285,9 @@ router.patch('/:id',
     body('billing_email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
     body('status').optional().isIn(['onboarding','active','inactive','churned']),
     body('commission_basis').optional({ nullable: true }).isIn(['segmenty','rezerwacje','progi_obrotowe','nie_dotyczy']),
-    body('arr').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('annual_turnover').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('annual_turnover_currency').optional({ nullable: true }).isString(),
+    body('online_pct').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
     body('active_users').optional({ nullable: true }).isInt({ min: 0 }),
     body('license_count').optional({ nullable: true }).isInt({ min: 0 }),
     body('group_id').optional({ nullable: true }).isInt().toInt(),
@@ -288,7 +300,16 @@ router.patch('/:id',
     body('deposit_value').optional({ nullable: true }).isFloat({ min: 0 }),
     body('commission_value').optional({ nullable: true }).isFloat({ min: 0 }),
   ],
-  validate,
+  (req, res, next) => {
+    const { validationResult } = require('express-validator');
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      console.error('[PATCH /partners/:id] Validation errors:', JSON.stringify(errors.array(), null, 2));
+      console.error('[PATCH /partners/:id] Body:', JSON.stringify(req.body, null, 2));
+      return res.status(400).json({ error: 'Validation failed', details: errors.array() });
+    }
+    next();
+  },
   async (req, res, next) => {
     try {
       const id = parseInt(req.params.id);
@@ -320,12 +341,12 @@ router.patch('/:id',
 
       const allowed = ['company','partner_number','nip','address','contact_name','contact_title','email','phone',
                        'industry','group_id','manager_id','contract_doc_id','contract_signed',
-                       'contract_expires','contract_value','status','arr','license_count',
+                       'contract_expires','contract_value','status','annual_turnover','annual_turnover_currency','online_pct','license_count',
                        'active_users','onboarding_step','notes',
                        'billing_contact_name','billing_contact_title','billing_email','billing_phone',
                        'credit_limit_value','credit_limit_currency',
                        'deposit_value','deposit_currency','deposit_date_in','deposit_date_out',
-                       'commission_value','commission_basis'];
+                       'commission_value','commission_basis','tags'];
 
       const setClauses = [];
       const params     = [];

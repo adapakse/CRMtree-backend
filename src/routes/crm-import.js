@@ -227,8 +227,9 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
         INSERT INTO crm_partners
           (company, partner_number, nip, address, contact_name, contact_title, email, phone,
            industry, group_id, manager_id, contract_signed, contract_expires,
-           contract_value, license_count, status, notes, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+           status, notes,
+           annual_turnover, annual_turnover_currency, online_pct, tags, created_by)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
         ON CONFLICT DO NOTHING
       `, [
         company,
@@ -244,10 +245,12 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
         req.user.id,
         nDate(row.contract_signed  || row.data_podpisania),
         nDate(row.contract_expires || row.data_wygasniecia),
-        nFloat(row.contract_value  || row.wartosc_umowy),
-        nInt(row.license_count     || row.liczba_licencji),
         status,
         nStr(row.notes || row.notatki),
+        nFloat(row.annual_turnover || row.obrot_roczny || row.contract_value || row.wartosc_umowy),
+        nStr(row.annual_turnover_currency || row.waluta) || 'PLN',
+        nInt(row.online_pct || row.procent_online),
+        nTags(row.tags || row.tagi),
         req.user.id,
       ]);
       imported++;
@@ -316,8 +319,8 @@ router.get('/template/:type', (req, res) => {
       'Przykład Sp. z o.o.,Jan Kowalski,CEO,jan@example.pl,+48600000000,targi,qualification,150000,40,2025-12-31,IT,Notatka,false,tag1|tag2',
     ].join('\n'),
     partners: [
-      'company,partner_number,nip,address,contact_name,contact_title,email,phone,industry,group_name,contract_signed,contract_expires,contract_value,license_count,status,notes',
-      '"Przykład Partner Sp. z o.o.",1234567890,"ul. Przykładowa 1, Warszawa",Anna Nowak,VP,anna@example.pl,+48601000000,Transport,Magellan Holdings,2025-01-01,2026-01-01,200000,50,active,Uwagi',
+      'company,partner_number,nip,address,contact_name,contact_title,email,phone,industry,group_name,contract_signed,contract_expires,status,notes,annual_turnover,annual_turnover_currency,online_pct,tags',
+      '"Przykład Partner Sp. z o.o.","P-0001","1234567890","ul. Przykładowa 1, Warszawa","Anna Nowak","VP","anna@example.pl","+48601000000","Transport","Magellan Holdings","2025-01-01","2026-01-01","active","Uwagi","5000000","PLN","30","tag1|tag2"',
     ].join('\n'),
   };
 
