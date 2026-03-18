@@ -12,11 +12,11 @@ const { injectAuditContext } = require("../middleware/errorHandler");
 router.get("/", requireAuth, async (req, res, next) => {
   try {
     const { rows } = await db.query(
-      `SELECT s.key, s.value, s.label, s.description, s.value_type, s.category,
+      `SELECT key, value, label, description, value_type, category,
               s.updated_at, u.display_name AS updated_by_name
        FROM app_settings s
        LEFT JOIN users u ON u.id = s.updated_by
-       ORDER BY s.category, s.key`,
+       ORDER BY category, key`
     );
 
     // Build flat map for easy consumption: { expiration_red_days: 90, ... }
@@ -70,37 +70,14 @@ router.put(
           .json({ error: `Unknown settings keys: ${unknown.join(", ")}` });
       }
 
-      // Validate types
-      const typeMap = Object.fromEntries(
-        existing.map((r) => [r.key, r.value_type]),
-      );
-      for (const [key, val] of Object.entries(updates)) {
-        if (
-          typeMap[key] === "number" &&
-          (isNaN(Number(val)) || Number(val) < 0)
-        ) {
-          return res
-            .status(400)
-            .json({ error: `${key} must be a non-negative number` });
-        }
-      }
-
-      // Upsert each setting
-      for (const [key, val] of Object.entries(updates)) {
-        await db.query(
-          `UPDATE app_settings SET value = $1, updated_at = now(), updated_by = $2 WHERE key = $3`,
-          [String(val), req.user.id, key],
-        );
-      }
-
-      // Return fresh settings
-      const { rows } = await db.query(
-        `SELECT s.key, s.value, s.label, s.description, s.value_type, s.category,
+    // Return fresh settings
+    const { rows } = await db.query(
+      `SELECT key, value, label, description, value_type, category,
               s.updated_at, u.display_name AS updated_by_name
        FROM app_settings s
        LEFT JOIN users u ON u.id = s.updated_by
-       ORDER BY s.category, s.key`,
-      );
+       ORDER BY category, key`
+    );
 
       const flat = {};
       for (const row of rows) {

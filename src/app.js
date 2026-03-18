@@ -28,7 +28,16 @@ const logRoutes = require("./routes/logs");
 const attachmentRoutes = require("./routes/attachments");
 const settingsRoutes = require("./routes/settings");
 
-require("./middleware/auth");
+// ── CRM Routes ────────────────────────────────────────────── ★ DODANE
+const crmLeadsRoutes        = require('./routes/crm-leads');
+const crmPartnersRoutes     = require('./routes/crm-partners');
+const crmGroupsRoutes       = require('./routes/crm-groups');
+const crmDashboardRoutes    = require('./routes/crm-dashboard');
+const crmTransactionsRoutes = require('./routes/crm-transactions');
+const crmImportRoutes       = require('./routes/crm-import');
+const crmSalesDataRoutes    = require('./routes/crm-sales-data');
+
+require('./middleware/auth');
 
 const app = express();
 
@@ -52,14 +61,13 @@ app.use(
 );
 
 // ─── CORS ──────────────────────────────────────────────────
-app.use(
-  cors({
-    origin: [config.frontendUrl, config.appUrl].filter(Boolean),
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-  }),
-);
+app.use(cors({
+  origin:      [config.frontendUrl, config.appUrl].filter(Boolean),
+  credentials: true,
+  methods:     ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  // ★ dodano X-CRM-API-Key do allowedHeaders
+  allowedHeaders: ['Content-Type','Authorization','X-Requested-With','X-CRM-API-Key'],
+}));
 
 // ─── Rate limiter ─────────────────────────────────────────
 app.use(
@@ -140,6 +148,15 @@ app.use("/api/admin/settings", settingsRoutes);
 app.use("/api/groups", groupRoutes);
 app.use("/api/document-groups", documentGroupRoutes);
 app.use("/api/documents/:documentId/attachments", attachmentRoutes);
+
+// ── CRM API Routes ────────────────────────────────────────── ★ DODANE
+app.use('/api/crm/leads',        crmLeadsRoutes);
+app.use('/api/crm/partners',     crmPartnersRoutes);
+app.use('/api/crm/groups',       crmGroupsRoutes);
+app.use('/api/crm/dashboard',    crmDashboardRoutes);
+app.use('/api/crm/transactions', crmTransactionsRoutes);
+app.use('/api/crm/import',       crmImportRoutes);
+app.use('/api/crm/sales-data',   crmSalesDataRoutes);
 
 // ─── Workflow global endpoints ─────────────────────────────
 const { requireAuth } = require("./middleware/auth");
@@ -225,17 +242,10 @@ app.get(
 );
 
 // ── GET /api/workflow/kanban-docs ─────────────────────────
-// Non-admins see:
-//   a) docs in groups they belong to (existing behaviour)
-//   b) docs where they have an active (pending/in_progress) task — NEW
-app.get(
-  "/api/workflow/kanban-docs",
-  requireAuth,
-  injectAuditContext,
-  async (req, res, next) => {
-    try {
-      const db = require("./config/database");
-      const isAdmin = req.user.is_admin;
+app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req, res, next) => {
+  try {
+    const db = require('./config/database');
+    const isAdmin = req.user.is_admin;
 
       const groupFilter = isAdmin
         ? ""

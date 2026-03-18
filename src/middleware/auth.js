@@ -77,8 +77,8 @@ passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser(async (id, done) => {
   try {
     const { rows } = await db.query(
-      "SELECT id, email, first_name, last_name, display_name, is_admin, is_active FROM users WHERE id = $1",
-      [id],
+      'SELECT id, email, first_name, last_name, display_name, is_admin, is_active, crm_role FROM users WHERE id = $1',
+      [id]
     );
     done(null, rows[0] || null);
   } catch (err) {
@@ -127,8 +127,8 @@ async function requireAuth(req, res, next) {
     });
     // Load fresh user from DB to capture role changes
     const { rows } = await db.query(
-      "SELECT id, email, first_name, last_name, display_name, is_admin, is_active FROM users WHERE id = $1",
-      [decoded.sub],
+      'SELECT id, email, first_name, last_name, display_name, is_admin, is_active, crm_role FROM users WHERE id = $1',
+      [decoded.sub]
     );
     if (!rows.length || !rows[0].is_active) {
       return res.status(401).json({ error: "User not found or inactive" });
