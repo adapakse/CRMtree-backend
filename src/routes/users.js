@@ -1,4 +1,4 @@
-s"use strict";
+"use strict";
 
 const router = require("express").Router();
 const { body, query, param } = require("express-validator");
