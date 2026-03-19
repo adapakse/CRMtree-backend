@@ -222,7 +222,7 @@ router.get('/:id',
           l.company       AS lead_company,
           COALESCE(
             json_agg(DISTINCT jsonb_build_object(
-              'id',gm.id,'company',gm.company,'status',gm.status,'annual_turnover',gm.annual_turnover
+              'id',gm.id,'company',gm.company,'status',gm.status,'contract_value',gm.contract_value
             )) FILTER (WHERE gm.id IS NOT NULL AND gm.id != p.id), '[]'
           ) AS group_siblings,
           COALESCE(
@@ -285,9 +285,6 @@ router.patch('/:id',
     body('billing_email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
     body('status').optional().isIn(['onboarding','active','inactive','churned']),
     body('commission_basis').optional({ nullable: true }).isIn(['segmenty','rezerwacje','progi_obrotowe','nie_dotyczy']),
-    body('annual_turnover').optional({ nullable: true }).isFloat({ min: 0 }),
-    body('annual_turnover_currency').optional({ nullable: true }).isString(),
-    body('online_pct').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
     body('active_users').optional({ nullable: true }).isInt({ min: 0 }),
     body('license_count').optional({ nullable: true }).isInt({ min: 0 }),
     body('group_id').optional({ nullable: true }).isInt().toInt(),
@@ -299,6 +296,9 @@ router.patch('/:id',
     body('credit_limit_value').optional({ nullable: true }).isFloat({ min: 0 }),
     body('deposit_value').optional({ nullable: true }).isFloat({ min: 0 }),
     body('commission_value').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('annual_turnover_currency').optional({ nullable: true }).isString(),
+    body('online_pct').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
+    body('tags').optional({ nullable: true }).isArray(),
   ],
   (req, res, next) => {
     const { validationResult } = require('express-validator');
@@ -341,12 +341,13 @@ router.patch('/:id',
 
       const allowed = ['company','partner_number','nip','address','contact_name','contact_title','email','phone',
                        'industry','group_id','manager_id','contract_doc_id','contract_signed',
-                       'contract_expires','contract_value','status','annual_turnover','annual_turnover_currency','online_pct','license_count',
+                       'contract_expires','contract_value','status','license_count',
                        'active_users','onboarding_step','notes',
                        'billing_contact_name','billing_contact_title','billing_email','billing_phone',
                        'credit_limit_value','credit_limit_currency',
                        'deposit_value','deposit_currency','deposit_date_in','deposit_date_out',
-                       'commission_value','commission_basis','tags'];
+                       'commission_value','commission_basis',
+                       'annual_turnover_currency','online_pct','tags'];
 
       const setClauses = [];
       const params     = [];

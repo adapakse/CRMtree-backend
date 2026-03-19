@@ -18,9 +18,9 @@ router.get('/', async (req, res, next) => {
     const { rows } = await db.query(`
       SELECT g.*, u.display_name AS manager_name,
         COUNT(p.id)::int           AS partner_count,
-        COALESCE(SUM(p.annual_turnover),0) AS total_arr,
+        COALESCE(SUM(p.contract_value),0) AS total_arr,
         COALESCE(json_agg(jsonb_build_object(
-          'id',p.id,'company',p.company,'status',p.status,'annual_turnover',p.annual_turnover,
+          'id',p.id,'company',p.company,'status',p.status,'contract_value',p.contract_value,
           'onboarding_step',p.onboarding_step
         )) FILTER (WHERE p.id IS NOT NULL), '[]') AS partners
       FROM crm_partner_groups g
@@ -57,7 +57,7 @@ router.get('/:id', [param('id').isInt()], validate, async (req, res, next) => {
     const { rows } = await db.query(`
       SELECT g.*, u.display_name AS manager_name,
         COALESCE(json_agg(jsonb_build_object(
-          'id',p.id,'company',p.company,'status',p.status,'annual_turnover',p.annual_turnover,
+          'id',p.id,'company',p.company,'status',p.status,'contract_value',p.contract_value,
           'manager_name',pu.display_name,'onboarding_step',p.onboarding_step
         )) FILTER (WHERE p.id IS NOT NULL), '[]') AS partners
       FROM crm_partner_groups g

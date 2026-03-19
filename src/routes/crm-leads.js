@@ -112,7 +112,7 @@ router.post('/',
     try {
       const {
         company, contact_name, contact_title, email, phone, source,
-        stage = 'new', value_pln, annual_turnover, annual_turnover_currency, online_pct, probability, close_date, industry,
+        stage = 'new', value_pln, annual_turnover_currency, online_pct, probability, close_date, industry,
         assigned_to, tags, notes, hot = false,
       } = req.body;
 
@@ -122,14 +122,14 @@ router.post('/',
       const { rows } = await db.query(`
         INSERT INTO crm_leads
           (company, contact_name, contact_title, email, phone, source, stage,
-           value_pln, annual_turnover, annual_turnover_currency, online_pct, probability, close_date, industry, assigned_to,
+           value_pln, annual_turnover_currency, online_pct, probability, close_date, industry, assigned_to,
            tags, notes, hot, created_by)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         RETURNING *
       `, [
         company, contact_name||null, contact_title||null, email||null,
         phone||null, source||null, stage,
-        value_pln||null, annual_turnover||null, annual_turnover_currency||'PLN', online_pct||null, probability||null, close_date||null, industry||null,
+        value_pln||null, annual_turnover_currency||'PLN', online_pct||null, probability||null, close_date||null, industry||null,
         ownerId, tags||[], notes||null, hot, req.user.id,
       ]);
 
@@ -770,8 +770,8 @@ router.post('/:id/convert',
             (company, contact_name, contact_title, email, phone, industry,
              lead_id, group_id, manager_id, contract_doc_id, contract_signed,
              contract_value, notes, created_by, status,
-             annual_turnover, annual_turnover_currency, online_pct, tags)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'onboarding',$15,$16,$17,$18)
+             annual_turnover_currency, online_pct, tags)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'onboarding',$15,$16,$17)
           RETURNING *
         `, [
           lead.company, lead.contact_name, lead.contact_title, lead.email,
@@ -779,7 +779,7 @@ router.post('/:id/convert',
           req.body.group_id||null, lead.assigned_to,
           req.body.contract_doc_id||null, req.body.contract_signed||null,
           req.body.contract_value||null, lead.notes, req.user.id,
-          lead.value_pln||null, lead.annual_turnover_currency||'PLN',
+          lead.annual_turnover_currency||'PLN',
           lead.online_pct||null, lead.tags||[],
         ]);
 
