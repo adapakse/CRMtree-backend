@@ -15,18 +15,31 @@ const config   = require('../config');
 // Na serwerze (staging/production) działają bez żadnych zmian.
 if (process.env.NODE_ENV !== 'development') {
 
-  // GET /api/auth/saml — redirect to GCP IdP
-  router.get('/saml',
-    passport.authenticate('saml', { session: false })
-  );
+  // GET /api/auth/saml — redirect to IdP
+  router.get('/saml', (req, res, next) => {
+    logger.info('[SAML] GET /saml — redirecting to IdP', {
+      entryPoint: config.saml?.entryPoint,
+      issuer:     config.saml?.issuer,
+      certDefined: !!config.saml?.idpCert,
+    });
+    passport.authenticate('saml', { session: false })(req, res, next);
+  });
 
   // POST /api/auth/saml/callback — handle SAML assertion
   router.post('/saml/callback',
     injectAuditContext,
+    (req, res, next) => {
+      logger.info('[SAML] POST /saml/callback', {
+        bodyKeys:        Object.keys(req.body || {}),
+        samlResponseOk:  !!req.body?.SAMLResponse,
+      });
+      next();
+    },
     passport.authenticate('saml', { session: false, failureRedirect: `${config.frontendUrl}/login?error=saml_failed` }),
     async (req, res) => {
       try {
         const user = req.user;
+        logger.info('[SAML] Callback success', { email: user.email });
         const accessToken = signAccessToken(user);
         const { token: refreshToken, hash } = signRefreshToken(user);
         await saveRefreshToken(user.id, hash);
@@ -39,14 +52,13 @@ if (process.env.NODE_ENV !== 'development') {
           userAgent: req.auditContext?.userAgent,
         });
 
-        // Redirect to frontend with tokens in query string
-        // (frontend should immediately store them and strip URL)
         res.redirect(
           `${config.frontendUrl}/auth/callback?` +
           `access_token=${encodeURIComponent(accessToken)}&` +
           `refresh_token=${encodeURIComponent(refreshToken)}`
         );
       } catch (err) {
+        logger.error('[SAML] Callback handler error', { err: err.message });
         res.redirect(`${config.frontendUrl}/login?error=auth_failed`);
       }
     }
