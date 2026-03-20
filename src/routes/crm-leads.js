@@ -92,7 +92,7 @@ router.post('/',
     body('company').notEmpty().trim(),
     body('contact_name').optional().trim(),
     body('contact_title').optional().trim(),
-    body('email').optional().isEmail().normalizeEmail(),
+    body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
     body('phone').optional().trim(),
     body('source').optional().trim(),
     body('stage').optional().isIn(['new','qualification','presentation','offer','negotiation','closed_won','closed_lost']),
@@ -124,7 +124,7 @@ router.post('/',
           (company, contact_name, contact_title, email, phone, source, stage,
            value_pln, annual_turnover_currency, online_pct, probability, close_date, industry, assigned_to,
            tags, notes, hot, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
         RETURNING *
       `, [
         company, contact_name||null, contact_title||null, email||null,
@@ -488,7 +488,7 @@ router.patch('/:id',
   [
     param('id').isInt(),
     body('company').optional().notEmpty().trim(),
-    body('email').optional().isEmail().normalizeEmail(),
+    body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
     body('stage').optional().isIn(['new','qualification','presentation','offer','negotiation','closed_won','closed_lost']),
     body('value_pln').optional({ nullable: true }).isFloat({ min: 0 }),
     body('annual_turnover_currency').optional({ nullable: true }).isString(),
