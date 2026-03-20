@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 /**
  * email-hooks.js
@@ -26,16 +26,16 @@
  *   emailHooks.onUserInvited({ newUser, invitedByUser: req.user }).catch(() => {});
  */
 
-const email = require('./email');
-const logger = require('./logger');
+const email = require("./email");
+const logger = require("./logger");
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 async function getUserEmail(db, userId) {
   if (!userId) return null;
   const { rows } = await db.query(
-    'SELECT email, display_name FROM users WHERE id = $1',
-    [userId]
+    "SELECT email, display_name FROM users WHERE id = $1",
+    [userId],
   );
   return rows[0] || null;
 }
@@ -46,7 +46,7 @@ async function getDocumentOwner(db, documentId) {
      FROM documents d
      JOIN users u ON u.id = d.owner_id
      WHERE d.id = $1`,
-    [documentId]
+    [documentId],
   );
   return rows[0] || null;
 }
@@ -65,24 +65,24 @@ async function onTaskAssigned({ db, task, assignerUser }) {
     if (!assignee?.email) return;
 
     const { rows } = await db.query(
-      'SELECT name, doc_number FROM documents WHERE id = $1',
-      [task.document_id]
+      "SELECT name, doc_number FROM documents WHERE id = $1",
+      [task.document_id],
     );
     const doc = rows[0];
     if (!doc) return;
 
     await email.sendTaskAssigned({
-      to:           assignee.email,
+      to: assignee.email,
       assigneeName: assignee.display_name,
-      taskType:     task.task_type,
+      taskType: task.task_type,
       documentName: doc.name,
-      docNumber:    doc.doc_number,
+      docNumber: doc.doc_number,
       assignerName: assignerUser.display_name || assignerUser.email,
-      dueDate:      task.due_date,
-      documentId:   task.document_id,
+      dueDate: task.due_date,
+      documentId: task.document_id,
     });
   } catch (err) {
-    logger.error('emailHooks.onTaskAssigned failed', { error: err.message });
+    logger.error("emailHooks.onTaskAssigned failed", { error: err.message });
   }
 }
 
@@ -110,7 +110,7 @@ async function onStatusChanged({ db, document, oldStatus, changerUser }) {
        WHERE wt.document_id = $2
          AND wt.task_status IN ('pending','in_progress')
          AND u.id != $1`,
-      [document.owner_id, document.id]
+      [document.owner_id, document.id],
     );
 
     for (const recipient of recipients) {
@@ -119,18 +119,18 @@ async function onStatusChanged({ db, document, oldStatus, changerUser }) {
       if (recipient.email === changerUser.email) continue;
 
       await email.sendDocumentStatusChanged({
-        to:            recipient.email,
+        to: recipient.email,
         recipientName: recipient.display_name,
-        documentName:  document.name,
-        docNumber:     document.doc_number,
+        documentName: document.name,
+        docNumber: document.doc_number,
         oldStatus,
-        newStatus:     document.status,
+        newStatus: document.status,
         changedByName: changerName,
-        documentId:    document.id,
+        documentId: document.id,
       });
     }
   } catch (err) {
-    logger.error('emailHooks.onStatusChanged failed', { error: err.message });
+    logger.error("emailHooks.onStatusChanged failed", { error: err.message });
   }
 }
 
@@ -144,16 +144,16 @@ async function onTaskCompleted({ db, task, completedByUser, comment }) {
     if (owner.email === completedByUser.email) return;
 
     await email.sendTaskCompleted({
-      to:              owner.email,
-      ownerName:       owner.display_name,
-      taskType:        task.task_type,
-      documentName:    owner.doc_name,
-      docNumber:       owner.doc_number,
+      to: owner.email,
+      ownerName: owner.display_name,
+      taskType: task.task_type,
+      documentName: owner.doc_name,
+      docNumber: owner.doc_number,
       completedByName: completedByUser.display_name || completedByUser.email,
       comment,
     });
   } catch (err) {
-    logger.error('emailHooks.onTaskCompleted failed', { error: err.message });
+    logger.error("emailHooks.onTaskCompleted failed", { error: err.message });
   }
 }
 
@@ -165,15 +165,15 @@ async function onTaskRejected({ db, task, rejectedByUser, comment }) {
     if (!owner?.email) return;
 
     await email.sendTaskRejected({
-      to:             owner.email,
-      ownerName:      owner.display_name,
-      documentName:   owner.doc_name,
-      docNumber:      owner.doc_number,
+      to: owner.email,
+      ownerName: owner.display_name,
+      documentName: owner.doc_name,
+      docNumber: owner.doc_number,
       rejectedByName: rejectedByUser.display_name || rejectedByUser.email,
       comment,
     });
   } catch (err) {
-    logger.error('emailHooks.onTaskRejected failed', { error: err.message });
+    logger.error("emailHooks.onTaskRejected failed", { error: err.message });
   }
 }
 
@@ -183,12 +183,12 @@ async function onUserInvited({ newUser, invitedByUser }) {
   try {
     if (!newUser.email) return;
     await email.sendUserInvitation({
-      to:            newUser.email,
-      displayName:   newUser.display_name || newUser.email,
+      to: newUser.email,
+      displayName: newUser.display_name || newUser.email,
       invitedByName: invitedByUser.display_name || invitedByUser.email,
     });
   } catch (err) {
-    logger.error('emailHooks.onUserInvited failed', { error: err.message });
+    logger.error("emailHooks.onUserInvited failed", { error: err.message });
   }
 }
 
@@ -200,14 +200,14 @@ async function onDocumentSigned({ db, document, signedByName }) {
     if (!owner?.email) return;
 
     await email.sendDocumentSigned({
-      to:            owner.email,
+      to: owner.email,
       recipientName: owner.display_name,
-      documentName:  document.name || owner.doc_name,
-      docNumber:     document.doc_number || owner.doc_number,
-      signedByName:  signedByName || 'Signus',
+      documentName: document.name || owner.doc_name,
+      docNumber: document.doc_number || owner.doc_number,
+      signedByName: signedByName || "Signus",
     });
   } catch (err) {
-    logger.error('emailHooks.onDocumentSigned failed', { error: err.message });
+    logger.error("emailHooks.onDocumentSigned failed", { error: err.message });
   }
 }
 

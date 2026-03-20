@@ -1,27 +1,27 @@
-'use strict';
+"use strict";
 
-const { Pool } = require('pg');
-const config   = require('./index');
-const logger   = require('../utils/logger');
+const { Pool } = require("pg");
+const config = require("./index");
+const logger = require("../utils/logger");
 
 const pool = new Pool({
-  host:                    config.db.host,
-  port:                    config.db.port,
-  database:                config.db.database,
-  user:                    config.db.user,
-  password:                config.db.password,
-  ssl:                     config.db.ssl ? { rejectUnauthorized: true } : false,
-  max:                     config.db.poolMax,
-  idleTimeoutMillis:       config.db.idleTimeoutMillis,
+  host: config.db.host,
+  port: config.db.port,
+  database: config.db.database,
+  user: config.db.user,
+  password: config.db.password,
+  ssl: config.db.ssl ? { rejectUnauthorized: true } : false,
+  max: config.db.poolMax,
+  idleTimeoutMillis: config.db.idleTimeoutMillis,
   connectionTimeoutMillis: config.db.connectionTimeoutMillis,
 });
 
-pool.on('error', (err) => {
-  logger.error('Unexpected PostgreSQL pool error', { error: err.message });
+pool.on("error", (err) => {
+  logger.error("Unexpected PostgreSQL pool error", { error: err.message });
 });
 
-pool.on('connect', () => {
-  logger.debug('New DB connection established');
+pool.on("connect", () => {
+  logger.debug("New DB connection established");
 });
 
 /**
@@ -34,10 +34,10 @@ async function query(text, params) {
   try {
     const result = await pool.query(text, params);
     const duration = Date.now() - start;
-    logger.debug('DB query executed', { duration, rows: result.rowCount });
+    logger.debug("DB query executed", { duration, rows: result.rowCount });
     return result;
   } catch (err) {
-    logger.error('DB query error', { query: text, error: err.message });
+    logger.error("DB query error", { query: text, error: err.message });
     throw err;
   }
 }
@@ -57,12 +57,12 @@ async function getClient() {
 async function transaction(fn) {
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    await client.query("BEGIN");
     const result = await fn(client);
-    await client.query('COMMIT');
+    await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
@@ -73,7 +73,7 @@ async function transaction(fn) {
  * Health check — used by App Service /health endpoint.
  */
 async function healthCheck() {
-  const result = await query('SELECT NOW() AS now, version() AS pg_version');
+  const result = await query("SELECT NOW() AS now, version() AS pg_version");
   return result.rows[0];
 }
 

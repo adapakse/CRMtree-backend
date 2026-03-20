@@ -1,7 +1,7 @@
-'use strict';
+"use strict";
 
-const db     = require('../config/database');
-const logger = require('../utils/logger');
+const db = require("../config/database");
+const logger = require("../utils/logger");
 
 /**
  * Load all roles for a user in one query.
@@ -14,7 +14,7 @@ async function getUserRoles(userId) {
      FROM user_group_roles ugr
      JOIN group_profiles gp ON gp.id = ugr.group_id
      WHERE ugr.user_id = $1 AND gp.is_active = TRUE`,
-    [userId]
+    [userId],
   );
   return rows;
 }
@@ -32,7 +32,8 @@ async function canRead(userId, document) {
 
   // 1. Admin check (caller should inject this from req.user)
   const { rows: userRows } = await db.query(
-    'SELECT is_admin FROM users WHERE id = $1 AND is_active = TRUE', [userId]
+    "SELECT is_admin FROM users WHERE id = $1 AND is_active = TRUE",
+    [userId],
   );
   if (!userRows.length) return false;
   if (userRows[0].is_admin) return true;
@@ -42,13 +43,13 @@ async function canRead(userId, document) {
     `SELECT id FROM workflow_tasks
      WHERE document_id = $1 AND assigned_to = $2
        AND task_status IN ('pending','in_progress')`,
-    [document.id, userId]
+    [document.id, userId],
   );
   if (taskRows.length > 0) return true;
 
   // 3. Group role
   const roles = await getUserRoles(userId);
-  const role  = roles.find(r => r.group_id === document.group_id);
+  const role = roles.find((r) => r.group_id === document.group_id);
   if (!role) return false;
   if (role.has_owner_restriction && document.owner_id !== userId) return false;
 
@@ -62,7 +63,8 @@ async function canFull(userId, document) {
   if (!document) return false;
 
   const { rows: userRows } = await db.query(
-    'SELECT is_admin FROM users WHERE id = $1 AND is_active = TRUE', [userId]
+    "SELECT is_admin FROM users WHERE id = $1 AND is_active = TRUE",
+    [userId],
   );
   if (!userRows.length) return false;
   if (userRows[0].is_admin) return true;
@@ -72,13 +74,13 @@ async function canFull(userId, document) {
     `SELECT id, task_type FROM workflow_tasks
      WHERE document_id = $1 AND assigned_to = $2
        AND task_status IN ('pending','in_progress')`,
-    [document.id, userId]
+    [document.id, userId],
   );
   if (taskRows.length > 0) return true;
 
   const roles = await getUserRoles(userId);
-  const role  = roles.find(r => r.group_id === document.group_id);
-  if (!role || role.access_level !== 'full') return false;
+  const role = roles.find((r) => r.group_id === document.group_id);
+  if (!role || role.access_level !== "full") return false;
   if (role.has_owner_restriction && document.owner_id !== userId) return false;
 
   return true;
@@ -91,21 +93,24 @@ async function canFull(userId, document) {
  */
 async function buildVisibilityFilter(userId, startParamAt = 1) {
   const { rows: userRows } = await db.query(
-    'SELECT is_admin FROM users WHERE id = $1 AND is_active = TRUE', [userId]
+    "SELECT is_admin FROM users WHERE id = $1 AND is_active = TRUE",
+    [userId],
   );
-  if (!userRows.length) return { sql: '1=0', params: [], nextParamAt: startParamAt };
-  if (userRows[0].is_admin) return { sql: '1=1', params: [], nextParamAt: startParamAt };
+  if (!userRows.length)
+    return { sql: "1=0", params: [], nextParamAt: startParamAt };
+  if (userRows[0].is_admin)
+    return { sql: "1=1", params: [], nextParamAt: startParamAt };
 
   const roles = await getUserRoles(userId);
 
   const conditions = [];
-  const params     = [];
-  let   p          = startParamAt;
+  const params = [];
+  let p = startParamAt;
 
   // Workflow task access
   conditions.push(
     `d.id IN (SELECT document_id FROM workflow_tasks
-              WHERE assigned_to = $${p} AND task_status IN ('pending','in_progress'))`
+              WHERE assigned_to = $${p} AND task_status IN ('pending','in_progress'))`,
   );
   params.push(userId);
   p++;
@@ -123,10 +128,11 @@ async function buildVisibilityFilter(userId, startParamAt = 1) {
     }
   }
 
-  if (conditions.length === 0) return { sql: '1=0', params: [], nextParamAt: p };
+  if (conditions.length === 0)
+    return { sql: "1=0", params: [], nextParamAt: p };
 
   return {
-    sql: '(' + conditions.join(' OR ') + ')',
+    sql: "(" + conditions.join(" OR ") + ")",
     params,
     nextParamAt: p,
   };
@@ -138,7 +144,7 @@ async function buildVisibilityFilter(userId, startParamAt = 1) {
 async function assertCanRead(userId, document) {
   const ok = await canRead(userId, document);
   if (!ok) {
-    const err = new Error('Access denied');
+    const err = new Error("Access denied");
     err.status = 403;
     throw err;
   }
@@ -147,7 +153,7 @@ async function assertCanRead(userId, document) {
 async function assertCanFull(userId, document) {
   const ok = await canFull(userId, document);
   if (!ok) {
-    const err = new Error('Full access required');
+    const err = new Error("Full access required");
     err.status = 403;
     throw err;
   }
@@ -158,7 +164,8 @@ async function assertCanFull(userId, document) {
  */
 async function canCreateDocuments(userId) {
   const { rows } = await db.query(
-    'SELECT is_admin FROM users WHERE id = $1 AND is_active = TRUE', [userId]
+    "SELECT is_admin FROM users WHERE id = $1 AND is_active = TRUE",
+    [userId],
   );
   if (!rows.length) return false;
   if (rows[0].is_admin) return true;
@@ -168,7 +175,7 @@ async function canCreateDocuments(userId) {
      JOIN group_profiles gp ON gp.id = ugr.group_id
      WHERE ugr.user_id = $1 AND ugr.access_level = 'full' AND gp.is_active = TRUE
      LIMIT 1`,
-    [userId]
+    [userId],
   );
   return roleRows.length > 0;
 }

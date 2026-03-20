@@ -1,16 +1,16 @@
-'use strict';
+"use strict";
 
-const nodemailer = require('nodemailer');
-const config     = require('../config');
-const logger     = require('../utils/logger');
+const nodemailer = require("nodemailer");
+const config = require("../config");
+const logger = require("../utils/logger");
 
 let transporter;
 
 function getTransporter() {
   if (transporter) return transporter;
   transporter = nodemailer.createTransport({
-    host:   config.email.host,
-    port:   config.email.port,
+    host: config.email.host,
+    port: config.email.port,
     secure: config.email.secure,
     auth: {
       user: config.email.user,
@@ -21,7 +21,7 @@ function getTransporter() {
 }
 
 const FROM = `"${config.email.fromName}" <${config.email.from}>`;
-const APP  = config.appUrl;
+const APP = config.appUrl;
 
 // ─── HTML Template wrapper ─────────────────────────────────
 function wrap(title, body) {
@@ -53,9 +53,22 @@ function wrap(title, body) {
 }
 
 // ─── Email: Workflow task assigned ────────────────────────
-async function sendWorkflowAssignment({ to, assigneeName, assignerName, document, taskType, message, dueDate }) {
-  const taskLabels = { read: 'Read', edit: 'Edit', approve: 'Approve', sign: 'Sign' };
-  const taskLabel  = taskLabels[taskType] || taskType;
+async function sendWorkflowAssignment({
+  to,
+  assigneeName,
+  assignerName,
+  document,
+  taskType,
+  message,
+  dueDate,
+}) {
+  const taskLabels = {
+    read: "Read",
+    edit: "Edit",
+    approve: "Approve",
+    sign: "Sign",
+  };
+  const taskLabel = taskLabels[taskType] || taskType;
 
   const body = `
     <h2>You have a new task: ${taskLabel}</h2>
@@ -65,20 +78,26 @@ async function sendWorkflowAssignment({ to, assigneeName, assignerName, document
       <div class="doc-num">${document.docNumber}</div>
       <div class="doc-name">${document.name}</div>
     </div>
-    ${message ? `<p><strong>Message:</strong> ${message}</p>` : ''}
-    ${dueDate  ? `<p><strong>Due date:</strong> ${dueDate}</p>` : ''}
+    ${message ? `<p><strong>Message:</strong> ${message}</p>` : ""}
+    ${dueDate ? `<p><strong>Due date:</strong> ${dueDate}</p>` : ""}
     <a href="${APP}/documents/${document.id}" class="btn">Open Document →</a>
   `;
 
   await send({
     to,
     subject: `[worktrips.doc] Action required: ${taskLabel} — ${document.name}`,
-    html:    wrap(`Task: ${taskLabel}`, body),
+    html: wrap(`Task: ${taskLabel}`, body),
   });
 }
 
 // ─── Email: Document signed ───────────────────────────────
-async function sendSigningNotification({ to, ownerName, signatoryName, signatoryEmail, document }) {
+async function sendSigningNotification({
+  to,
+  ownerName,
+  signatoryName,
+  signatoryEmail,
+  document,
+}) {
   const body = `
     <h2>Document signed</h2>
     <p>Hi ${ownerName},</p>
@@ -94,7 +113,7 @@ async function sendSigningNotification({ to, ownerName, signatoryName, signatory
   await send({
     to,
     subject: `[worktrips.doc] Document signed by ${signatoryName} — ${document.name}`,
-    html:    wrap('Document Signed', body),
+    html: wrap("Document Signed", body),
   });
 }
 
@@ -103,7 +122,7 @@ async function sendExpiryWarning({ to, ownerName, document, daysLeft }) {
   const body = `
     <h2>Document expiring soon</h2>
     <p>Hi ${ownerName},</p>
-    <p>The following document will expire in <strong>${daysLeft} day${daysLeft !== 1 ? 's' : ''}</strong>:</p>
+    <p>The following document will expire in <strong>${daysLeft} day${daysLeft !== 1 ? "s" : ""}</strong>:</p>
     <div class="doc-box">
       <div class="doc-num">${document.docNumber}</div>
       <div class="doc-name">${document.name}</div>
@@ -115,23 +134,34 @@ async function sendExpiryWarning({ to, ownerName, document, daysLeft }) {
   await send({
     to,
     subject: `[worktrips.doc] Document expiring soon — ${document.name}`,
-    html:    wrap('Expiry Warning', body),
+    html: wrap("Expiry Warning", body),
   });
 }
 
 // ─── Low-level send ───────────────────────────────────────
 async function send({ to, subject, html, text }) {
   if (!config.email.pass && config.isDev) {
-    logger.info('Email (dev mock)', { to, subject });
+    logger.info("Email (dev mock)", { to, subject });
     return;
   }
   try {
-    const info = await getTransporter().sendMail({ from: FROM, to, subject, html, text });
-    logger.info('Email sent', { messageId: info.messageId, to, subject });
+    const info = await getTransporter().sendMail({
+      from: FROM,
+      to,
+      subject,
+      html,
+      text,
+    });
+    logger.info("Email sent", { messageId: info.messageId, to, subject });
   } catch (err) {
-    logger.error('Email send failed', { to, subject, error: err.message });
+    logger.error("Email send failed", { to, subject, error: err.message });
     // Don't throw — email failures are non-fatal
   }
 }
 
-module.exports = { sendWorkflowAssignment, sendSigningNotification, sendExpiryWarning, send };
+module.exports = {
+  sendWorkflowAssignment,
+  sendSigningNotification,
+  sendExpiryWarning,
+  send,
+};
