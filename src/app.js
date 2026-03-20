@@ -299,18 +299,9 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
   },
 );
 
-// ─── 404 & error handler ──────────────────────────────────
-if (process.env.NODE_ENV === "development") {
-  app.post("/api/auth/dev-login", async (req, res) => {
-    const { rows } = await require("./config/database").query(
-      "SELECT * FROM users WHERE email = $1",
-      [req.body.email],
-    );
-    if (!rows.length) return res.status(404).json({ error: "User not found" });
-    const { signAccessToken } = require("./middleware/auth");
-    res.json({ access_token: signAccessToken(rows[0]) });
-  });
-}
+// ─── 404 & error handler ──────────────────────────
+// dev-login is registered in routes/auth.js (active only when NODE_ENV=development)
+
 
 app.use(notFound);
 app.use(errorHandler);
