@@ -22,6 +22,9 @@ router.get('/',
     query('assigned_to').optional().isUUID(),
     query('hot').optional().isBoolean().toBoolean(),
     query('search').optional().isString().trim(),
+    query('close_date_from').optional().isDate(),
+    query('close_date_to').optional().isDate(),
+    query('lost_reason').optional().isString().trim(),
     query('page').optional().isInt({ min: 1 }).toInt(),
     query('limit').optional().isInt({ min: 1, max: 200 }).toInt(),
   ],
@@ -55,6 +58,18 @@ router.get('/',
       if (req.query.search) {
         params.push(`%${req.query.search}%`);
         where += ` AND (l.company ILIKE $${params.length} OR l.contact_name ILIKE $${params.length} OR l.email ILIKE $${params.length})`;
+      }
+      if (req.query.close_date_from) {
+        params.push(req.query.close_date_from);
+        where += ` AND l.close_date >= $${params.length}::date`;
+      }
+      if (req.query.close_date_to) {
+        params.push(req.query.close_date_to);
+        where += ` AND l.close_date <= $${params.length}::date`;
+      }
+      if (req.query.lost_reason) {
+        params.push(req.query.lost_reason);
+        where += ` AND l.lost_reason = $${params.length}`;
       }
 
       const countParams = [...params];
@@ -304,11 +319,32 @@ router.get('/report',
   [
     query('date_from').optional().isDate(),
     query('date_to').optional().isDate(),
+    query('period_end').optional().isDate(),   // pełny koniec okresu dla close_date
     query('assigned_to').optional().isUUID(),
   ],
   validate,
   async (req, res, next) => {
     try {
+      // Kursy walut z app_settings (pkt 10/11)
+      const { rows: rateRows } = await db.query(
+        `SELECT key, value::numeric AS rate FROM app_settings
+         WHERE key IN ('exchange_rate_eur','exchange_rate_usd','exchange_rate_gbp','exchange_rate_chf')`
+      );
+      const rates = { EUR: 4.25, USD: 3.90, GBP: 4.90, CHF: 4.20 };
+      for (const r of rateRows) {
+        if (r.key === 'exchange_rate_eur') rates.EUR = Number(r.rate);
+        if (r.key === 'exchange_rate_usd') rates.USD = Number(r.rate);
+        if (r.key === 'exchange_rate_gbp') rates.GBP = Number(r.rate);
+        if (r.key === 'exchange_rate_chf') rates.CHF = Number(r.rate);
+      }
+      // Wyrażenie SQL przeliczające wartość leada na PLN wg kursów
+      const valPln = `(CASE COALESCE(l.annual_turnover_currency,'PLN')
+        WHEN 'EUR' THEN COALESCE(l.value_pln,0) * ${rates.EUR}
+        WHEN 'USD' THEN COALESCE(l.value_pln,0) * ${rates.USD}
+        WHEN 'GBP' THEN COALESCE(l.value_pln,0) * ${rates.GBP}
+        WHEN 'CHF' THEN COALESCE(l.value_pln,0) * ${rates.CHF}
+        ELSE COALESCE(l.value_pln,0) END)`;
+
       const conditions = [];
       const params     = [];
 
@@ -335,21 +371,34 @@ router.get('/report',
       const where    = conditions.length ? 'WHERE '    + conditions.join(' AND ') : '';
       const andWhere = conditions.length ? ' AND '     + conditions.join(' AND ') : '';
 
+      // Daty zamknięcia dla pipeline_in_period (pkt 9)
+      // period_end = pełny koniec okresu (np. 31.03 dla Q1), nie przycięty do dziś
+      const closeDateFrom = req.query.date_from  ? `'${req.query.date_from}'`  : 'NULL';
+      const closeDateTo   = req.query.period_end ? `'${req.query.period_end}'`
+                          : req.query.date_to    ? `'${req.query.date_to}'`    : 'NULL';
+
       const [kpiRes, funnelRes, monthlyRes, byRepRes, bySourceRes, lostRes] = await Promise.all([
 
-        // KPI zbiorcze
+        // KPI zbiorcze — wartości przeliczane na PLN wg kursów walut
         db.query(`
           SELECT
             COUNT(*) FILTER (WHERE l.stage NOT IN ('closed_won','closed_lost'))::int    AS active,
             COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                         AS won,
             COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                        AS lost,
             COUNT(*) FILTER (WHERE l.hot = true AND l.stage NOT IN ('closed_won','closed_lost'))::int AS hot,
-            COALESCE(SUM(l.value_pln) FILTER (WHERE l.stage NOT IN ('closed_won','closed_lost')),0)::numeric(14,2) AS pipeline_value,
-            COALESCE(SUM(l.value_pln) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)                      AS won_value,
+            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('closed_won','closed_lost')),0)::numeric(14,2) AS pipeline_value,
+            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)                      AS won_value,
             ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
               NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
             ROUND(AVG(EXTRACT(DAY FROM (l.updated_at - l.created_at)))
-              FILTER (WHERE l.stage IN ('closed_won','closed_lost')))::int                    AS avg_cycle_days
+              FILTER (WHERE l.stage IN ('closed_won','closed_lost')))::int                    AS avg_cycle_days,
+            -- pipeline_in_period: leady aktywne z close_date w wybranym przedziale (pkt 9)
+            COALESCE(SUM(${valPln}) FILTER (
+              WHERE l.stage NOT IN ('closed_won','closed_lost')
+                AND l.close_date IS NOT NULL
+                AND (${closeDateFrom} IS NULL OR l.close_date >= ${closeDateFrom}::date)
+                AND (${closeDateTo}   IS NULL OR l.close_date <= ${closeDateTo}::date)
+            ),0)::numeric(14,2) AS pipeline_in_period
           FROM crm_leads l ${where}
         `, params),
 
@@ -357,7 +406,7 @@ router.get('/report',
         db.query(`
           SELECT l.stage,
                  COUNT(*)::int                                   AS count,
-                 COALESCE(SUM(l.value_pln),0)::numeric(14,2)   AS value
+                 COALESCE(SUM(${valPln}),0)::numeric(14,2)   AS value
           FROM crm_leads l ${where}
           GROUP BY l.stage
           ORDER BY CASE l.stage
@@ -372,7 +421,7 @@ router.get('/report',
                  COUNT(*)::int                                                              AS new_leads,
                  COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                       AS won,
                  COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                      AS lost,
-                 COALESCE(SUM(l.value_pln) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2) AS won_value
+                 COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2) AS won_value
           FROM crm_leads l ${where}
           GROUP BY month
           ORDER BY month ASC
@@ -388,8 +437,8 @@ router.get('/report',
                      COUNT(*) FILTER (WHERE l.stage NOT IN ('closed_won','closed_lost'))::int         AS active,
                      COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                             AS won,
                      COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                            AS lost,
-                     COALESCE(SUM(l.value_pln) FILTER (WHERE l.stage NOT IN ('closed_won','closed_lost')),0)::numeric(14,2) AS pipeline_value,
-                     COALESCE(SUM(l.value_pln) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2) AS won_value,
+                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('closed_won','closed_lost')),0)::numeric(14,2) AS pipeline_value,
+                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2) AS won_value,
                      ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
                        NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
                      ROUND(AVG(EXTRACT(DAY FROM (l.updated_at - l.created_at)))
@@ -426,7 +475,7 @@ router.get('/report',
       ]);
 
       res.json({
-        kpi:          kpiRes.rows[0] || {},
+        kpi:          { ...(kpiRes.rows[0] || {}), pipeline_in_period: kpiRes.rows[0]?.pipeline_in_period ?? 0 },
         funnel:       funnelRes.rows,
         monthly:      monthlyRes.rows,
         by_rep:       byRepRes.rows,

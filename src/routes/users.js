@@ -7,13 +7,26 @@ const audit = require("../services/auditService");
 const { requireAuth, requireAdmin } = require("../middleware/auth");
 const { validate, injectAuditContext } = require("../middleware/errorHandler");
 
-router.use(requireAuth, requireAdmin, injectAuditContext);
+router.use(requireAuth, injectAuditContext);
+
+// Middleware: admin LUB sales_manager
+function requireAdminOrSalesManager(req, res, next) {
+  if (req.user?.is_admin || req.user?.crm_role === 'sales_manager') return next();
+  return res.status(403).json({ error: 'Admin access required' });
+}
+
+// Middleware: tylko admin (dla operacji tworzenia/usuwania userów i zmiany is_admin)
+function requireAdminOnly(req, res, next) {
+  if (req.user?.is_admin) return next();
+  return res.status(403).json({ error: 'Admin access required' });
+}
 
 // ────────────────────────────────────────────────────────────
 // POST /api/admin/users — create user manually
 // ────────────────────────────────────────────────────────────
 router.post(
   "/",
+  requireAdminOnly,
   [
     body('email').notEmpty().isEmail().normalizeEmail(),
     body('first_name').notEmpty().isString().trim().isLength({ max: 100 }),
@@ -59,6 +72,7 @@ router.post(
 // ────────────────────────────────────────────────────────────
 router.get(
   "/",
+  requireAdminOrSalesManager,
   [
     query('search').optional().isString().trim(),
     query('group_id').optional().isUUID(),
@@ -143,7 +157,7 @@ router.get(
 // ────────────────────────────────────────────────────────────
 // GET /api/admin/users/:id
 // ────────────────────────────────────────────────────────────
-router.get("/:id", [param("id").isUUID()], validate, async (req, res, next) => {
+router.get("/:id", requireAdminOrSalesManager, [param("id").isUUID()], validate, async (req, res, next) => {
   try {
     const { rows } = await db.query(
       `SELECT u.*, json_agg(json_build_object(
@@ -170,6 +184,7 @@ router.get("/:id", [param("id").isUUID()], validate, async (req, res, next) => {
 // ────────────────────────────────────────────────────────────
 router.patch(
   "/:id",
+  requireAdminOrSalesManager,
   [
     param('id').isUUID(),
     body('email').optional().isEmail().normalizeEmail(),
@@ -190,6 +205,13 @@ router.patch(
       if (!before.length)
         return res.status(404).json({ error: "User not found" });
 
+      // Sales Manager nie może zmieniać is_admin ani przypisywać innych sales_manager
+      if (!req.user?.is_admin) {
+        delete req.body.is_admin;
+        if (req.body.crm_role === 'sales_manager' && before[0].crm_role !== 'sales_manager') {
+          return res.status(403).json({ error: 'Only admin can assign sales_manager role' });
+        }
+      }
       const allowed = ['email', 'first_name', 'last_name', 'is_active', 'is_admin', 'crm_role']; // ★ crm_role
       const setClauses = [];
       const params = [];
@@ -238,6 +260,7 @@ router.patch(
 // ────────────────────────────────────────────────────────────
 router.post(
   "/:id/roles",
+  requireAdminOrSalesManager,
   [
     param("id").isUUID(),
     body("group_id").notEmpty().isUUID(),
@@ -294,6 +317,7 @@ router.post(
 // ────────────────────────────────────────────────────────────
 router.delete(
   "/:id/roles/:roleId",
+  requireAdminOnly,
   [param("id").isUUID(), param("roleId").isUUID()],
   validate,
   async (req, res, next) => {
