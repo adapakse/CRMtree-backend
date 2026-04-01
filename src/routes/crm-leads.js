@@ -5,8 +5,9 @@
 
 const router = require('express').Router();
 const { body, query, param } = require('express-validator');
-const db    = require('../config/database');
-const audit = require('../services/auditService');
+const db     = require('../config/database');
+const audit  = require('../services/auditService');
+const logger = require('../utils/logger');
 const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
 const { crmAuth, crmScope, requireCrmManager, assertOwnership } = require('../middleware/crm-rbac');
@@ -138,14 +139,17 @@ router.post('/',
         INSERT INTO crm_leads
           (company, contact_name, contact_title, email, phone, source, stage,
            value_pln, annual_turnover_currency, online_pct, probability, close_date, industry, assigned_to,
-           tags, notes, hot, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+           tags, notes, hot, created_by, agent_name, agent_email, agent_phone,
+           website, logo_url)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
         RETURNING *
       `, [
         company, contact_name||null, contact_title||null, email||null,
         phone||null, source||null, stage,
         value_pln||null, annual_turnover_currency||'PLN', online_pct||null, probability||null, close_date||null, industry||null,
         ownerId, tags||[], notes||null, hot, req.user.id,
+        req.body.agent_name||null, req.body.agent_email||null, req.body.agent_phone||null,
+        req.body.website||null, req.body.logo_url||null,
       ]);
 
       await audit.log({
@@ -176,6 +180,28 @@ router.get('/users', async (req, res, next) => {
       ORDER BY display_name
     `);
     res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// ── GET /api/crm/leads/sources — słownik źródeł z app_settings ──
+router.get('/sources', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT value FROM app_settings WHERE key = 'crm_lead_sources'`
+    );
+    const LABELS = {
+      strona_www: 'Strona www', polecenie: 'Polecenie', cold_call: 'Cold call',
+      linkedin: 'LinkedIn', targi: 'Targi / Wydarzenie', partner: 'Partner',
+      agent: 'Agent', kampania: 'Kampania email', inbound: 'Inbound', inne: 'Inne',
+    };
+    let keys = [];
+    if (rows.length) {
+      try { keys = JSON.parse(rows[0].value); } catch(e) { keys = []; }
+    }
+    // Fallback if setting not defined
+    if (!keys.length) keys = ['strona_www','polecenie','cold_call','linkedin','targi','partner','agent','kampania','inbound','inne'];
+    const sources = keys.map(k => ({ value: k, label: LABELS[k] || k }));
+    res.json(sources);
   } catch (err) { next(err); }
 });
 
@@ -493,6 +519,144 @@ router.get('/report',
 // Łączy: email userów, email z leada (lub partnera).
 
 
+// ── POST /api/crm/leads/enrich ── scrape + logo blob ─────────────
+// MUST be before /:id routes
+router.post('/enrich',
+  [body('domain').notEmpty().trim()], validate,
+  async (req, res, next) => {
+    const https  = require('https');
+    const http   = require('http');
+    const { URL: NURL } = require('url');
+    const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
+    const config = require('../config');
+
+    function normaliseDomain(d) {
+      d = d.trim().replace(/^https?:\/\//i,'').split('/')[0].toLowerCase();
+      if (!d.includes('.')) d += '.pl';
+      return d;
+    }
+
+    function httpGet(urlStr, opts) {
+      opts = opts || {};
+      return new Promise(function(resolve, reject) {
+        var u;
+        try { u = new NURL(urlStr.startsWith('http') ? urlStr : 'https://' + urlStr); }
+        catch(e) { return reject(e); }
+        var mod = u.protocol === 'https:' ? https : http;
+        var redirects = opts._r || 0;
+        var req2 = mod.get(u.href, {
+          timeout: opts.timeout || 8000,
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible)', 'Accept': opts.accept || 'text/html,*/*' },
+        }, function(res2) {
+          var loc = res2.headers && res2.headers.location;
+          if ([301,302,303,307,308].indexOf(res2.statusCode) >= 0 && loc && redirects < 3) {
+            res2.resume();
+            return httpGet(loc, Object.assign({}, opts, {_r: redirects+1})).then(resolve).catch(reject);
+          }
+          var chunks = [];
+          res2.on('data', function(c){ chunks.push(c); });
+          res2.on('end', function(){ resolve({ status: res2.statusCode, headers: res2.headers, body: Buffer.concat(chunks) }); });
+          res2.on('error', reject);
+        });
+        req2.on('timeout', function(){ req2.destroy(); reject(new Error('timeout')); });
+        req2.on('error', reject);
+      });
+    }
+
+    async function scrape(domain) {
+      var result = { company: null, email: null, phone: null, logoUrl: null };
+      var html = '';
+      try {
+        var r = await httpGet('https://' + domain, { timeout: 8000 });
+        if (r.status >= 200 && r.status < 400) html = r.body.toString('utf8').slice(0, 200000);
+      } catch(e1) {
+        try {
+          var r2 = await httpGet('http://' + domain, { timeout: 6000 });
+          html = r2.body.toString('utf8').slice(0, 200000);
+        } catch(e2) { return result; }
+      }
+      if (!html) return result;
+
+      // Company name
+      var tM = html.match(/<title[^>]*>([^<]{2,100})<\/title>/i);
+      if (tM) result.company = tM[1].replace(/[|\u2013\-].*$/, '').replace(/\s+/g,' ').trim().slice(0,100);
+      var ogN = html.match(/property="og:site_name"[^>]*content="([^"]{2,80})"/i)
+             || html.match(/content="([^"]{2,80})"[^>]*property="og:site_name"/i);
+      if (ogN) result.company = ogN[1].trim();
+
+      // Logo
+      var ogImg   = html.match(/property="og:image"[^>]*content="([^"]{5,})"/i) || html.match(/content="([^"]{5,})"[^>]*property="og:image"/i);
+      var appleIc = html.match(/rel="apple-touch-icon"[^>]+href="([^"]+)"/i);
+      var favL    = html.match(/rel="(?:shortcut )?icon"[^>]+href="([^"]+)"/i);
+      var logoRaw = (ogImg || appleIc || favL || [])[1] || '/favicon.ico';
+      result.logoUrl = logoRaw.startsWith('http') ? logoRaw : 'https://' + domain + (logoRaw.startsWith('/') ? '' : '/') + logoRaw;
+
+      // Email
+      var emails = (html.match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi) || [])
+        .filter(function(e){ return !['example','sentry','google','schema','w3','noreply','privacy'].some(function(x){ return e.includes(x); }); });
+      if (emails.length) result.email = emails[0];
+
+      // Phone (Polish)
+      var plain = html.replace(/<[^>]+>/g, ' ');
+      var phones = plain.match(/(?:\+48[\s\-]?)?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d/g) || [];
+      if (phones.length) result.phone = phones[0].replace(/[\s\-]/g,'');
+
+      return result;
+    }
+
+    async function uploadLogo(logoUrl) {
+      try {
+        var r = await httpGet(logoUrl, { accept: 'image/*,*/*', timeout: 5000 });
+        if (r.status !== 200 || r.body.length < 100) return null;
+        var mime = (r.headers && r.headers['content-type']) || 'image/png';
+        var ext = mime.includes('svg') ? '.svg' : mime.includes('webp') ? '.webp' : mime.includes('jp') ? '.jpg' : mime.includes('ico') ? '.ico' : '.png';
+        var safeName = logoUrl.replace(/[^a-z0-9]/gi,'_').slice(-40);
+        var blobName = 'logos/' + Date.now() + '_' + safeName + ext;
+        var blobSvc;
+        if (config.storage.connectionString) {
+          blobSvc = BlobServiceClient.fromConnectionString(config.storage.connectionString);
+        } else {
+          blobSvc = new BlobServiceClient(
+            'https://' + config.storage.accountName + '.blob.core.windows.net',
+            new StorageSharedKeyCredential(config.storage.accountName, config.storage.accountKey)
+          );
+        }
+        var cc = blobSvc.getContainerClient(config.storage.container);
+        var bc = cc.getBlockBlobClient(blobName);
+        await bc.upload(r.body, r.body.length, { blobHTTPHeaders: { blobContentType: mime } });
+        return blobName;
+      } catch(e) {
+        logger.warn('Logo upload failed', { error: e.message });
+        return null;
+      }
+    }
+
+    try {
+      var domain = normaliseDomain(req.body.domain);
+      logger.info('Enriching domain', { domain });
+
+      var scraped = await scrape(domain);
+      logger.info('Scrape result', { company: scraped.company, email: scraped.email, logoUrl: scraped.logoUrl });
+
+      var logo_blob_path = null;
+      if (scraped.logoUrl) {
+        logo_blob_path = await uploadLogo(scraped.logoUrl);
+        logger.info('Logo upload', { logo_blob_path });
+      }
+
+      res.json({
+        domain:          domain,
+        company:         scraped.company  || null,
+        email:           scraped.email    || null,
+        phone:           scraped.phone    || null,
+        nip:             null,
+        regon:           null,
+        logo_blob_path:  logo_blob_path,
+      });
+    } catch(err) { next(err); }
+  }
+);
+
 router.get('/:id',
   crmScope,
   [param('id').isInt()], validate,
@@ -561,7 +725,8 @@ router.patch('/:id',
 
       const allowed = ['company','contact_name','contact_title','email','phone','source',
                        'stage','value_pln','annual_turnover_currency','online_pct','probability','close_date','industry',
-                       'assigned_to','tags','notes','hot','lost_reason'];
+                       'assigned_to','tags','notes','hot','lost_reason',
+                       'agent_name','agent_email','agent_phone','website','logo_url'];
 
       const setClauses = [];
       const params     = [];
@@ -677,6 +842,13 @@ router.post('/:id/activities',
           duration_min||null, participants||null, meeting_location||null, req.user.id]);
 
       await db.query('UPDATE crm_leads SET updated_at=now() WHERE id=$1', [id]);
+      await audit.log({
+        user:       req.user,
+        action:     'crm_lead_update',
+        afterState: { activity_action: 'created', type, title },
+        metadata:   { lead_id: id, activity_id: rows[0].id },
+        ipAddress:  req.auditContext?.ipAddress,
+      });
       res.status(201).json(rows[0]);
     } catch (err) { next(err); }
   }
@@ -742,6 +914,13 @@ router.delete('/:id/activities/:actId',
         return res.status(403).json({ error: 'Brak uprawnień' });
       }
       await db.query('DELETE FROM crm_lead_activities WHERE id=$1', [actId]);
+      await audit.log({
+        user:        req.user,
+        action:      'crm_lead_update',
+        beforeState: { activity_action: 'deleted', type: existing[0].type, title: existing[0].title },
+        metadata:    { lead_id: leadId, activity_id: actId },
+        ipAddress:   req.auditContext?.ipAddress,
+      });
       res.status(204).end();
     } catch (err) { next(err); }
   }
@@ -751,7 +930,8 @@ router.delete('/:id/activities/:actId',
 router.get('/:id/documents', [param('id').isInt()], validate, async (req, res, next) => {
   try {
     const { rows } = await db.query(`
-      SELECT ld.*, d.name AS document_title, d.status AS document_status, d.doc_number
+      SELECT ld.*, d.name AS document_title, d.status AS document_status,
+             d.doc_number, d.doc_type
       FROM crm_lead_documents ld
       LEFT JOIN documents d ON d.id = ld.document_id
       WHERE ld.lead_id = $1
@@ -762,7 +942,7 @@ router.get('/:id/documents', [param('id').isInt()], validate, async (req, res, n
 });
 
 router.post('/:id/documents',
-  [param('id').isInt(), body('document_id').isInt(), body('doc_role').optional().trim()],
+  [param('id').isInt(), body('document_id').isUUID(), body('doc_role').optional().trim()],
   validate,
   async (req, res, next) => {
     try {
@@ -772,18 +952,53 @@ router.post('/:id/documents',
         ON CONFLICT (lead_id, document_id) DO UPDATE SET doc_role = EXCLUDED.doc_role
         RETURNING *
       `, [parseInt(req.params.id), req.body.document_id, req.body.doc_role||null, req.user.id]);
+      await audit.log({
+        user:      req.user,
+        action:    'crm_lead_update',
+        afterState: { document_action: 'linked', document_id: req.body.document_id },
+        metadata:  { lead_id: parseInt(req.params.id) },
+        ipAddress: req.auditContext?.ipAddress,
+      });
       res.status(201).json(rows[0]);
     } catch (err) { next(err); }
   }
 );
 
 router.delete('/:id/documents/:docId',
-  [param('id').isInt(), param('docId').isInt()], validate,
+  [param('id').isInt(), param('docId').isUUID()], validate,
   async (req, res, next) => {
     try {
       await db.query('DELETE FROM crm_lead_documents WHERE lead_id=$1 AND document_id=$2',
-        [parseInt(req.params.id), parseInt(req.params.docId)]);
+        [parseInt(req.params.id), req.params.docId]);
       res.status(204).end();
+    } catch (err) { next(err); }
+  }
+);
+
+// ── Historia Leada (audit_logs) ──────────────────────────────────
+router.get('/:id/history',
+  crmScope,
+  [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      // Sprawdź dostęp do leada
+      const scopeParams = [id];
+      const scope = req.scopeFilter('l', 'assigned_to', scopeParams);
+      const { rows: lead } = await db.query(
+        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope}`, scopeParams
+      );
+      if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
+
+      const { rows } = await db.query(`
+        SELECT id, user_name, user_email, action,
+               before_state, after_state, metadata, created_at
+        FROM audit_logs
+        WHERE metadata->>'lead_id' = $1::text
+        ORDER BY created_at DESC
+        LIMIT 100
+      `, [String(id)]);
+      res.json(rows);
     } catch (err) { next(err); }
   }
 );
@@ -819,8 +1034,9 @@ router.post('/:id/convert',
             (company, contact_name, contact_title, email, phone, industry,
              lead_id, group_id, manager_id, contract_doc_id, contract_signed,
              contract_value, notes, created_by, status,
-             annual_turnover_currency, online_pct, tags)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'onboarding',$15,$16,$17)
+             annual_turnover_currency, online_pct, tags,
+             agent_name, agent_email, agent_phone, logo_url)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'onboarding',$15,$16,$17,$18,$19,$20,$21)
           RETURNING *
         `, [
           lead.company, lead.contact_name, lead.contact_title, lead.email,
@@ -830,6 +1046,8 @@ router.post('/:id/convert',
           req.body.contract_value||null, lead.notes, req.user.id,
           lead.annual_turnover_currency||'PLN',
           lead.online_pct||null, lead.tags||[],
+          lead.agent_name||null, lead.agent_email||null, lead.agent_phone||null,
+          lead.logo_url||null,
         ]);
 
         await client.query(
@@ -853,6 +1071,45 @@ router.post('/:id/convert',
         client.release();
       }
     } catch (err) { next(err); }
+  }
+);
+
+
+// ── POST /api/crm/leads/enrich ── scraper + GUS + logo blob ──────
+
+// ── GET /api/crm/leads/:id/logo ── SAS URL ────────────────────────
+router.get('/:id/logo',
+  crmScope, [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        'SELECT logo_url FROM crm_leads WHERE id=$1', [parseInt(req.params.id)]
+      );
+      if (!rows.length || !rows[0].logo_url) return res.status(404).json({ error: 'Brak logo' });
+      const url = await require('../services/storageService').generateSasUrl(rows[0].logo_url, 60);
+      res.json({ url });
+    } catch(err){ next(err); }
+  }
+);
+
+// ── GET /api/crm/leads/:id/logo-img ── stream image from blob (no SAS URL issues) ──
+router.get('/:id/logo-img',
+  [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        'SELECT logo_url FROM crm_leads WHERE id=$1', [parseInt(req.params.id)]
+      );
+      if (!rows.length || !rows[0].logo_url) {
+        return res.status(404).end();
+      }
+      const storage = require('../services/storageService');
+      const { buffer, contentType } = await storage.downloadDocument(rows[0].logo_url);
+      const mime = contentType || 'image/png';
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.send(buffer);
+    } catch(err){ next(err); }
   }
 );
 

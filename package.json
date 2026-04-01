@@ -23,6 +23,7 @@
     "applicationinsights": "^3.3.1",
     "axios": "^1.7.7",
     "bcryptjs": "^2.4.3",
+    "cheerio": "^1.2.0",
     "compression": "^1.7.4",
     "cors": "^2.8.5",
     "csv-parse": "^6.1.0",

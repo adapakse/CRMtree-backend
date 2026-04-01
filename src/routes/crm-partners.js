@@ -116,6 +116,9 @@ router.post('/',
     body('contract_value').optional({ nullable: true }).isFloat({ min: 0 }),
     body('license_count').optional({ nullable: true }).isInt({ min: 1 }),
     body('notes').optional().trim(),
+    body('agent_name').optional({ nullable: true }).isString().trim(),
+    body('agent_email').optional({ nullable: true }).isString().trim(),
+    body('agent_phone').optional({ nullable: true }).isString().trim(),
     // Kontakt do spraw rozliczeń
     body('billing_contact_name').optional({ nullable: true }).trim(),
     body('billing_contact_title').optional({ nullable: true }).trim(),
@@ -347,7 +350,7 @@ router.patch('/:id',
                        'credit_limit_value','credit_limit_currency',
                        'deposit_value','deposit_currency','deposit_date_in','deposit_date_out',
                        'commission_value','commission_basis',
-                       'annual_turnover_currency','online_pct','tags'];
+                       'annual_turnover_currency','online_pct','tags','agent_name','agent_email','agent_phone'];
 
       const setClauses = [];
       const params     = [];
@@ -588,7 +591,8 @@ router.delete('/:id/activities/:actId',
 router.get('/:id/documents', [param('id').isInt()], validate, async (req, res, next) => {
   try {
     const { rows } = await db.query(`
-      SELECT pd.*, d.name AS document_title, d.status AS document_status, d.doc_number
+      SELECT pd.*, d.name AS document_title, d.status AS document_status,
+             d.doc_number, d.doc_type
       FROM crm_partner_documents pd
       LEFT JOIN documents d ON d.id = pd.document_id
       WHERE pd.partner_id = $1
@@ -599,7 +603,7 @@ router.get('/:id/documents', [param('id').isInt()], validate, async (req, res, n
 });
 
 router.post('/:id/documents',
-  [param('id').isInt(), body('document_id').isInt(), body('doc_role').optional().trim()],
+  [param('id').isInt(), body('document_id').isUUID(), body('doc_role').optional().trim()],
   validate,
   async (req, res, next) => {
     try {
@@ -615,11 +619,11 @@ router.post('/:id/documents',
 );
 
 router.delete('/:id/documents/:docId',
-  [param('id').isInt(), param('docId').isInt()], validate,
+  [param('id').isInt(), param('docId').isUUID()], validate,
   async (req, res, next) => {
     try {
       await db.query('DELETE FROM crm_partner_documents WHERE partner_id=$1 AND document_id=$2',
-        [parseInt(req.params.id), parseInt(req.params.docId)]);
+        [parseInt(req.params.id), req.params.docId]);
       res.status(204).end();
     } catch (err) { next(err); }
   }

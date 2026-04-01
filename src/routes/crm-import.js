@@ -122,12 +122,21 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
     }
 
     try {
+      // Resolve assigned_to by email
+      let assignedTo = req.user.id;
+      const assignedEmail = nStr(row.assigned_to_email || row.handlowiec_email);
+      if (assignedEmail) {
+        const { rows: uRows } = await db.query('SELECT id FROM users WHERE email ILIKE $1 LIMIT 1', [assignedEmail]).catch(() => ({ rows: [] }));
+        if (uRows.length) assignedTo = uRows[0].id;
+      }
+
       await db.query(`
         INSERT INTO crm_leads
           (company, contact_name, contact_title, email, phone, source, stage,
-           value_pln, probability, close_date, industry,
-           assigned_to, tags, notes, hot, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+           value_pln, annual_turnover_currency, probability, close_date, industry,
+           assigned_to, tags, notes, hot, created_by,
+           online_pct, agent_name, agent_email, agent_phone)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
       `, [
         company,
         nStr(row.contact_name || row.kontakt),
@@ -137,14 +146,19 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
         nStr(row.source || row.zrodlo) || 'inne',
         stage,
         nFloat(row.value_pln || row.wartosc),
+        nStr(row.annual_turnover_currency || row.waluta) || 'PLN',
         nInt(row.probability   || row.prawdopodobienstwo),
         nDate(row.close_date   || row.data_zamkniecia),
         nStr(row.industry      || row.branza),
-        req.user.id,
+        assignedTo,
         nTags(row.tags || row.tagi),
         nStr(row.notes || row.notatki),
         nBool(row.hot),
         req.user.id,
+        nInt(row.online_pct || row.procent_online),
+        nStr(row.agent_name),
+        nStr(row.agent_email),
+        nStr(row.agent_phone),
       ]);
       imported++;
     } catch (e) {
@@ -223,13 +237,29 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
     const groupId   = groupName ? (groupMap[groupName.toLowerCase()] || null) : null;
 
     try {
+      // Resolve manager by email
+      let managerId = req.user.id;
+      const managerEmail = nStr(row.manager_email || row.opiekun_email);
+      if (managerEmail) {
+        const { rows: mRows } = await db.query('SELECT id FROM users WHERE email ILIKE $1 LIMIT 1', [managerEmail]).catch(() => ({ rows: [] }));
+        if (mRows.length) managerId = mRows[0].id;
+      }
+
       await db.query(`
         INSERT INTO crm_partners
-          (company, partner_number, nip, address, contact_name, contact_title, email, phone,
-           industry, group_id, manager_id, contract_signed, contract_expires,
+          (company, partner_number, nip, address,
+           contact_name, contact_title, email, phone,
+           billing_contact_name, billing_contact_title, billing_email, billing_phone,
+           industry, group_id, manager_id,
+           contract_signed, contract_expires, contract_value,
            status, notes,
-           annual_turnover, annual_turnover_currency, online_pct, tags, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+           annual_turnover_currency, online_pct, tags,
+           credit_limit_value, credit_limit_currency,
+           deposit_value, deposit_currency, deposit_date_in, deposit_date_out,
+           commission_value, commission_basis,
+           agent_name, agent_email, agent_phone,
+           created_by)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35)
         ON CONFLICT DO NOTHING
       `, [
         company,
@@ -240,17 +270,32 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
         nStr(row.contact_title || row.stanowisko),
         nStr(row.email),
         nStr(row.phone || row.telefon),
+        nStr(row.billing_contact_name),
+        nStr(row.billing_contact_title),
+        nStr(row.billing_email),
+        nStr(row.billing_phone),
         nStr(row.industry || row.branza),
         groupId,
-        req.user.id,
+        managerId,
         nDate(row.contract_signed  || row.data_podpisania),
         nDate(row.contract_expires || row.data_wygasniecia),
+        nFloat(row.contract_value || row.wartosc_umowy),
         status,
         nStr(row.notes || row.notatki),
-        nFloat(row.annual_turnover || row.obrot_roczny || row.contract_value || row.wartosc_umowy),
         nStr(row.annual_turnover_currency || row.waluta) || 'PLN',
         nInt(row.online_pct || row.procent_online),
         nTags(row.tags || row.tagi),
+        nFloat(row.credit_limit_value),
+        nStr(row.credit_limit_currency) || null,
+        nFloat(row.deposit_value),
+        nStr(row.deposit_currency) || null,
+        nDate(row.deposit_date_in),
+        nDate(row.deposit_date_out),
+        nFloat(row.commission_value),
+        nStr(row.commission_basis) || null,
+        nStr(row.agent_name),
+        nStr(row.agent_email),
+        nStr(row.agent_phone),
         req.user.id,
       ]);
       imported++;
@@ -288,6 +333,139 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
   });
 });
 
+// ── POST /api/crm/import/documents ───────────────────────────────
+router.post('/documents', upload.single('file'), async (req, res, next) => {
+  if (!req.file) return res.status(422).json({ error: 'Plik CSV jest wymagany (pole: file)' });
+
+  let records;
+  try { records = await parseCsvBuffer(req.file.buffer); }
+  catch (e) { return res.status(422).json({ error: `Błąd parsowania CSV: ${e.message}` }); }
+
+  // Załaduj słowniki z app_settings
+  let docTypes  = ['partner_agreement','nda','it_supplier_agreement','employee_agreement'];
+  let gdprTypes = ['no_gdpr','data_processing_entrustment','data_administration'];
+  let docStatuses = ['new','being_edited','being_approved','being_signed','signed','completed','rejected'];
+  try {
+    const { rows: sets } = await db.query(
+      "SELECT key, value FROM app_settings WHERE key IN ('doc_types','doc_gdpr_types','doc_statuses')"
+    );
+    for (const s of sets) {
+      try {
+        const vals = JSON.parse(s.value);
+        if (s.key === 'doc_types') docTypes = vals;
+        if (s.key === 'doc_gdpr_types') gdprTypes = vals;
+        if (s.key === 'doc_statuses') docStatuses = vals;
+      } catch(_) {}
+    }
+  } catch(_) {}
+
+  // Załaduj mapę grup dokumentowych
+  const { rows: groups } = await db.query('SELECT id, name, display_name FROM group_profiles WHERE is_active = true').catch(() => ({ rows: [] }));
+  const groupMap = {};
+  groups.forEach(g => {
+    groupMap[g.name.toLowerCase()] = g.id;
+    if (g.display_name) groupMap[g.display_name.toLowerCase()] = g.id;
+  });
+
+  const { rows: logRows } = await db.query(
+    `INSERT INTO crm_import_logs (import_type, filename, rows_total, imported_by)
+     VALUES ('documents', $1, $2, $3) RETURNING id`,
+    [req.file.originalname, records.length, req.user.id]
+  ).catch(next);
+
+  const importId = logRows[0].id;
+  let imported = 0, skipped = 0;
+  const errors = [];
+
+  for (let i = 0; i < records.length; i++) {
+    const row    = records[i];
+    const rowNum = i + 2;
+
+    if (i === 0) console.log('[CRM Import documents] Kolumny CSV:', Object.keys(row));
+
+    const name = nStr(row.name || row.nazwa || row.document_name);
+    if (!name) {
+      errors.push({ row: rowNum, field: 'name', error: 'Pole name jest wymagane' });
+      skipped++; continue;
+    }
+
+    const docType = nStr(row.doc_type || row.typ_dokumentu) || docTypes[0];
+    if (!docTypes.includes(docType)) {
+      errors.push({ row: rowNum, field: 'doc_type', error: `Nieznany typ dokumentu: ${docType}. Dostępne: ${docTypes.join(', ')}` });
+      skipped++; continue;
+    }
+
+    const gdprType = nStr(row.gdpr_type || row.typ_gdpr) || 'no_gdpr';
+    if (!gdprTypes.includes(gdprType)) {
+      errors.push({ row: rowNum, field: 'gdpr_type', error: `Nieznany typ GDPR: ${gdprType}. Dostępne: ${gdprTypes.join(', ')}` });
+      skipped++; continue;
+    }
+
+    const status = nStr(row.status) || 'new';
+    if (!docStatuses.includes(status)) {
+      errors.push({ row: rowNum, field: 'status', error: `Nieznany status: ${status}. Dostępne: ${docStatuses.join(', ')}` });
+      skipped++; continue;
+    }
+
+    const groupName = nStr(row.group_name || row.grupa);
+    const groupId = groupName ? (groupMap[groupName.toLowerCase()] || null) : null;
+
+    // entities — podmioty (pipe-separated)
+    const entity1 = nStr(row.entity_1 || row.entity1 || row.podmiot_1);
+    const entity2 = nStr(row.entity_2 || row.entity2 || row.podmiot_2);
+    const entities = [entity1, entity2].filter(Boolean);
+
+    try {
+      await db.query(`
+        INSERT INTO documents
+          (name, doc_type, gdpr_type, status, group_id, entities,
+           creation_date, signing_date, expiration_date,
+           created_by, owner_id)
+        VALUES ($1,$2::doc_type,$3::gdpr_type,$4::doc_status,$5,$6,$7,$8,$9,$10,$10)
+      `, [
+        name,
+        docType,
+        gdprType,
+        status,
+        groupId,
+        entities,
+        nDate(row.creation_date || row.data_utworzenia) || new Date().toISOString().slice(0,10),
+        nDate(row.signing_date || row.data_podpisania),
+        nDate(row.expiration_date || row.data_waznosci),
+        req.user.id,
+      ]);
+      imported++;
+    } catch (e) {
+      errors.push({ row: rowNum, field: name, error: e.message });
+      skipped++;
+    }
+  }
+
+  await db.query(
+    `UPDATE crm_import_logs
+     SET rows_imported=$1, rows_skipped=$2, rows_error=$3,
+         error_details=$4, status='done', finished_at=now()
+     WHERE id=$5`,
+    [imported, skipped - errors.length, errors.length,
+     errors.length ? JSON.stringify(errors.slice(0,100)) : null, importId]
+  ).catch(() => {});
+
+  await audit.log({
+    user:      req.user,
+    action:    'crm_import_documents',
+    afterState: { filename: req.file.originalname, imported, errors: errors.length },
+    metadata:  { import_id: importId },
+    ipAddress: req.auditContext?.ipAddress,
+  });
+
+  res.json({
+    import_id: importId, filename: req.file.originalname,
+    rows_total: records.length, imported,
+    skipped: skipped - errors.length, errors_count: errors.length,
+    errors: errors.slice(0, 20),
+  });
+});
+
 // ── GET /api/crm/import/logs ──────────────────────────────────────
 router.get('/logs', async (req, res, next) => {
   try {
@@ -315,17 +493,25 @@ router.get('/template/:type', (req, res) => {
   const bom = '\uFEFF'; // BOM dla Excel
   const templates = {
     leads: [
-      'company,contact_name,contact_title,email,phone,source,stage,value_pln,probability,close_date,industry,notes,hot,tags',
-      'Przykład Sp. z o.o.,Jan Kowalski,CEO,jan@example.pl,+48600000000,targi,qualification,150000,40,2025-12-31,IT,Notatka,false,tag1|tag2',
+      'company,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,source[strona_www|polecenie|cold_call|linkedin|targi|partner|agent|kampania|inbound|inne],stage[new|qualification|presentation|offer|negotiation|closed_won|closed_lost],value_pln,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],probability,close_date,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],assigned_to_email,notes,hot,tags,agent_name,agent_email,agent_phone,online_pct',
+      'Przykład Sp. z o.o.,Jan Kowalski,CEO,jan@example.pl,+48600000000,targi,qualification,150000,PLN,40,2025-12-31,IT,handlowiec@firma.pl,Notatka,false,tag1|tag2,,,,,30',
     ].join('\n'),
     partners: [
-      'company,partner_number,nip,address,contact_name,contact_title,email,phone,industry,group_name,contract_signed,contract_expires,status,notes,annual_turnover,annual_turnover_currency,online_pct,tags',
-      '"Przykład Partner Sp. z o.o.","P-0001","1234567890","ul. Przykładowa 1, Warszawa","Anna Nowak","VP","anna@example.pl","+48601000000","Transport","Magellan Holdings","2025-01-01","2026-01-01","active","Uwagi","5000000","PLN","30","tag1|tag2"',
+      'company,partner_number,nip,address,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],group_name,contract_signed,contract_expires,contract_value,status[onboarding|active|inactive|churned],notes,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],online_pct,tags,billing_contact_name,billing_contact_title,billing_email,billing_phone,credit_limit_value,credit_limit_currency[PLN|EUR|USD|GBP],deposit_value,deposit_currency[PLN|EUR|USD|GBP],deposit_date_in,deposit_date_out,commission_value,commission_basis[nie_dotyczy|segmenty|rezerwacje|progi_obrotowe],agent_name,agent_email,agent_phone,manager_email',
+      '"Przykład Partner Sp. z o.o.","P-0001","1234567890","ul. Przykładowa 1, Warszawa","Anna Nowak","VP","anna@example.pl","+48601000000","Transport","Magellan Holdings","2025-01-01","2026-01-01","500000","active","Uwagi","PLN","30","tag1|tag2","Jan Rozliczenia","Specjalista","rozlicz@firma.pl","+48600111222","100000","PLN","50000","PLN","2025-01-15","","0.05","segmenty","","","","opiekun@worktrips.com"',
     ].join('\n'),
   };
 
+  // Documents template
+  if (!templates.documents) {
+    templates.documents = [
+      'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],entity_1,entity_2,creation_date,signing_date,expiration_date',
+      '"Umowa partnerska XYZ","partner_agreement","no_gdpr","new","Sprzedaz","Firma XYZ","Jan Kowalski","2026-01-15","","2027-01-15"',
+    ].join('\n');
+  }
+
   const tmpl = templates[req.params.type];
-  if (!tmpl) return res.status(404).json({ error: 'Nieznany typ szablonu. Użyj: leads lub partners' });
+  if (!tmpl) return res.status(404).json({ error: 'Nieznany typ szablonu. Użyj: leads, partners lub documents' });
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="import_${req.params.type}_template.csv"`);
