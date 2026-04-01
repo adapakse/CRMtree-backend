@@ -70,6 +70,24 @@ router.put(
           .json({ error: `Unknown settings keys: ${unknown.join(", ")}` });
       }
 
+      // Update each key in DB
+      const typeMap = {};
+      for (const row of existing) typeMap[row.key] = row.value_type;
+
+      for (const [key, rawValue] of Object.entries(updates)) {
+        const vtype = typeMap[key];
+        let strValue;
+        if (vtype === 'number')  strValue = String(Number(rawValue));
+        else if (vtype === 'boolean') strValue = rawValue === true || rawValue === 'true' ? 'true' : 'false';
+        else if (vtype === 'json') strValue = typeof rawValue === 'string' ? rawValue : JSON.stringify(rawValue);
+        else strValue = String(rawValue ?? '');
+
+        await db.query(
+          `UPDATE app_settings SET value = $1, updated_by = $2, updated_at = now() WHERE key = $3`,
+          [strValue, req.user?.id || null, key]
+        );
+      }
+
     // Return fresh settings
     const { rows } = await db.query(
       `SELECT key, value, label, description, value_type, category,
