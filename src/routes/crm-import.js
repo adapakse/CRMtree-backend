@@ -54,7 +54,9 @@ function parseCsvBuffer(buffer) {
       .on('data', row => {
         const normalized = {};
         for (const [k, v] of Object.entries(row)) {
-          normalized[k.trim().toLowerCase()] = typeof v === 'string' ? v.trim() : v;
+          // Strip dictionary hints from column names: "stage[new|qual...]" → "stage"
+          const cleanKey = k.trim().toLowerCase().replace(/\[.*?\]/g, '').trim();
+          normalized[cleanKey] = typeof v === 'string' ? v.trim() : v;
         }
         records.push(normalized);
       })
@@ -64,8 +66,35 @@ function parseCsvBuffer(buffer) {
 }
 
 const nStr   = v => (v || '').trim() || null;
-const nFloat = v => { const n = parseFloat((v || '').replace(',', '.')); return isNaN(n) ? null : n; };
-const nInt   = v => { const n = parseInt(v);  return isNaN(n) ? null : n; };
+const nFloat = v => {
+  // Strip thousands separators (space, dot used as thousands sep) and normalise decimal comma
+  let s = (v || '').trim().replace(/\s/g, '');
+  // If both . and , present: European format (1.000,50) or US format (1,000.50)
+  if (s.includes('.') && s.includes(',')) {
+    // whichever comes last is the decimal separator
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) {
+      s = s.replace(/\./g, '').replace(',', '.'); // European: remove dots, comma→dot
+    } else {
+      s = s.replace(/,/g, ''); // US: remove commas
+    }
+  } else {
+    s = s.replace(',', '.'); // single comma → decimal dot
+  }
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+};
+const nInt        = v => { const n = parseInt(v);  return isNaN(n) ? null : n; };
+const nProbability = v => {
+  if (!v) return null;
+  let s = String(v).trim().replace('%', '').replace(',', '.').trim();
+  let n = parseFloat(s);
+  if (isNaN(n)) return null;
+  // If value looks like a decimal fraction (0.0–1.0) convert to percent
+  if (n > 0 && n <= 1) n = Math.round(n * 100);
+  // Clamp to 0–100
+  n = Math.min(100, Math.max(0, Math.round(n)));
+  return n;
+};
 const nDate  = v => { if (!v) return null; const d = new Date(v); return isNaN(d) ? null : d.toISOString().slice(0, 10); };
 const nBool  = v => ['1','true','yes','tak','t'].includes((v || '').toLowerCase().trim());
 const nTags  = v => v ? v.split(/[,;|]/).map(t => t.trim()).filter(Boolean) : [];
@@ -147,7 +176,7 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
         stage,
         nFloat(row.value_pln || row.wartosc),
         nStr(row.annual_turnover_currency || row.waluta) || 'PLN',
-        nInt(row.probability   || row.prawdopodobienstwo),
+        nProbability(row.probability   || row.prawdopodobienstwo),
         nDate(row.close_date   || row.data_zamkniecia),
         nStr(row.industry      || row.branza),
         assignedTo,
@@ -516,6 +545,126 @@ router.get('/template/:type', (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="import_${req.params.type}_template.csv"`);
   res.send(bom + tmpl);
+});
+
+
+// ── GET /api/crm/import/export/:type ─────────────────────────────
+// Export existing data as CSV using same column format as import template
+router.get('/export/:type', async (req, res, next) => {
+  try {
+    const { type } = req.params;
+    const bom = '\uFEFF';
+
+    // Helper: escape CSV cell (wrap in quotes if contains comma/quote/newline)
+    const cell = v => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+    const row = cols => cols.map(cell).join(',');
+    const fmt = v => v ? String(v).slice(0, 10) : ''; // date formatting
+
+    if (type === 'leads') {
+      // Header identical to import template (without bracket hints for data rows)
+      const header = 'company,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,source[strona_www|polecenie|cold_call|linkedin|targi|partner|agent|kampania|inbound|inne],stage[new|qualification|presentation|offer|negotiation|closed_won|closed_lost],value_pln,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],probability,close_date,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],assigned_to_email,notes,hot,tags,agent_name,agent_email,agent_phone,online_pct';
+
+      const params = [];
+      const scope = req.scopeFilter ? req.scopeFilter('l', 'assigned_to', params) : '';
+      const { rows } = await db.query(`
+        SELECT l.*, u.email AS assigned_to_email_val
+        FROM crm_leads l
+        LEFT JOIN users u ON u.id = l.assigned_to
+        WHERE l.converted_at IS NULL ${scope}
+        ORDER BY l.company
+      `, params);
+
+      const lines = [header];
+      for (const r of rows) {
+        lines.push(row([
+          r.company, r.contact_name, r.contact_title,
+          r.email, r.phone, r.source, r.stage,
+          r.value_pln, r.annual_turnover_currency, r.probability,
+          fmt(r.close_date), r.industry, r.assigned_to_email_val,
+          r.notes, r.hot ? 'true' : 'false',
+          (r.tags || []).join('|'),
+          r.agent_name, r.agent_email, r.agent_phone, r.online_pct,
+        ]));
+      }
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="export_leads_${new Date().toISOString().slice(0,10)}.csv"`);
+      return res.send(bom + lines.join('\n'));
+    }
+
+    if (type === 'partners') {
+      const header = 'company,partner_number,nip,address,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],group_name,contract_signed,contract_expires,contract_value,status[onboarding|active|inactive|churned],notes,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],online_pct,tags,billing_contact_name,billing_contact_title,billing_email,billing_phone,credit_limit_value,credit_limit_currency[PLN|EUR|USD|GBP],deposit_value,deposit_currency[PLN|EUR|USD|GBP],deposit_date_in,deposit_date_out,commission_value,commission_basis[nie_dotyczy|segmenty|rezerwacje|progi_obrotowe],agent_name,agent_email,agent_phone,manager_email';
+
+      const { rows } = await db.query(`
+        SELECT p.*, g.name AS group_name_val,
+               mu.email AS manager_email_val
+        FROM crm_partners p
+        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
+        LEFT JOIN users mu ON mu.id = p.manager_id
+        ORDER BY p.company
+      `);
+
+      const lines = [header];
+      for (const r of rows) {
+        lines.push(row([
+          r.company, r.partner_number, r.nip, r.address,
+          r.contact_name, r.contact_title, r.email, r.phone,
+          r.industry, r.group_name_val,
+          fmt(r.contract_signed), fmt(r.contract_expires), r.contract_value,
+          r.status, r.notes, r.annual_turnover_currency, r.online_pct,
+          (r.tags || []).join('|'),
+          r.billing_contact_name, r.billing_contact_title, r.billing_email, r.billing_phone,
+          r.credit_limit_value, r.credit_limit_currency,
+          r.deposit_value, r.deposit_currency,
+          fmt(r.deposit_date_in), fmt(r.deposit_date_out),
+          r.commission_value, r.commission_basis,
+          r.agent_name, r.agent_email, r.agent_phone, r.manager_email_val,
+        ]));
+      }
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="export_partners_${new Date().toISOString().slice(0,10)}.csv"`);
+      return res.send(bom + lines.join('\n'));
+    }
+
+    if (type === 'documents') {
+      const header = 'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],entity_1,entity_2,creation_date,signing_date,expiration_date';
+
+      const { rows } = await db.query(`
+        SELECT d.name, d.doc_type, d.gdpr_type, d.status,
+               gp.display_name AS group_name_val,
+               d.entities, d.creation_date, d.signing_date, d.expiration_date
+        FROM documents d
+        LEFT JOIN group_profiles gp ON gp.id = d.group_id
+        WHERE d.deleted_at IS NULL
+        ORDER BY d.doc_number
+      `);
+
+      const lines = [header];
+      for (const r of rows) {
+        const entities = r.entities || [];
+        lines.push(row([
+          r.name, r.doc_type, r.gdpr_type, r.status,
+          r.group_name_val,
+          entities[0] || '', entities[1] || '',
+          fmt(r.creation_date), fmt(r.signing_date), fmt(r.expiration_date),
+        ]));
+      }
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="export_documents_${new Date().toISOString().slice(0,10)}.csv"`);
+      return res.send(bom + lines.join('\n'));
+    }
+
+    return res.status(404).json({ error: 'Nieznany typ. Użyj: leads, partners lub documents' });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;
