@@ -23,7 +23,7 @@ const documentGroupRoutes = require('./routes/documentGroups');
 const logRoutes           = require('./routes/logs');
 const attachmentRoutes    = require('./routes/attachments');
 const settingsRoutes      = require('./routes/settings');
-const adminDataRoutes 	  = require('./routes/admin-data');
+const adminDataRoutes     = require('./routes/admin-data');
 
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
