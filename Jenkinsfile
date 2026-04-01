@@ -1,7 +1,6 @@
 @Library("sonar")_
 
 pipeline {
-    
     agent any
 
     parameters {
