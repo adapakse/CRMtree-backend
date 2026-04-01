@@ -54,7 +54,9 @@ function parseCsvBuffer(buffer) {
       .on('data', row => {
         const normalized = {};
         for (const [k, v] of Object.entries(row)) {
-          normalized[k.trim().toLowerCase()] = typeof v === 'string' ? v.trim() : v;
+          // Strip dictionary hints from column names: "stage[new|qual...]" → "stage"
+          const cleanKey = k.trim().toLowerCase().replace(/\[.*?\]/g, '').trim();
+          normalized[cleanKey] = typeof v === 'string' ? v.trim() : v;
         }
         records.push(normalized);
       })
@@ -64,7 +66,23 @@ function parseCsvBuffer(buffer) {
 }
 
 const nStr   = v => (v || '').trim() || null;
-const nFloat = v => { const n = parseFloat((v || '').replace(',', '.')); return isNaN(n) ? null : n; };
+const nFloat = v => {
+  // Strip thousands separators (space, dot used as thousands sep) and normalise decimal comma
+  let s = (v || '').trim().replace(/\s/g, '');
+  // If both . and , present: European format (1.000,50) or US format (1,000.50)
+  if (s.includes('.') && s.includes(',')) {
+    // whichever comes last is the decimal separator
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) {
+      s = s.replace(/\./g, '').replace(',', '.'); // European: remove dots, comma→dot
+    } else {
+      s = s.replace(/,/g, ''); // US: remove commas
+    }
+  } else {
+    s = s.replace(',', '.'); // single comma → decimal dot
+  }
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+};
 const nInt   = v => { const n = parseInt(v);  return isNaN(n) ? null : n; };
 const nDate  = v => { if (!v) return null; const d = new Date(v); return isNaN(d) ? null : d.toISOString().slice(0, 10); };
 const nBool  = v => ['1','true','yes','tak','t'].includes((v || '').toLowerCase().trim());
