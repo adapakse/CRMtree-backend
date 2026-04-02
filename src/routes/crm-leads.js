@@ -37,7 +37,7 @@ router.get('/',
       const offset = (page - 1) * limit;
 
       const params = [];
-      let where = "WHERE l.converted_at IS NULL";
+      let where = "WHERE 1=1";
 
       where += req.scopeFilter('l', 'assigned_to', params);
 
@@ -82,10 +82,13 @@ router.get('/',
           SELECT l.*,
             u.display_name AS assigned_to_name,
             u.email        AS assigned_to_email,
+            cp.id          AS converted_partner_id,
+            cp.company     AS converted_partner_company,
             (SELECT COUNT(*) FROM crm_lead_activities a WHERE a.lead_id = l.id) AS activity_count,
             (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id) AS document_count
           FROM crm_leads l
           LEFT JOIN users u ON u.id = l.assigned_to
+          LEFT JOIN crm_partners cp ON cp.lead_id = l.id
           ${where}
           ORDER BY l.updated_at DESC
           LIMIT $${params.length - 1} OFFSET $${params.length}
@@ -122,6 +125,7 @@ router.post('/',
     body('tags').optional().isArray(),
     body('notes').optional().trim(),
     body('hot').optional().isBoolean(),
+    body('nip').optional({ nullable: true }).trim(),
   ],
   validate,
   async (req, res, next) => {
@@ -129,7 +133,7 @@ router.post('/',
       const {
         company, contact_name, contact_title, email, phone, source,
         stage = 'new', value_pln, annual_turnover_currency, online_pct, probability, close_date, industry,
-        assigned_to, tags, notes, hot = false,
+        assigned_to, tags, notes, hot = false, nip,
       } = req.body;
 
       // Handlowiec może przypisać tylko do siebie
@@ -139,15 +143,15 @@ router.post('/',
         INSERT INTO crm_leads
           (company, contact_name, contact_title, email, phone, source, stage,
            value_pln, annual_turnover_currency, online_pct, probability, close_date, industry, assigned_to,
-           tags, notes, hot, created_by, agent_name, agent_email, agent_phone,
+           tags, notes, hot, nip, created_by, agent_name, agent_email, agent_phone,
            website, logo_url)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
         RETURNING *
       `, [
         company, contact_name||null, contact_title||null, email||null,
         phone||null, source||null, stage,
         value_pln||null, annual_turnover_currency||'PLN', online_pct||null, probability||null, close_date||null, industry||null,
-        ownerId, tags||[], notes||null, hot, req.user.id,
+        ownerId, tags||[], notes||null, hot, nip||null, req.user.id,
         req.body.agent_name||null, req.body.agent_email||null, req.body.agent_phone||null,
         req.body.website||null, req.body.logo_url||null,
       ]);
@@ -725,7 +729,7 @@ router.patch('/:id',
 
       const allowed = ['company','contact_name','contact_title','email','phone','source',
                        'stage','value_pln','annual_turnover_currency','online_pct','probability','close_date','industry',
-                       'assigned_to','tags','notes','hot','lost_reason',
+                       'assigned_to','tags','notes','hot','lost_reason','nip',
                        'agent_name','agent_email','agent_phone','website','logo_url'];
 
       const setClauses = [];
@@ -1003,8 +1007,8 @@ router.get('/:id/history',
   }
 );
 
-// ── Konwersja Lead → Partner ──────────────────────────────────────
-router.post('/:id/convert',
+// ── Migracja Lead → Partner (lead pozostaje w rejestrze w statusie Won) ──────
+router.post('/:id/migrate',
   [
     param('id').isInt(),
     body('contract_doc_id').optional({ nullable: true }).isInt(),
@@ -1023,7 +1027,7 @@ router.post('/:id/convert',
       try { assertOwnership(lead, req, 'assigned_to'); }
       catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
 
-      if (lead.converted_at) return res.status(409).json({ error: 'Lead już skonwertowany' });
+      if (lead.converted_at) return res.status(409).json({ error: 'Lead już zmigrowany do Partnera' });
 
       const client = await db.pool.connect();
       try {
@@ -1050,6 +1054,8 @@ router.post('/:id/convert',
           lead.logo_url||null,
         ]);
 
+        // Lead pozostaje widoczny na liście w statusie closed_won.
+        // converted_at jest ustawiane tylko dla zapisu — NIE filtrujemy już po tym polu.
         await client.query(
           `UPDATE crm_leads SET converted_at=now(), stage='closed_won', updated_at=now() WHERE id=$1`, [id]
         );
@@ -1058,7 +1064,7 @@ router.post('/:id/convert',
 
         await audit.log({
           user:      req.user,
-          action:    'crm_lead_converted',
+          action:    'crm_lead_migrated',
           afterState: { lead_id: id, partner_id: partner[0].id, company: lead.company },
           ipAddress: req.auditContext?.ipAddress,
         });
@@ -1114,6 +1120,12 @@ router.get('/:id/logo-img',
 );
 
 // ── GET /api/crm/leads/report ─────────────────────────────────────────────────
+// Backwards-compat alias — frontend może używać obu
+router.post('/:id/convert', (req, res, next) => {
+  req.url = req.url.replace('/convert', '/migrate');
+  router.handle(req, res, next);
+});
+
 // Kompleksowy raport leadów: KPI, lejek, trend, handlowcy, kanały, porażki
 // Zakres: salesperson widzi tylko swoje leady, manager widzi wszystkich (lub filtr)
 // query: date_from (YYYY-MM-DD), date_to, assigned_to (UUID, tylko manager)
