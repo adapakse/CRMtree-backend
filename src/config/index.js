@@ -65,11 +65,18 @@ module.exports = {
   },
 
   // ─── Google Workspace / Gmail API ─────────────────────────────────────────
-  // Używamy Service Account z Domain-Wide Delegation do wysyłki przez Gmail API.
-  // Jeden z dwóch sposobów podania klucza serwisowego:
-  //   GOOGLE_SERVICE_ACCOUNT_JSON  — cała zawartość pliku JSON (do użycia w env secrets)
-  //   GOOGLE_SERVICE_ACCOUNT_FILE  — ścieżka do pliku JSON na dysku (do użycia lokalnie)
+  // Dwa tryby autoryzacji (można stosować jeden lub oba równolegle):
+  //
+  // [A] Service Account z Domain-Wide Delegation — wysyłka "w imieniu" skrzynki
+  //     GOOGLE_SERVICE_ACCOUNT_JSON  — cała zawartość pliku JSON (env secrets)
+  //     GOOGLE_SERVICE_ACCOUNT_FILE  — ścieżka do pliku JSON (lokalnie)
+  //
+  // [B] OAuth2 per-user — każdy handlowiec autoryzuje własne konto Google
+  //     Wymagane: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI
+  //     Opcjonalne: GOOGLE_PUBSUB_TOPIC — do odbierania push-notyfikacji Gmail
+  //
   google: {
+    // [A] Service Account
     serviceAccountJson: optional("GOOGLE_SERVICE_ACCOUNT_JSON"),
     serviceAccountFile: optional("GOOGLE_SERVICE_ACCOUNT_FILE"),
     impersonateEmail: optional(
@@ -77,6 +84,16 @@ module.exports = {
       "noreply@worktrips.com",
     ),
     sendInDev: optional("GOOGLE_SEND_IN_DEV", "false") === "true",
+
+    // [B] OAuth2 per-user
+    clientId:    optional("GOOGLE_CLIENT_ID"),
+    clientSecret: optional("GOOGLE_CLIENT_SECRET"),
+    redirectUri:  optional(
+      "GOOGLE_REDIRECT_URI",
+      "http://localhost:3000/api/crm/gmail/oauth/callback",
+    ),
+    // Pub/Sub topic do push-notyfikacji (format: projects/<project>/topics/<topic>)
+    pubsubTopic: optional("GOOGLE_PUBSUB_TOPIC"),
   },
 
   signus: {
