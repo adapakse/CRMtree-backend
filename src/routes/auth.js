@@ -248,4 +248,17 @@ if (process.env.NODE_ENV === 'development') {
   });
 }
 
+// TYMCZASOWY endpoint diagnostyczny — usuń po naprawieniu SSO
+router.get('/saml-status', (req, res) => {
+  const cert = config.saml?.idpCert;
+  res.json({
+    node_env:       process.env.NODE_ENV,
+    entry_point:    config.saml?.entryPoint  ? 'SET (' + config.saml.entryPoint.slice(0,40) + '…)' : 'MISSING',
+    issuer:         config.saml?.issuer      || 'MISSING',
+    callback_url:   config.saml?.callbackUrl || 'MISSING',
+    idp_cert:       cert ? `SET (${cert.replace(/\s+/g,'').length} chars)` : 'MISSING',
+    saml_strategy:  !!require('passport')._strategies?.saml ? 'REGISTERED' : 'NOT REGISTERED',
+  });
+});
+
 module.exports = router;
