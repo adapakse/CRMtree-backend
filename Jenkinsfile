@@ -146,7 +146,7 @@ pipeline {
         stage("Update tag") {
             steps {
                 sshagent(credentials: [params.GIT_IDENTITY]) {
-                    withEnv(["FILE_TO_EDIT=values-htcd.yaml"]) {
+                    withEnv(["FILE_TO_EDIT=values-htpre.yaml"]) {
                     sh """
                         git clone --branch master git@bastion.org.hotailors.com:worktrips-admin/kubernetes.git argo_commit_workspace
                         cd argo_commit_workspace
