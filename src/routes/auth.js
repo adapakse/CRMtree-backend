@@ -260,5 +260,20 @@ router.get('/saml-status', (req, res) => {
     saml_strategy:  !!require('passport')._strategies?.saml ? 'REGISTERED' : 'NOT REGISTERED',
   });
 });
+//koniec temp
+//Tymczasowy log dla SAMLa do wykasowania
+router.get('/saml-status', (req, res) => {
+  const cert = config.saml?.idpCert;
+  const passport = require('passport');
+  res.json({
+    node_env:      process.env.NODE_ENV,
+    entry_point:   config.saml?.entryPoint  ? 'SET' : 'MISSING',
+    issuer:        config.saml?.issuer      ? 'SET' : 'MISSING',
+    callback_url:  config.saml?.callbackUrl ? 'SET' : 'MISSING',
+    idp_cert:      cert ? `SET (${cert.replace(/\s+/g,'').length} chars)` : 'MISSING',
+    strategy_ok:   !!(passport._strategies && passport._strategies.saml),
+  });
+});
+//koniec temp
 
 module.exports = router;
