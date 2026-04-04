@@ -1,83 +1,111 @@
 "use strict";
 
-const jwt = require("jsonwebtoken");
-const crypto = require("crypto");
+const jwt      = require("jsonwebtoken");
+const crypto   = require("crypto");
 const passport = require("passport");
 const { Strategy: SamlStrategy } = require("passport-saml");
-const config = require("../config");
-const db = require("../config/database");
-const audit = require("../services/auditService");
-const logger = require("../utils/logger");
+const config   = require("../config");
+const db       = require("../config/database");
+const logger   = require("../utils/logger");
 
-// ─── SAML Strategy ────────────────────────────────────────
-// SAML wyłączone na czas testów na localhost
+// ─── SAML Strategy ─────────────────────────────────────────────────────────
+// Inicjalizowana TYLKO gdy SAML_IDP_CERT jest ustawiony (środowisko produkcyjne).
+// Na lokalnym dev (NODE_ENV=development) cert nie jest ustawiony → strategia
+// nie jest rejestrowana → passport.authenticate('saml') zwróciłby błąd,
+// ale route /api/auth/saml na dev jest obsługiwany przez stub w routes/auth.js.
+
 const samlCert = config.saml?.idpCert;
 
-console.log("[SAML] idpCert value:", JSON.stringify(samlCert));
-console.log("[SAML] idpCert length:", samlCert?.length);
-console.log("[SAML] condition passes:", !!(samlCert && samlCert.length > 10));
-
 if (samlCert && samlCert.length > 10) {
+  logger.info("[SAML] Inicjalizacja strategii SAML", {
+    entryPoint:  config.saml.entryPoint,
+    issuer:      config.saml.issuer,
+    callbackUrl: config.saml.callbackUrl,
+  });
+
   passport.use(
     new SamlStrategy(
       {
-        entryPoint: config.saml.entryPoint,
-        issuer: config.saml.issuer,
-        callbackUrl: config.saml.callbackUrl,
-        cert: config.saml.idpCert.replace(/\s+/g, ''),
-        wantAssertionsSigned: true,
+        entryPoint:                   config.saml.entryPoint,
+        issuer:                       config.saml.issuer,
+        callbackUrl:                  config.saml.callbackUrl,
+        // Certyfikat IdP — Google dostarcza jako jeden ciąg base64 bez nagłówków PEM
+        cert:                         samlCert.replace(/\s+/g, ""),
+        wantAssertionsSigned:         true,
         disableRequestedAuthnContext: true,
       },
       async (profile, done) => {
         try {
+          // ── Wyciągnij email z atrybutów SAML ─────────────────────────────
           const email =
             profile.email ||
             profile["http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"] ||
             profile.nameID;
 
-          const firstName =
-            profile.firstName ||
-            profile["http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname"] ||
-            "";
+          if (!email) {
+            logger.warn("[SAML] Brak atrybutu email w profilu SAML", { nameID: profile.nameID });
+            return done(new Error("SAML: brak atrybutu email"));
+          }
 
-          const lastName =
-            profile.lastName ||
-            profile["http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname"] ||
-            "";
+          // ── Ogranicz dostęp do domeny @worktrips.com ──────────────────────
+          if (!email.toLowerCase().endsWith("@worktrips.com")) {
+            logger.warn("[SAML] Próba logowania spoza domeny", { email });
+            return done(new Error("SAML: konto spoza domeny @worktrips.com"));
+          }
 
-          if (!email) return done(new Error("SAML: email attribute missing"));
-
+          // ── Znajdź istniejącego użytkownika — NIE twórz nowych ───────────
+          // Tylko administratorzy mogą dodawać nowych użytkowników przez panel.
           const { rows } = await db.query(
-            `INSERT INTO users (email, first_name, last_name, saml_subject, last_login_at)
-             VALUES ($1, $2, $3, $4, NOW())
-             ON CONFLICT (email) DO UPDATE
-               SET first_name    = EXCLUDED.first_name,
-                   last_name     = EXCLUDED.last_name,
-                   saml_subject  = EXCLUDED.saml_subject,
-                   last_login_at = NOW(),
-                   updated_at    = NOW()
-             RETURNING id, email, first_name, last_name, display_name, is_admin, is_active`,
-            [email, firstName, lastName, profile.nameID]
+            `SELECT id, email, first_name, last_name, display_name,
+                    is_admin, is_active, crm_role
+             FROM users
+             WHERE lower(email) = lower($1)
+             LIMIT 1`,
+            [email]
           );
+
+          if (!rows.length) {
+            logger.warn("[SAML] Użytkownik nie istnieje w systemie", { email });
+            return done(new Error("SAML: konto nie zostało jeszcze dodane do systemu"));
+          }
 
           const user = rows[0];
 
-          if (!user.is_active) return done(new Error("Account inactive"));
+          if (!user.is_active) {
+            logger.warn("[SAML] Konto nieaktywne", { email });
+            return done(new Error("Account inactive"));
+          }
 
+          // ── Zaktualizuj last_login_at i saml_subject ─────────────────────
+          await db.query(
+            `UPDATE users
+             SET last_login_at = NOW(),
+                 saml_subject  = $1,
+                 updated_at    = NOW()
+             WHERE id = $2`,
+            [profile.nameID, user.id]
+          );
+
+          logger.info("[SAML] Pomyślne uwierzytelnienie", { email, userId: user.id });
           return done(null, user);
         } catch (err) {
+          logger.error("[SAML] Błąd strategii", { err: err.message });
           return done(err);
         }
       }
     )
   );
+} else {
+  logger.info("[SAML] Strategia SAML nieaktywna (brak SAML_IDP_CERT) — tryb deweloperski");
 }
 
 passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser(async (id, done) => {
   try {
     const { rows } = await db.query(
-      'SELECT id, email, first_name, last_name, display_name, is_admin, is_active, crm_role FROM users WHERE id = $1',
+      `SELECT id, email, first_name, last_name, display_name,
+              is_admin, is_active, crm_role
+       FROM users WHERE id = $1`,
       [id]
     );
     done(null, rows[0] || null);
@@ -86,23 +114,23 @@ passport.deserializeUser(async (id, done) => {
   }
 });
 
-// ─── JWT helpers ──────────────────────────────────────────
+// ─── JWT helpers ────────────────────────────────────────────────────────────
 function signAccessToken(user) {
   return jwt.sign(
     {
-      sub: user.id,
-      email: user.email,
-      name: user.display_name,
+      sub:      user.id,
+      email:    user.email,
+      name:     user.display_name,
       is_admin: user.is_admin,
     },
     config.jwt.secret,
-    { expiresIn: config.jwt.expiresIn, algorithm: "HS256" },
+    { expiresIn: config.jwt.expiresIn, algorithm: "HS256" }
   );
 }
 
 function signRefreshToken(user) {
   const token = crypto.randomBytes(64).toString("hex");
-  const hash = crypto.createHash("sha256").update(token).digest("hex");
+  const hash  = crypto.createHash("sha256").update(token).digest("hex");
   return { token, hash };
 }
 
@@ -110,11 +138,11 @@ async function saveRefreshToken(userId, hash) {
   const expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000);
   await db.query(
     "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1,$2,$3)",
-    [userId, hash, expiresAt],
+    [userId, hash, expiresAt]
   );
 }
 
-// ─── requireAuth middleware ────────────────────────────────
+// ─── requireAuth middleware ──────────────────────────────────────────────────
 async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer ")) {
@@ -122,12 +150,11 @@ async function requireAuth(req, res, next) {
   }
   const token = authHeader.slice(7);
   try {
-    const decoded = jwt.verify(token, config.jwt.secret, {
-      algorithms: ["HS256"],
-    });
-    // Load fresh user from DB to capture role changes
+    const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ["HS256"] });
     const { rows } = await db.query(
-      'SELECT id, email, first_name, last_name, display_name, is_admin, is_active, crm_role FROM users WHERE id = $1',
+      `SELECT id, email, first_name, last_name, display_name,
+              is_admin, is_active, crm_role
+       FROM users WHERE id = $1`,
       [decoded.sub]
     );
     if (!rows.length || !rows[0].is_active) {
@@ -137,15 +164,13 @@ async function requireAuth(req, res, next) {
     next();
   } catch (err) {
     if (err.name === "TokenExpiredError") {
-      return res
-        .status(401)
-        .json({ error: "Token expired", code: "TOKEN_EXPIRED" });
+      return res.status(401).json({ error: "Token expired", code: "TOKEN_EXPIRED" });
     }
     return res.status(401).json({ error: "Invalid token" });
   }
 }
 
-// ─── requireAdmin middleware ───────────────────────────────
+// ─── requireAdmin middleware ─────────────────────────────────────────────────
 function requireAdmin(req, res, next) {
   if (!req.user?.is_admin) {
     return res.status(403).json({ error: "Admin access required" });
