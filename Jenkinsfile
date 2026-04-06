@@ -97,7 +97,7 @@ pipeline {
 
                     docker.withRegistry(BASTION_REGISTRY_URL, BASTION_REGISTRY_ACCOUNT_CREDENTIAL_ID) {
                         def image = docker.build("${BASTION_NCA_REGISTRY_URL}:${BUILD_NUMBER}",
-                            ".")
+                            "--no-cache .")
                         env.BASTION_IMAGE = image.id
                     }
                 }
