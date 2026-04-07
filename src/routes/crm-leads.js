@@ -11,6 +11,7 @@ const logger = require('../utils/logger');
 const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
 const { crmAuth, crmScope, requireCrmManager, assertOwnership } = require('../middleware/crm-rbac');
+const testAccountSvc = require('../services/testAccountService');
 
 router.use(requireAuth, injectAuditContext, crmAuth);
 
@@ -1007,6 +1008,166 @@ router.get('/:id/history',
   }
 );
 
+// ── Konto testowe ─────────────────────────────────────────────────────────────
+
+// ── GET /api/crm/leads/:id/test-account ──────────────────────────────────────
+// Zwraca zapisane dane konta testowego dla danego Leada (jeśli istnieją).
+router.get('/:id/test-account',
+  crmScope,
+  [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      const params = [id];
+      const scope  = req.scopeFilter('l', 'assigned_to', params);
+      const { rows: lead } = await db.query(
+        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope}`, params
+      );
+      if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
+
+      const { rows } = await db.query(
+        `SELECT * FROM crm_lead_test_accounts WHERE lead_id = $1`, [id]
+      );
+      res.json(rows[0] || null);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /api/crm/leads/:id/test-account ─────────────────────────────────────
+// Zapisuje dane i wywołuje zewnętrzne API CreateTestAccount.
+// Dane są upsertowane — możliwe ponowne wywołanie po błędzie.
+router.post('/:id/test-account',
+  crmScope,
+  [
+    param('id').isInt(),
+    body('subdomain').notEmpty().trim(),
+    body('language').notEmpty().trim(),
+    body('partner_currency').notEmpty().trim(),
+    body('country').notEmpty().trim(),
+    body('billing_address').notEmpty().trim(),
+    body('billing_zip').notEmpty().trim(),
+    body('billing_city').notEmpty().trim(),
+    body('billing_country').notEmpty().trim(),
+    body('billing_email_address').notEmpty().isEmail().normalizeEmail(),
+    body('admin_first_name').notEmpty().trim(),
+    body('admin_last_name').notEmpty().trim(),
+    body('admin_email').notEmpty().isEmail().normalizeEmail(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+
+      // Pobierz dane leada (company + nip potrzebne dla zewnętrznego API)
+      const params = [id];
+      const scope  = req.scopeFilter('l', 'assigned_to', params);
+      const { rows: leads } = await db.query(
+        `SELECT id, company, nip FROM crm_leads l WHERE l.id = $1 ${scope}`, params
+      );
+      if (!leads.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
+      const lead = leads[0];
+
+      const {
+        subdomain, language, partner_currency, country,
+        billing_address, billing_zip, billing_city, billing_country, billing_email_address,
+        admin_first_name, admin_last_name, admin_email,
+      } = req.body;
+
+      // Upsert danych lokalnie ze statusem 'pending'
+      await db.query(`
+        INSERT INTO crm_lead_test_accounts
+          (lead_id,
+           subdomain, language, partner_currency, country,
+           billing_address, billing_zip, billing_city, billing_country, billing_email_address,
+           admin_first_name, admin_last_name, admin_email,
+           status, last_called_at, called_by, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',now(),$14,now())
+        ON CONFLICT (lead_id) DO UPDATE SET
+          subdomain             = EXCLUDED.subdomain,
+          language              = EXCLUDED.language,
+          partner_currency      = EXCLUDED.partner_currency,
+          country               = EXCLUDED.country,
+          billing_address       = EXCLUDED.billing_address,
+          billing_zip           = EXCLUDED.billing_zip,
+          billing_city          = EXCLUDED.billing_city,
+          billing_country       = EXCLUDED.billing_country,
+          billing_email_address = EXCLUDED.billing_email_address,
+          admin_first_name      = EXCLUDED.admin_first_name,
+          admin_last_name       = EXCLUDED.admin_last_name,
+          admin_email           = EXCLUDED.admin_email,
+          status                = 'pending',
+          last_error            = NULL,
+          last_called_at        = now(),
+          called_by             = EXCLUDED.called_by,
+          updated_at            = now()
+      `, [
+        id,
+        subdomain, language, partner_currency, country,
+        billing_address, billing_zip, billing_city, billing_country, billing_email_address,
+        admin_first_name, admin_last_name, admin_email,
+        req.user.id,
+      ]);
+
+      // Wywołanie zewnętrznego API
+      let apiResult;
+      try {
+        apiResult = await testAccountSvc.createTestAccount({
+          companyName:     lead.company,
+          nip:             lead.nip,
+          subdomain,       language,
+          partnerCurrency: partner_currency,
+          country,
+          billingAddress:  billing_address,
+          billingZip:      billing_zip,
+          billingCity:     billing_city,
+          billingCountry:  billing_country,
+          billingEmail:    billing_email_address,
+          adminFirstName:  admin_first_name,
+          adminLastName:   admin_last_name,
+          adminEmail:      admin_email,
+        });
+      } catch (apiErr) {
+        logger.error('testAccountSvc.createTestAccount threw', { error: apiErr.message });
+        apiResult = { success: false, error: `Błąd połączenia z zewnętrznym API: ${apiErr.message}` };
+      }
+
+      // Aktualizacja statusu po odpowiedzi API
+      const { rows: final } = await db.query(`
+        UPDATE crm_lead_test_accounts
+        SET status              = $1,
+            test_account_number = $2,
+            last_error          = $3,
+            updated_at          = now()
+        WHERE lead_id = $4
+        RETURNING *
+      `, [
+        apiResult.success ? 'created' : 'error',
+        apiResult.success ? apiResult.accountNumber : null,
+        apiResult.success ? null : apiResult.error,
+        id,
+      ]);
+
+      await audit.log({
+        user:      req.user,
+        action:    'crm_lead_update',
+        afterState: {
+          test_account_action: apiResult.success ? 'created' : 'error',
+          test_account_number: apiResult.accountNumber || null,
+          error:               apiResult.error || null,
+        },
+        metadata:  { lead_id: id },
+        ipAddress: req.auditContext?.ipAddress,
+      });
+
+      if (apiResult.success) {
+        return res.status(201).json({ record: final[0], accountNumber: apiResult.accountNumber });
+      }
+      // HTTP 422: dane zapisane lokalnie, ale zewnętrzne API odmówiło
+      return res.status(422).json({ error: apiResult.error, record: final[0] });
+    } catch (err) { next(err); }
+  }
+);
+
 // ── Migracja Lead → Partner (lead pozostaje w rejestrze w statusie Won) ──────
 router.post('/:id/migrate',
   [
@@ -1033,14 +1194,23 @@ router.post('/:id/migrate',
       try {
         await client.query('BEGIN');
 
+        // Pobierz numer konta testowego jeśli zostało założone
+        const { rows: testAccRows } = await client.query(
+          `SELECT test_account_number FROM crm_lead_test_accounts
+           WHERE lead_id = $1 AND status = 'created' AND test_account_number IS NOT NULL`,
+          [id]
+        );
+        const testAccountNumber = testAccRows[0]?.test_account_number || null;
+
         const { rows: partner } = await client.query(`
           INSERT INTO crm_partners
             (company, contact_name, contact_title, email, phone, industry,
              lead_id, group_id, manager_id, contract_doc_id, contract_signed,
              contract_value, notes, created_by, status,
              annual_turnover_currency, online_pct, tags,
-             agent_name, agent_email, agent_phone, logo_url)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'onboarding',$15,$16,$17,$18,$19,$20,$21)
+             agent_name, agent_email, agent_phone, logo_url,
+             partner_number)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'onboarding',$15,$16,$17,$18,$19,$20,$21,$22)
           RETURNING *
         `, [
           lead.company, lead.contact_name, lead.contact_title, lead.email,
@@ -1052,6 +1222,7 @@ router.post('/:id/migrate',
           lead.online_pct||null, lead.tags||[],
           lead.agent_name||null, lead.agent_email||null, lead.agent_phone||null,
           lead.logo_url||null,
+          testAccountNumber,   // ← numer konta testowego → partner_number
         ]);
 
         // Lead pozostaje widoczny na liście w statusie closed_won.

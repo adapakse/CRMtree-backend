@@ -287,8 +287,11 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
            deposit_value, deposit_currency, deposit_date_in, deposit_date_out,
            commission_value, commission_basis,
            agent_name, agent_email, agent_phone,
+           subdomain, language, partner_currency, country,
+           billing_address, billing_zip, billing_city, billing_country, billing_email_address,
+           admin_first_name, admin_last_name, admin_email,
            created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46)
         ON CONFLICT DO NOTHING
       `, [
         company,
@@ -325,6 +328,21 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
         nStr(row.agent_name),
         nStr(row.agent_email),
         nStr(row.agent_phone),
+        // Zadanie A
+        nStr(row.subdomain || row.subdomena),
+        nStr(row.language || row.jezyk),
+        nStr(row.partner_currency || row.waluta_partnera),
+        nStr(row.country || row.kraj),
+        // Zadanie B
+        nStr(row.billing_address || row.billing_adres),
+        nStr(row.billing_zip || row.billing_kod_pocztowy),
+        nStr(row.billing_city || row.billing_miasto),
+        nStr(row.billing_country || row.billing_kraj),
+        nStr(row.billing_email_address || row.billing_email_rozliczeniowy),
+        // Zadanie C
+        nStr(row.admin_first_name || row.admin_imie),
+        nStr(row.admin_last_name  || row.admin_nazwisko),
+        nStr(row.admin_email),
         req.user.id,
       ]);
       imported++;
@@ -444,13 +462,24 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
     const entity2 = nStr(row.entity_2 || row.entity2 || row.podmiot_2);
     const entities = [entity1, entity2].filter(Boolean);
 
+    // tags — format: klucz1:wartość1;klucz2:wartość2
+    const tagsRaw = nStr(row.tags || row.tagi) || '';
+    const parsedTags = tagsRaw
+      ? tagsRaw.split(';').map(t => t.trim()).filter(Boolean).map(t => {
+          const sep = t.indexOf(':');
+          if (sep < 1) return null;
+          return { key: t.slice(0, sep).trim(), value: t.slice(sep + 1).trim() };
+        }).filter(Boolean)
+      : [];
+
     try {
-      await db.query(`
+      const { rows: docRows } = await db.query(`
         INSERT INTO documents
           (name, doc_type, gdpr_type, status, group_id, entities,
            creation_date, signing_date, expiration_date,
            created_by, owner_id)
         VALUES ($1,$2::doc_type,$3::gdpr_type,$4::doc_status,$5,$6,$7,$8,$9,$10,$10)
+        RETURNING id
       `, [
         name,
         docType,
@@ -463,6 +492,19 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
         nDate(row.expiration_date || row.data_waznosci),
         req.user.id,
       ]);
+
+      // Importuj tagi
+      if (parsedTags.length && docRows[0]?.id) {
+        const docId = docRows[0].id;
+        for (const tag of parsedTags) {
+          await db.query(
+            `INSERT INTO document_tags (document_id, key, value, created_by)
+             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+            [docId, tag.key, tag.value, req.user.id]
+          ).catch(() => {}); // ignoruj błędy pojedynczych tagów
+        }
+      }
+
       imported++;
     } catch (e) {
       errors.push({ row: rowNum, field: name, error: e.message });
@@ -526,16 +568,16 @@ router.get('/template/:type', (req, res) => {
       'Przykład Sp. z o.o.,Jan Kowalski,CEO,jan@example.pl,+48600000000,targi,qualification,150000,PLN,40,2025-12-31,IT,handlowiec@firma.pl,Notatka,false,tag1|tag2,,,,,30',
     ].join('\n'),
     partners: [
-      'company,partner_number,nip,address,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],group_name,contract_signed,contract_expires,contract_value,status[onboarding|active|inactive|churned],notes,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],online_pct,tags,billing_contact_name,billing_contact_title,billing_email,billing_phone,credit_limit_value,credit_limit_currency[PLN|EUR|USD|GBP],deposit_value,deposit_currency[PLN|EUR|USD|GBP],deposit_date_in,deposit_date_out,commission_value,commission_basis[nie_dotyczy|segmenty|rezerwacje|progi_obrotowe],agent_name,agent_email,agent_phone,manager_email',
-      '"Przykład Partner Sp. z o.o.","P-0001","1234567890","ul. Przykładowa 1, Warszawa","Anna Nowak","VP","anna@example.pl","+48601000000","Transport","Magellan Holdings","2025-01-01","2026-01-01","500000","active","Uwagi","PLN","30","tag1|tag2","Jan Rozliczenia","Specjalista","rozlicz@firma.pl","+48600111222","100000","PLN","50000","PLN","2025-01-15","","0.05","segmenty","","","","opiekun@worktrips.com"',
+      'company,partner_number,nip,address,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],group_name,contract_signed,contract_expires,contract_value,status[onboarding|active|inactive|churned],notes,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],online_pct,tags,billing_contact_name,billing_contact_title,billing_email,billing_phone,credit_limit_value,credit_limit_currency[PLN|EUR|USD|GBP],deposit_value,deposit_currency[PLN|EUR|USD|GBP],deposit_date_in,deposit_date_out,commission_value,commission_basis[nie_dotyczy|segmenty|rezerwacje|progi_obrotowe],agent_name,agent_email,agent_phone,manager_email,subdomain,language[Polski|Angielski|Rosyjski|Rumuński|Niemiecki],partner_currency[PLN|EUR|USD|GBP|CHF],country,billing_address,billing_zip,billing_city,billing_country,billing_email_address,admin_first_name,admin_last_name,admin_email',
+      '"Przykład Partner Sp. z o.o.","P-0001","1234567890","ul. Przykładowa 1, Warszawa","Anna Nowak","VP","anna@example.pl","+48601000000","Transport","Magellan Holdings","2025-01-01","2026-01-01","500000","active","Uwagi","PLN","30","tag1|tag2","Jan Rozliczenia","Specjalista","rozlicz@firma.pl","+48600111222","100000","PLN","50000","PLN","2025-01-15","","0.05","segmenty","","","","opiekun@worktrips.com","acme","Polski","PLN","Polska","ul. Fakturowa 1","00-001","Warszawa","Polska","faktury@acme.pl","Jan","Kowalski","admin@acme.pl"',
     ].join('\n'),
   };
 
   // Documents template
   if (!templates.documents) {
     templates.documents = [
-      'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],entity_1,entity_2,creation_date,signing_date,expiration_date',
-      '"Umowa partnerska XYZ","partner_agreement","no_gdpr","new","Sprzedaz","Firma XYZ","Jan Kowalski","2026-01-15","","2027-01-15"',
+      'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],entity_1,entity_2,creation_date,signing_date,expiration_date,tags',
+      '"Umowa partnerska XYZ","partner_agreement","no_gdpr","new","Sprzedaz","Worktrips Sp. z o.o.","Jan Kowalski","2026-01-15","","2027-01-15","contract_id:2026/ABC/001;region:EMEA"',
     ].join('\n');
   }
 
@@ -600,7 +642,7 @@ router.get('/export/:type', async (req, res, next) => {
     }
 
     if (type === 'partners') {
-      const header = 'company,partner_number,nip,address,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],group_name,contract_signed,contract_expires,contract_value,status[onboarding|active|inactive|churned],notes,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],online_pct,tags,billing_contact_name,billing_contact_title,billing_email,billing_phone,credit_limit_value,credit_limit_currency[PLN|EUR|USD|GBP],deposit_value,deposit_currency[PLN|EUR|USD|GBP],deposit_date_in,deposit_date_out,commission_value,commission_basis[nie_dotyczy|segmenty|rezerwacje|progi_obrotowe],agent_name,agent_email,agent_phone,manager_email';
+      const header = 'company,partner_number,nip,address,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],group_name,contract_signed,contract_expires,contract_value,status[onboarding|active|inactive|churned],notes,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],online_pct,tags,billing_contact_name,billing_contact_title,billing_email,billing_phone,credit_limit_value,credit_limit_currency[PLN|EUR|USD|GBP],deposit_value,deposit_currency[PLN|EUR|USD|GBP],deposit_date_in,deposit_date_out,commission_value,commission_basis[nie_dotyczy|segmenty|rezerwacje|progi_obrotowe],agent_name,agent_email,agent_phone,manager_email,subdomain,language,partner_currency,country,billing_address,billing_zip,billing_city,billing_country,billing_email_address,admin_first_name,admin_last_name,admin_email';
 
       const { rows } = await db.query(`
         SELECT p.*, g.name AS group_name_val,
@@ -626,6 +668,12 @@ router.get('/export/:type', async (req, res, next) => {
           fmt(r.deposit_date_in), fmt(r.deposit_date_out),
           r.commission_value, r.commission_basis,
           r.agent_name, r.agent_email, r.agent_phone, r.manager_email_val,
+          // Zadanie A
+          r.subdomain, r.language, r.partner_currency, r.country,
+          // Zadanie B
+          r.billing_address, r.billing_zip, r.billing_city, r.billing_country, r.billing_email_address,
+          // Zadanie C
+          r.admin_first_name, r.admin_last_name, r.admin_email,
         ]));
       }
 
@@ -635,12 +683,16 @@ router.get('/export/:type', async (req, res, next) => {
     }
 
     if (type === 'documents') {
-      const header = 'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],entity_1,entity_2,creation_date,signing_date,expiration_date';
+      const header = 'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],entity_1,entity_2,creation_date,signing_date,expiration_date,tags';
 
       const { rows } = await db.query(`
         SELECT d.name, d.doc_type, d.gdpr_type, d.status,
                gp.display_name AS group_name_val,
-               d.entities, d.creation_date, d.signing_date, d.expiration_date
+               d.entities, d.creation_date, d.signing_date, d.expiration_date,
+               COALESCE(
+                 (SELECT string_agg(key || ':' || value, ';' ORDER BY key)
+                  FROM document_tags WHERE document_id = d.id),
+               '') AS tags_str
         FROM documents d
         LEFT JOIN group_profiles gp ON gp.id = d.group_id
         WHERE d.deleted_at IS NULL
@@ -655,6 +707,7 @@ router.get('/export/:type', async (req, res, next) => {
           r.group_name_val,
           entities[0] || '', entities[1] || '',
           fmt(r.creation_date), fmt(r.signing_date), fmt(r.expiration_date),
+          r.tags_str || '',
         ]));
       }
 

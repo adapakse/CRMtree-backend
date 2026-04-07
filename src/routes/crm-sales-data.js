@@ -443,7 +443,7 @@ router.post('/import', requireAuth, crmAuth, requireCrmManager, upload.single('f
 // Scope: salesperson widzi tylko swoich partnerów
 router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
   try {
-    const { product_type } = req.query;
+    const { product_type, rep_id, partner_name } = req.query;
     const pfrom = req.query.period_from || '';
     const pto   = req.query.period_to   || '';
 
@@ -453,7 +453,15 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
       if (pfrom)        { p.push(pfrom);        w.push(`t.period >= $${p.length}`); }
       if (pto)          { p.push(pto);           w.push(`t.period <= $${p.length}`); }
       if (product_type) { p.push(product_type);  w.push(`t.product_type = $${p.length}`); }
-      if (!req.isCrmManager) { p.push(req.user.id); w.push(`p.manager_id = $${p.length}`); }
+      // Scope: salesperson widzi tylko swoich
+      if (!req.isCrmManager) {
+        p.push(req.user.id); w.push(`p.manager_id = $${p.length}`);
+      } else if (rep_id) {
+        // Manager filtruje po wybranym handlowcu
+        p.push(rep_id); w.push(`p.manager_id = $${p.length}`);
+      }
+      // Filtr po partnerze
+      if (partner_name) { p.push(partner_name); w.push(`t.partner_name = $${p.length}`); }
       if (extraWhere) { p.push(...extraWhere.params); extraWhere.clauses.forEach(c => w.push(c.replace(/\$(\d+)/g, (_, n) => `$${+n + p.length - extraWhere.params.length}`))); }
       return { where: w.length ? 'WHERE ' + w.join(' AND ') : '', params: p };
     }
@@ -547,8 +555,10 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
       const prevW = [], prevP = [];
       prevP.push(prevPFrom); prevW.push(`t.period >= $${prevP.length}`);
       prevP.push(prevPTo);   prevW.push(`t.period <= $${prevP.length}`);
-      if (product_type)        { prevP.push(product_type); prevW.push(`t.product_type = $${prevP.length}`); }
-      if (!req.isCrmManager)   { prevP.push(req.user.id);  prevW.push(`p.manager_id = $${prevP.length}`); }
+      if (product_type)      { prevP.push(product_type); prevW.push(`t.product_type = $${prevP.length}`); }
+      if (!req.isCrmManager) { prevP.push(req.user.id);  prevW.push(`p.manager_id = $${prevP.length}`); }
+      else if (rep_id)       { prevP.push(rep_id);        prevW.push(`p.manager_id = $${prevP.length}`); }
+      if (partner_name)      { prevP.push(partner_name);  prevW.push(`t.partner_name = $${prevP.length}`); }
 
       const prevWhere = prevW.length ? 'WHERE ' + prevW.join(' AND ') : '';
       const prevRes = await db.query(`
