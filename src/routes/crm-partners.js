@@ -27,6 +27,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
   try {
     const {
       search = "", status = "", group_id = "",
+      manager_id = "", industry = "",
       page = "1", limit = "50",
       sort = "company", dir = "asc",
     } = req.query;
@@ -51,9 +52,16 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
       params.push(parseInt(group_id));
       where.push(`p.group_id = $${params.length}`);
     }
-    // handlowiec widzi tylko swoich, manager widzi wszystkich
+    if (industry) {
+      params.push(industry);
+      where.push(`p.industry = $${params.length}`);
+    }
+    // handlowiec widzi tylko swoich, manager widzi wszystkich (lub filtruje po wybranym)
     if (!req.user.is_admin && req.user.crm_role !== "sales_manager") {
       params.push(req.user.id);
+      where.push(`p.manager_id = $${params.length}`);
+    } else if (manager_id) {
+      params.push(manager_id);
       where.push(`p.manager_id = $${params.length}`);
     }
 
@@ -220,6 +228,12 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
       "online_pct", "active_users", "tags", "notes",
       "agent_name", "agent_email", "agent_phone",
       "onboarding_step",
+      // Zadanie A: Dane dodatkowe
+      "subdomain", "language", "partner_currency", "country",
+      // Zadanie B: Billing Address
+      "billing_address", "billing_zip", "billing_city", "billing_country", "billing_email_address",
+      // Zadanie C: Partner Admin
+      "admin_first_name", "admin_last_name", "admin_email",
     ];
     const sets   = [];
     const params = [];
@@ -425,8 +439,104 @@ router.delete("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ONBOARDING TASKS
+// ONBOARDING TASKS — /onboarding-tasks (alias zgodny z frontendem)
 // ═══════════════════════════════════════════════════════════════════════════════
+router.get("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT t.*, u.display_name AS assigned_to_name, d.display_name AS done_by_name
+       FROM crm_onboarding_tasks t
+       LEFT JOIN users u ON u.id = t.assigned_to
+       LEFT JOIN users d ON d.id = t.done_by
+       WHERE t.partner_id = $1
+       ORDER BY t.step, t.created_at`,
+      [req.params.id]
+    );
+    res.json(r.rows);
+  } catch (err) {
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+router.post("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const { step = 0, title, body, type = "task", assigned_to, due_date } = req.body;
+    if (!title) return res.status(400).json({ error: "title jest wymagane" });
+    const r = await pool.query(
+      `INSERT INTO crm_onboarding_tasks (partner_id, step, title, body, type, assigned_to, due_date, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [req.params.id, step, title, body || null, type, assigned_to || null, due_date || null, req.user.id]
+    );
+    const task = r.rows[0];
+    if (assigned_to) {
+      const uQ = await pool.query("SELECT display_name FROM users WHERE id=$1", [assigned_to]);
+      task.assigned_to_name = uQ.rows[0]?.display_name || null;
+    }
+    res.status(201).json(task);
+  } catch (err) {
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+router.patch("/:id/onboarding-tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const { id, taskId } = req.params;
+    const allowed = ["title", "body", "type", "assigned_to", "due_date", "done"];
+    const sets   = [];
+    const params = [];
+    for (const key of allowed) {
+      if (key in req.body) {
+        if (key === "done") {
+          params.push(req.body.done ? req.user.id : null);
+          sets.push(`done_by = $${params.length}`);
+          params.push(req.body.done ? new Date().toISOString() : null);
+          sets.push(`done_at = $${params.length}`);
+          params.push(!!req.body.done);
+          sets.push(`done = $${params.length}`);
+        } else {
+          params.push(req.body[key] === "" ? null : req.body[key]);
+          sets.push(`${key} = $${params.length}`);
+        }
+      }
+    }
+    if (!sets.length) return res.status(400).json({ error: "Brak pól" });
+    params.push(taskId, id);
+    const r = await pool.query(
+      `UPDATE crm_onboarding_tasks SET ${sets.join(", ")}, updated_at = NOW()
+       WHERE id = $${params.length - 1} AND partner_id = $${params.length}
+       RETURNING *`,
+      params
+    );
+    if (!r.rows.length) return res.status(404).json({ error: "Nie znaleziono" });
+    const task = r.rows[0];
+    if (task.assigned_to) {
+      const uQ = await pool.query("SELECT display_name FROM users WHERE id=$1", [task.assigned_to]);
+      task.assigned_to_name = uQ.rows[0]?.display_name || null;
+    }
+    if (task.done_by) {
+      const dQ = await pool.query("SELECT display_name FROM users WHERE id=$1", [task.done_by]);
+      task.done_by_name = dQ.rows[0]?.display_name || null;
+    }
+    res.json(task);
+  } catch (err) {
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+router.delete("/:id/onboarding-tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
+  try {
+    await pool.query(
+      "DELETE FROM crm_onboarding_tasks WHERE id = $1 AND partner_id = $2",
+      [req.params.taskId, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ONBOARDING TASKS — /tasks (oryginalne endpointy — zachowane dla backcompatibility)
 router.get("/:id/tasks", requireAuth, crmAuth, async (req, res) => {
   try {
     const r = await pool.query(
@@ -550,32 +660,35 @@ router.post("/:id/onboarding-step", requireAuth, crmAuth, async (req, res) => {
 router.get("/:id/documents", requireAuth, crmAuth, async (req, res) => {
   try {
     const r = await pool.query(
-      `SELECT pd.*, d.title AS document_title, d.doc_number, d.doc_type
+      `SELECT pd.*, d.name AS document_title, d.status AS document_status,
+              d.doc_number, d.doc_type
        FROM crm_partner_documents pd
-       LEFT JOIN documents d ON d.id::text = pd.document_id
+       LEFT JOIN documents d ON d.id = pd.document_id
        WHERE pd.partner_id = $1
-       ORDER BY pd.created_at DESC`,
-      [req.params.id]
+       ORDER BY pd.linked_at DESC`,
+      [parseInt(req.params.id)]
     );
     res.json(r.rows);
   } catch (err) {
-    res.status(500).json({ error: "Błąd serwera" });
+    console.error("GET /crm/partners/:id/documents error:", err.message);
+    res.status(500).json({ error: "Błąd serwera", detail: err.message });
   }
 });
 
 router.post("/:id/documents", requireAuth, crmAuth, async (req, res) => {
   try {
-    const { document_id } = req.body;
+    const { document_id, doc_role } = req.body;
     const r = await pool.query(
-      `INSERT INTO crm_partner_documents (partner_id, document_id, created_by)
-       VALUES ($1, $2, $3)
-       ON CONFLICT DO NOTHING
+      `INSERT INTO crm_partner_documents (partner_id, document_id, doc_role, linked_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (partner_id, document_id) DO UPDATE SET doc_role = EXCLUDED.doc_role
        RETURNING *`,
-      [req.params.id, document_id, req.user.id]
+      [parseInt(req.params.id), document_id, doc_role || null, req.user.id]
     );
     res.status(201).json(r.rows[0] || { partner_id: req.params.id, document_id });
   } catch (err) {
-    res.status(500).json({ error: "Błąd serwera" });
+    console.error("POST /crm/partners/:id/documents error:", err.message);
+    res.status(500).json({ error: "Błąd serwera", detail: err.message });
   }
 });
 
@@ -583,11 +696,12 @@ router.delete("/:id/documents/:docId", requireAuth, crmAuth, async (req, res) =>
   try {
     await pool.query(
       "DELETE FROM crm_partner_documents WHERE partner_id = $1 AND document_id = $2",
-      [req.params.id, req.params.docId]
+      [parseInt(req.params.id), req.params.docId]
     );
-    res.json({ ok: true });
+    res.status(204).end();
   } catch (err) {
-    res.status(500).json({ error: "Błąd serwera" });
+    console.error("DELETE /crm/partners/:id/documents error:", err.message);
+    res.status(500).json({ error: "Błąd serwera", detail: err.message });
   }
 });
 
