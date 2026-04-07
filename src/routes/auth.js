@@ -10,6 +10,21 @@ const { requireAuth, signAccessToken, signRefreshToken, saveRefreshToken } = req
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
 
+// TYMCZASOWY — usuń po debugowaniu
+router.get('/saml-diag', (req, res) => {
+  const cert = config.saml?.idpCert || '';
+  const cleaned = cert.replace(/\s+/g, '');
+  res.json({
+    node_env:        process.env.NODE_ENV,
+    strategy_loaded: !!require('passport')._strategies?.saml,
+    entry_point:     config.saml?.entryPoint?.slice(0, 60) + '…',
+    issuer:          config.saml?.issuer,
+    callback_url:    config.saml?.callbackUrl,
+    cert_length:     cleaned.length,
+    cert_starts:     cleaned.slice(0, 20),
+    cert_ends:       cleaned.slice(-20),
+  });
+});
 // ─── SAML routes — aktywne TYLKO na produkcji (NODE_ENV=production) ──────────
 // Lokalnie i na htcd (NODE_ENV=development) używany jest stub poniżej.
 if (process.env.NODE_ENV !== 'development') {
