@@ -10,21 +10,6 @@ const { requireAuth, signAccessToken, signRefreshToken, saveRefreshToken } = req
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
 
-// TYMCZASOWY — usuń po debugowaniu
-router.get('/saml-diag', (req, res) => {
-  const cert = config.saml?.idpCert || '';
-  const cleaned = cert.replace(/\s+/g, '');
-  res.json({
-    node_env:        process.env.NODE_ENV,
-    strategy_loaded: !!require('passport')._strategies?.saml,
-    entry_point:     config.saml?.entryPoint?.slice(0, 60) + '…',
-    issuer:          config.saml?.issuer,
-    callback_url:    config.saml?.callbackUrl,
-    cert_length:     cleaned.length,
-    cert_starts:     cleaned.slice(0, 20),
-    cert_ends:       cleaned.slice(-20),
-  });
-});
 // ─── SAML routes — aktywne TYLKO na produkcji (NODE_ENV=production) ──────────
 // Lokalnie i na htcd (NODE_ENV=development) używany jest stub poniżej.
 if (process.env.NODE_ENV !== 'development') {
@@ -44,6 +29,31 @@ if (process.env.NODE_ENV !== 'development') {
     '/saml/callback',
     injectAuditContext,
     (req, res, next) => {
+      // ── DIAGNOSTYKA CERTYFIKATU — usuń po naprawieniu ─────────────────
+      try {
+        if (req.body?.SAMLResponse) {
+          const xml = Buffer.from(req.body.SAMLResponse, 'base64').toString('utf8');
+          // Wyciągnij certyfikat z odpowiedzi IdP
+          const certMatch = xml.match(/<(?:[^:>]+:)?X509Certificate[^>]*>([^<]+)<\/(?:[^:>]+:)?X509Certificate>/);
+          if (certMatch) {
+            const certFromResponse = certMatch[1].replace(/\s+/g, '');
+            const certFromEnv      = (config.saml?.idpCert || '').replace(/\s+/g, '')
+                                       .replace(/-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----/g, '');
+            logger.info('[SAML] Porównanie certyfikatów', {
+              cert_in_response_length: certFromResponse.length,
+              cert_in_response_start:  certFromResponse.slice(0, 40),
+              cert_in_env_length:      certFromEnv.length,
+              cert_in_env_start:       certFromEnv.slice(0, 40),
+              certs_match:             certFromResponse === certFromEnv,
+            });
+          } else {
+            logger.warn('[SAML] Brak X509Certificate w odpowiedzi IdP');
+          }
+        }
+      } catch (diagErr) {
+        logger.warn('[SAML] Błąd diagnostyki cert', { err: diagErr.message });
+      }
+      // ── KONIEC DIAGNOSTYKI ─────────────────────────────────────────────
       logger.info('[SAML] Odebrano callback', {
         hasSamlResponse: !!req.body?.SAMLResponse,
       });
