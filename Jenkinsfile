@@ -158,10 +158,6 @@ pipeline {
         //failure {
           //  office365ConnectorSend color: '#C00000', message: "Build ${BUILD_NUMBER} ZAKOŃCZONY BŁĘDEM ❌", webhookUrl: TEAMS_FAILURE_WEBHOOK_URL
        // }
-        always {
-            junit '**/junit.xml'
-            archiveArtifacts artifacts: 'eslint.report.json', allowEmptyArchive: true
-        }
         cleanup {
             deleteDir()
         }
