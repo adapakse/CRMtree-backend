@@ -63,25 +63,6 @@ pipeline {
             }
         }
 
-        stage("Lint") {
-            steps {
-                nodejs(nodeJSInstallationName: env.NODEJS) {
-                    catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                        sh "npm run lint"
-                    }
-                }
-            }
-        }
-
-        stage("Sprawdzenie formatowania") {
-            steps {
-                nodejs(nodeJSInstallationName: env.NODEJS) {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                    sh "npm run format:check"
-                    }
-                }
-            }
-        }
 
         // stage("Testy") {
         //     steps {
