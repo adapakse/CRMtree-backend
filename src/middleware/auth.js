@@ -46,8 +46,13 @@ if (samlCert && samlCert.length > 10) {
         issuer:                       config.saml.issuer,
         callbackUrl:                  config.saml.callbackUrl,
         cert:                         pemCert,
-        wantAssertionsSigned:         true,
+        // Google Workspace podpisuje element <Response>, nie <Assertion>.
+        // wantAssertionsSigned: true powoduje "Invalid signature" — Google
+        // nie umieszcza podpisu na poziomie Assertion, tylko na Response.
+        wantAssertionsSigned:         false,
         disableRequestedAuthnContext: true,
+        // Wyłącz walidację InResponseTo — Google czasem nie zwraca tego pola
+        validateInResponseTo:         'never',
       },
       async (profile, done) => {
         try {
