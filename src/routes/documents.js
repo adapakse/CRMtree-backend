@@ -156,6 +156,8 @@ router.get(
           `SELECT
              d.id, d.doc_number, d.name, d.doc_type, d.gdpr_type, d.status,
              d.entities, d.creation_date, d.signing_date, d.expiration_date,
+             d.nip, d.country, d.contract_subject,
+             d.contact_name, d.contact_email, d.contact_phone,
              d.blob_name, d.blob_size_bytes, d.created_at, d.updated_at,
              d.group_id, gp.name AS group_name, gp.display_name AS group_display,
              d.owner_id, u.display_name AS owner_name, u.email AS owner_email,
@@ -216,24 +218,20 @@ router.post(
   upload.single("file"),
   [
     body("name").notEmpty().isString().trim().isLength({ max: 500 }),
-    body("doc_type")
-      .notEmpty()
-      .isIn([
-        "partner_agreement",
-        "it_supplier_agreement",
-        "employee_agreement",
-        "nda",
-        "operator_agreement",
-      ]),
-    body("gdpr_type")
-      .notEmpty()
-      .isIn(["data_processing_entrustment", "data_administration", "no_gdpr"]),
+    body("doc_type").notEmpty().isString().trim(),
+    body("gdpr_type").notEmpty().isString().trim(),
     body("group_id").notEmpty().isUUID(),
     body("entities").optional().isArray(),
     body("owner_id").optional().isUUID(),
     body("document_group_id").optional().isUUID(),
     body("expiration_date").optional().isISO8601(),
     body("signing_date").optional().isISO8601(),
+    body("nip").optional({ nullable: true }).isString().trim().isLength({ max: 15 }),
+    body("country").optional({ nullable: true }).isString().trim().isLength({ max: 100 }),
+    body("contract_subject").optional({ nullable: true }).isString().trim().isLength({ max: 100 }),
+    body("contact_name").optional({ nullable: true }).isString().trim().isLength({ max: 200 }),
+    body("contact_email").optional({ nullable: true }).isEmail().normalizeEmail(),
+    body("contact_phone").optional({ nullable: true }).isString().trim().isLength({ max: 50 }),
     body("tags").optional().isArray(),
     body("tags.*.key").optional().isString().trim(),
     body("tags.*.value").optional().isString().trim(),
@@ -261,6 +259,12 @@ router.post(
         document_group_id,
         expiration_date,
         signing_date,
+        nip,
+        country,
+        contract_subject,
+        contact_name,
+        contact_email,
+        contact_phone,
         tags = [],
       } = req.body;
 
@@ -270,8 +274,9 @@ router.post(
         const { rows } = await client.query(
           `INSERT INTO documents
              (name, doc_type, gdpr_type, group_id, entities, owner_id,
-              document_group_id, expiration_date, signing_date, created_by)
-           VALUES ($1,$2::doc_type,$3::gdpr_type,$4,$5,$6,$7,$8,$9,$10)
+              document_group_id, expiration_date, signing_date, created_by,
+              nip, country, contract_subject, contact_name, contact_email, contact_phone)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
            RETURNING *`,
           [
             name,
@@ -284,6 +289,12 @@ router.post(
             expiration_date || null,
             signing_date || null,
             req.user.id,
+            nip || null,
+            country || null,
+            contract_subject || null,
+            contact_name || null,
+            contact_email || null,
+            contact_phone || null,
           ],
         );
         const doc = rows[0];
@@ -445,36 +456,21 @@ router.patch(
   [
     param("id").isUUID(),
     body("name").optional().isString().trim().isLength({ max: 500 }),
-    body("doc_type")
-      .optional()
-      .isIn([
-        "partner_agreement",
-        "it_supplier_agreement",
-        "employee_agreement",
-        "nda",
-        "operator_agreement",
-      ]),
-    body("gdpr_type")
-      .optional()
-      .isIn(["data_processing_entrustment", "data_administration", "no_gdpr"]),
-    body("status")
-      .optional()
-      .isIn([
-        "new",
-        "being_edited",
-        "being_signed",
-        "being_approved",
-        "signed",
-        "hold",
-        "completed",
-        "rejected",
-      ]),
+    body("doc_type").optional().isString().trim(),
+    body("gdpr_type").optional().isString().trim(),
+    body("status").optional().isString().trim(),
     body("entities").optional().isArray(),
     body("owner_id").optional().isUUID(),
     body("group_id").optional().isUUID(),
     body("document_group_id").optional().isUUID(),
-    body("expiration_date").optional().isISO8601(),
-    body("signing_date").optional().isISO8601(),
+    body("expiration_date").optional({ nullable: true }).isISO8601(),
+    body("signing_date").optional({ nullable: true }).isISO8601(),
+    body("nip").optional({ nullable: true }).isString().trim().isLength({ max: 15 }),
+    body("country").optional({ nullable: true }).isString().trim().isLength({ max: 100 }),
+    body("contract_subject").optional({ nullable: true }).isString().trim().isLength({ max: 100 }),
+    body("contact_name").optional({ nullable: true }).isString().trim().isLength({ max: 200 }),
+    body("contact_email").optional({ nullable: true }).isEmail().normalizeEmail(),
+    body("contact_phone").optional({ nullable: true }).isString().trim().isLength({ max: 50 }),
   ],
   validate,
   async (req, res, next) => {
@@ -508,6 +504,12 @@ router.patch(
         "document_group_id",
         "expiration_date",
         "signing_date",
+        "nip",
+        "country",
+        "contract_subject",
+        "contact_name",
+        "contact_email",
+        "contact_phone",
       ];
       const updates = {};
       const setClauses = [];
@@ -517,11 +519,7 @@ router.patch(
       for (const field of allowed) {
         if (req.body[field] !== undefined) {
           updates[field] = req.body[field];
-          if (field === "doc_type")
-            setClauses.push(`doc_type = $${p++}::doc_type`);
-          else if (field === "gdpr_type")
-            setClauses.push(`gdpr_type = $${p++}::gdpr_type`);
-          else if (field === "status")
+          if (field === "status")
             setClauses.push(`status = $${p++}::doc_status`);
           else setClauses.push(`${field} = $${p++}`);
           params.push(req.body[field] === "" ? null : req.body[field]);

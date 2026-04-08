@@ -477,8 +477,10 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
         INSERT INTO documents
           (name, doc_type, gdpr_type, status, group_id, entities,
            creation_date, signing_date, expiration_date,
-           created_by, owner_id)
-        VALUES ($1,$2::doc_type,$3::gdpr_type,$4::doc_status,$5,$6,$7,$8,$9,$10,$10)
+           created_by, owner_id,
+           nip, country, contract_subject,
+           contact_name, contact_email, contact_phone)
+        VALUES ($1,$2,$3,$4::doc_status,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,$14,$15,$16)
         RETURNING id
       `, [
         name,
@@ -491,6 +493,12 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
         nDate(row.signing_date || row.data_podpisania),
         nDate(row.expiration_date || row.data_waznosci),
         req.user.id,
+        nStr(row.nip),
+        nStr(row.country || row.kraj_kontrahenta),
+        nStr(row.contract_subject || row.przedmiot_umowy),
+        nStr(row.contact_name || row.kontakt_imie_nazwisko),
+        nStr(row.contact_email || row.kontakt_email),
+        nStr(row.contact_phone || row.kontakt_telefon),
       ]);
 
       // Importuj tagi
@@ -576,7 +584,7 @@ router.get('/template/:type', (req, res) => {
   // Documents template
   if (!templates.documents) {
     templates.documents = [
-      'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],entity_1,entity_2,creation_date,signing_date,expiration_date,tags',
+      'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],entity_1,entity_2,nip,country,contract_subject[Podróże służbowe|Konferencje/Spotkania|Zakwaterowanie|System|Inne],contact_name,contact_email,contact_phone,creation_date,signing_date,expiration_date[puste=Czas nieokreślony],tags',
       '"Umowa partnerska XYZ","partner_agreement","no_gdpr","new","Sprzedaz","Worktrips Sp. z o.o.","Jan Kowalski","2026-01-15","","2027-01-15","contract_id:2026/ABC/001;region:EMEA"',
     ].join('\n');
   }
@@ -683,12 +691,14 @@ router.get('/export/:type', async (req, res, next) => {
     }
 
     if (type === 'documents') {
-      const header = 'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],entity_1,entity_2,creation_date,signing_date,expiration_date,tags';
+      const header = 'name,doc_type,gdpr_type,status,group_name,entity_1,entity_2,nip,country,contract_subject,contact_name,contact_email,contact_phone,creation_date,signing_date,expiration_date,tags';
 
       const { rows } = await db.query(`
         SELECT d.name, d.doc_type, d.gdpr_type, d.status,
                gp.display_name AS group_name_val,
-               d.entities, d.creation_date, d.signing_date, d.expiration_date,
+               d.entities, d.nip, d.country, d.contract_subject,
+               d.contact_name, d.contact_email, d.contact_phone,
+               d.creation_date, d.signing_date, d.expiration_date,
                COALESCE(
                  (SELECT string_agg(key || ':' || value, ';' ORDER BY key)
                   FROM document_tags WHERE document_id = d.id),
@@ -706,6 +716,8 @@ router.get('/export/:type', async (req, res, next) => {
           r.name, r.doc_type, r.gdpr_type, r.status,
           r.group_name_val,
           entities[0] || '', entities[1] || '',
+          r.nip || '', r.country || '', r.contract_subject || '',
+          r.contact_name || '', r.contact_email || '', r.contact_phone || '',
           fmt(r.creation_date), fmt(r.signing_date), fmt(r.expiration_date),
           r.tags_str || '',
         ]));

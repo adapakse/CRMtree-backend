@@ -121,4 +121,95 @@ router.put(
   },
 );
 
+
+// ─── GET /api/admin/settings/groups ──────────────────────────────────────────
+// Lista grup użytkowników (group_profiles). Tylko admin.
+router.get("/groups", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, display_name, description, has_owner_restriction, is_active,
+              (SELECT COUNT(*) FROM user_group_roles ugr WHERE ugr.group_id = gp.id)::int AS member_count,
+              (SELECT COUNT(*) FROM documents d WHERE d.group_id = gp.id AND d.deleted_at IS NULL)::int AS document_count
+       FROM group_profiles gp
+       ORDER BY name`
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// ─── POST /api/admin/settings/groups ─────────────────────────────────────────
+// Tworzy nową grupę użytkowników. Tylko admin.
+router.post("/groups", requireAuth, requireAdmin, injectAuditContext, async (req, res, next) => {
+  try {
+    const { name, display_name, description, has_owner_restriction } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: "Pole 'name' jest wymagane" });
+    if (!display_name?.trim()) return res.status(400).json({ error: "Pole 'display_name' jest wymagane" });
+
+    const { rows } = await db.query(
+      `INSERT INTO group_profiles (name, display_name, description, has_owner_restriction, is_active)
+       VALUES ($1, $2, $3, $4, true)
+       RETURNING *`,
+      [name.trim(), display_name.trim(), description?.trim() || null, has_owner_restriction === true]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: `Grupa o nazwie '${req.body.name}' już istnieje` });
+    next(err);
+  }
+});
+
+// ─── PATCH /api/admin/settings/groups/:id ────────────────────────────────────
+// Aktualizuje grupę. Tylko admin.
+router.patch("/groups/:id", requireAuth, requireAdmin, injectAuditContext, async (req, res, next) => {
+  try {
+    const { display_name, description, has_owner_restriction, is_active } = req.body;
+    const { rows: existing } = await db.query(
+      "SELECT * FROM group_profiles WHERE id = $1", [req.params.id]
+    );
+    if (!existing.length) return res.status(404).json({ error: "Grupa nie znaleziona" });
+
+    const { rows } = await db.query(
+      `UPDATE group_profiles
+       SET display_name          = COALESCE($1, display_name),
+           description           = COALESCE($2, description),
+           has_owner_restriction = COALESCE($3, has_owner_restriction),
+           is_active             = COALESCE($4, is_active)
+       WHERE id = $5
+       RETURNING *`,
+      [
+        display_name?.trim() ?? null,
+        description?.trim() ?? null,
+        has_owner_restriction ?? null,
+        is_active ?? null,
+        req.params.id,
+      ]
+    );
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+});
+
+// ─── DELETE /api/admin/settings/groups/:id ───────────────────────────────────
+// Usuwa grupę. Blokuje usunięcie jeśli są przypisani użytkownicy lub dokumenty.
+router.delete("/groups/:id", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { rows: existing } = await db.query(
+      `SELECT gp.*,
+              (SELECT COUNT(*) FROM user_group_roles WHERE group_id = gp.id)::int AS member_count,
+              (SELECT COUNT(*) FROM documents WHERE group_id = gp.id AND deleted_at IS NULL)::int AS document_count
+       FROM group_profiles gp WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!existing.length) return res.status(404).json({ error: "Grupa nie znaleziona" });
+    const g = existing[0];
+    if (g.member_count > 0 || g.document_count > 0) {
+      return res.status(409).json({
+        error: `Nie można usunąć grupy — ma ${g.member_count} użytkowników i ${g.document_count} dokumentów.`,
+      });
+    }
+    await db.query("DELETE FROM group_profiles WHERE id = $1", [req.params.id]);
+    res.status(204).end();
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
+
