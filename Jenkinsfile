@@ -138,7 +138,7 @@ pipeline {
                                 git config pull.rebase false
                                 git pull
                                 cd docs_app
-                                sed -i "/^docs-front:/,/^[^ ]/ s/\\(tag: *\\).*/\\1\\"${BUILD_NUMBER}\\"/" "\$FILE_TO_EDIT"
+                                sed -i "/^docs-back:/,/^[^ ]/ s/\\(tag: *\\).*/\\1\\"${BUILD_NUMBER}\\"/" "\$FILE_TO_EDIT"
                                 git add "\$FILE_TO_EDIT"
                                 git commit -m "bump image version for ${params.ENVIRONMENT}"
                                 git push
