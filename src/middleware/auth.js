@@ -23,14 +23,29 @@ if (samlCert && samlCert.length > 10) {
     callbackUrl: config.saml.callbackUrl,
   });
 
+  // passport-saml v3+ wymaga certyfikatu w formacie PEM z nagłówkami.
+  // Google Workspace dostarcza go jako gołe base64 — zawijamy w nagłówki PEM.
+  const rawCert = samlCert.replace(/\s+/g, "");
+  const pemCert = rawCert.startsWith("-----BEGIN CERTIFICATE-----")
+    ? rawCert
+    : [
+        "-----BEGIN CERTIFICATE-----",
+        ...rawCert.match(/.{1,64}/g),
+        "-----END CERTIFICATE-----",
+      ].join("\n");
+
+  logger.info("[SAML] Certyfikat przygotowany", {
+    pem_length:  pemCert.length,
+    cert_starts: rawCert.slice(0, 20),
+  });
+
   passport.use(
     new SamlStrategy(
       {
         entryPoint:                   config.saml.entryPoint,
         issuer:                       config.saml.issuer,
         callbackUrl:                  config.saml.callbackUrl,
-        // Certyfikat IdP — Google dostarcza jako jeden ciąg base64 bez nagłówków PEM
-        cert:                         samlCert.replace(/\s+/g, ""),
+        cert:                         pemCert,
         wantAssertionsSigned:         true,
         disableRequestedAuthnContext: true,
       },
