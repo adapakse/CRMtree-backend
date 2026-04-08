@@ -127,21 +127,22 @@ pipeline {
         stage("Update tag") {
             steps {
                 sshagent(credentials: [params.GIT_IDENTITY]) {
-                    withEnv(["FILE_TO_EDIT=values-htpre.yaml"]) {
-                    sh """
-                        git clone --branch master git@bastion.org.hotailors.com:worktrips-admin/kubernetes.git argo_commit_workspace
-                        cd argo_commit_workspace
-                        git checkout master
-                        git config pull.rebase false
-                        git pull
-                        cd docs_app
-
-                        sed -i "/^docs-back:/,/^[^ ]/ s/\\(tag: *\\).*/\\1\"'"$BUILD_NUMBER"'\"/" "$FILE_TO_EDIT"
-
-                        git add "$FILE_TO_EDIT"
-                        git commit -m "bump image version for ${params.ENV}"
-                        git push
-                    """
+                    script {
+                        def fileToEdit = params.ENVIRONMENT == "PROD" ? "values-prod.yaml" : "values-htcd.yaml"
+                        withEnv(["FILE_TO_EDIT=${fileToEdit}"]) {
+                            sh """
+                                git clone --branch master git@bastion.org.hotailors.com:worktrips-admin/kubernetes.git argo_commit_workspace
+                                cd argo_commit_workspace
+                                git checkout master
+                                git config pull.rebase false
+                                git pull
+                                cd docs_app
+                                sed -i "/^docs-front:/,/^[^ ]/ s/\\(tag: *\\).*/\\1\\"${BUILD_NUMBER}\\"/" "\$FILE_TO_EDIT"
+                                git add "\$FILE_TO_EDIT"
+                                git commit -m "bump image version for ${params.ENVIRONMENT}"
+                                git push
+                            """
+                        }
                     }
                 }
             }
