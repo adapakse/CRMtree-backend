@@ -185,12 +185,9 @@ router.get('/export-settings', async (req, res, next) => {
       'SELECT key, value, value_type, label, description, category FROM app_settings ORDER BY category, key'
     );
     const { rows: groups } = await db.query(
-      `SELECT gp.name, gp.display_name, gp.description, gp.is_active,
-              json_agg(json_build_object('doc_type', gr.doc_type, 'access_level', gr.access_level)
-                ORDER BY gr.doc_type) FILTER (WHERE gr.doc_type IS NOT NULL) AS rules
-       FROM group_profiles gp
-       LEFT JOIN group_rules gr ON gr.group_id = gp.id
-       GROUP BY gp.id ORDER BY gp.name`
+      `SELECT id, name, display_name, description, has_owner_restriction, is_active
+       FROM group_profiles
+       ORDER BY name`
     );
 
     const payload = {
@@ -236,24 +233,16 @@ router.post('/import-settings', async (req, res, next) => {
     if (Array.isArray(payload.group_profiles)) {
       for (const g of payload.group_profiles) {
         const { rows } = await db.query(
-          `INSERT INTO group_profiles (name, display_name, description, is_active)
-           VALUES ($1,$2,$3,$4)
+          `INSERT INTO group_profiles (name, display_name, description, has_owner_restriction, is_active)
+           VALUES ($1,$2,$3,$4,$5)
            ON CONFLICT (name) DO UPDATE SET
-             display_name=$2, description=$3, is_active=$4
+             display_name=$2, description=$3, has_owner_restriction=$4, is_active=$5
            RETURNING id`,
-          [g.name, g.display_name, g.description ?? null, g.is_active ?? true]
+          [g.name, g.display_name, g.description ?? null, g.has_owner_restriction ?? false, g.is_active ?? true]
         );
         const groupId = rows[0].id;
 
-        if (Array.isArray(g.rules) && g.rules.length > 0) {
-          await db.query('DELETE FROM group_rules WHERE group_id=$1', [groupId]);
-          for (const r of g.rules) {
-            await db.query(
-              'INSERT INTO group_rules (group_id, doc_type, access_level) VALUES ($1,$2,$3)',
-              [groupId, r.doc_type, r.access_level]
-            );
-          }
-        }
+        // group_rules niet geïmporteerd — tabela nie istnieje w schemacie
         groupsUpdated++;
       }
     }
