@@ -110,7 +110,7 @@ router.get(
         params.push(status);
       }
       if (doc_type) {
-        conditions.push(`d.doc_type = $${p++}::doc_type`);
+        conditions.push(`d.doc_type = $${p++}`);
         params.push(doc_type);
       }
       if (group_id) {
