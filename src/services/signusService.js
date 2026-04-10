@@ -64,6 +64,13 @@ async function initiateSign({
   } catch (err) {
     const msg = err.response?.data?.message || err.message;
     logger.error("Signus initiate error", { documentId, error: msg });
+    // Log signing_failed to audit trail
+    await audit.log({
+      document: { id: documentId },
+      action: "signing_failed",
+      afterState: { error: msg },
+      metadata: { envelope_id: null },
+    }).catch(() => {}); // non-fatal
     throw new Error(`Signus API error: ${msg}`);
   }
 
@@ -188,10 +195,9 @@ async function processWebhook(payload, rawBody, signature) {
     // Audit
     await audit.log({
       document: { id: doc.id, doc_number: doc.doc_number, name: doc.name },
-      action:
-        event_type === "envelope.completed"
-          ? "signing_completed"
-          : "signing_completed",
+      action: event_type === "envelope.completed"
+        ? "signing_completed"
+        : "signing_initiated",   // signatory.completed = jeden podpisał, ale koperta jeszcze otwarta
       afterState: { version: nextVersion, signatory: signatory?.email },
       metadata: { envelope_id, event_type },
       client: txClient,

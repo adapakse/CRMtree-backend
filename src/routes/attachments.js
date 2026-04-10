@@ -299,11 +299,19 @@ router.delete(
       if (doc._access !== "full")
         return res.status(403).json({ error: "Full access required" });
       const { rows } = await db.query(
-        "DELETE FROM document_attachments WHERE id=$1 AND document_id=$2 RETURNING id",
+        "DELETE FROM document_attachments WHERE id=$1 AND document_id=$2 RETURNING *",
         [req.params.attId, req.params.documentId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Attachment not found" });
+      await audit.log({
+        user: req.user,
+        document: doc,
+        action: "attachment_deleted",
+        beforeState: { name: rows[0].name, blob_name: rows[0].blob_name },
+        metadata: { attachment_id: req.params.attId },
+        ipAddress: req.auditContext?.ipAddress,
+      });
       res.json({ message: "Attachment deleted" });
     } catch (err) {
       next(err);

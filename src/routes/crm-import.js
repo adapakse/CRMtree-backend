@@ -414,6 +414,11 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
     if (g.display_name) groupMap[g.display_name.toLowerCase()] = g.id;
   });
 
+  // Załaduj mapę userów (email → id) do resolwowania pola owner
+  const { rows: users } = await db.query('SELECT id, email FROM users WHERE is_active = true').catch(() => ({ rows: [] }));
+  const userMap = {};
+  users.forEach(u => { userMap[u.email.toLowerCase()] = u.id; });
+
   const { rows: logRows } = await db.query(
     `INSERT INTO crm_import_logs (import_type, filename, rows_total, imported_by)
      VALUES ('documents', $1, $2, $3) RETURNING id`,
@@ -462,6 +467,10 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
     const entity2 = nStr(row.entity_2 || row.entity2 || row.podmiot_2);
     const entities = [entity1, entity2].filter(Boolean);
 
+    // owner — email właściciela dokumentu
+    const ownerEmail = nStr(row.owner_email || row.owner || row.wlasciciel_email);
+    const ownerId = ownerEmail ? (userMap[ownerEmail.toLowerCase()] || null) : null;
+
     // tags — format: klucz1:wartość1;klucz2:wartość2
     const tagsRaw = nStr(row.tags || row.tagi) || '';
     const parsedTags = tagsRaw
@@ -480,7 +489,7 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
            created_by, owner_id,
            nip, country, contract_subject,
            contact_name, contact_email, contact_phone)
-        VALUES ($1,$2,$3,$4::doc_status,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,$14,$15,$16)
+        VALUES ($1,$2,$3,$4::doc_status,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
         RETURNING id
       `, [
         name,
@@ -492,7 +501,8 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
         nDate(row.creation_date || row.data_utworzenia) || new Date().toISOString().slice(0,10),
         nDate(row.signing_date || row.data_podpisania),
         nDate(row.expiration_date || row.data_waznosci),
-        req.user.id,
+        req.user.id,            // created_by
+        ownerId || req.user.id, // owner_id — z CSV lub fallback na importującego
         nStr(row.nip),
         nStr(row.country || row.kraj_kontrahenta),
         nStr(row.contract_subject || row.przedmiot_umowy),
@@ -584,8 +594,8 @@ router.get('/template/:type', (req, res) => {
   // Documents template
   if (!templates.documents) {
     templates.documents = [
-      'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],entity_1,entity_2,nip,country,contract_subject[Podróże służbowe|Konferencje/Spotkania|Zakwaterowanie|System|Inne],contact_name,contact_email,contact_phone,creation_date,signing_date,expiration_date[puste=Czas nieokreślony],tags',
-      '"Umowa partnerska XYZ","partner_agreement","no_gdpr","new","Sprzedaz","Worktrips Sp. z o.o.","Jan Kowalski","2026-01-15","","2027-01-15","contract_id:2026/ABC/001;region:EMEA"',
+      'name,doc_type[partner_agreement|nda|it_supplier_agreement|employee_agreement],gdpr_type[no_gdpr|data_processing_entrustment|data_administration],status[new|being_edited|being_approved|being_signed|signed|completed|rejected],group_name[Accounting|HR|Marketing|Obsługa Klienta|Operations|Sprzedaz|Zarzad],owner_email[format:email@domena.pl],entity_1,entity_2,nip,country,contract_subject[Podróże służbowe|Konferencje/Spotkania|Zakwaterowanie|System|Inne],contact_name,contact_email,contact_phone,creation_date,signing_date,expiration_date[puste=Czas nieokreślony],tags',
+      '"Umowa partnerska XYZ","partner_agreement","no_gdpr","new","Sprzedaz","adam.manka@worktrips.com","Worktrips Sp. z o.o.","Jan Kowalski","1234567890","Polska","Podróże służbowe","Jan Kowalski","jan@firma.pl","+48600000000","2026-01-15","2026-01-15","2027-01-15","contract_id:2026/ABC/001"',
     ].join('\n');
   }
 
@@ -691,11 +701,12 @@ router.get('/export/:type', async (req, res, next) => {
     }
 
     if (type === 'documents') {
-      const header = 'name,doc_type,gdpr_type,status,group_name,entity_1,entity_2,nip,country,contract_subject,contact_name,contact_email,contact_phone,creation_date,signing_date,expiration_date,tags';
+      const header = 'name,doc_type,gdpr_type,status,group_name,owner_email[format:email@domena.pl],entity_1,entity_2,nip,country,contract_subject,contact_name,contact_email,contact_phone,creation_date,signing_date,expiration_date,tags';
 
       const { rows } = await db.query(`
         SELECT d.name, d.doc_type, d.gdpr_type, d.status,
                gp.display_name AS group_name_val,
+               u.email AS owner_email_val,
                d.entities, d.nip, d.country, d.contract_subject,
                d.contact_name, d.contact_email, d.contact_phone,
                d.creation_date, d.signing_date, d.expiration_date,
@@ -705,6 +716,7 @@ router.get('/export/:type', async (req, res, next) => {
                '') AS tags_str
         FROM documents d
         LEFT JOIN group_profiles gp ON gp.id = d.group_id
+        LEFT JOIN users u ON u.id = d.owner_id
         WHERE d.deleted_at IS NULL
         ORDER BY d.doc_number
       `);
@@ -715,6 +727,7 @@ router.get('/export/:type', async (req, res, next) => {
         lines.push(row([
           r.name, r.doc_type, r.gdpr_type, r.status,
           r.group_name_val,
+          r.owner_email_val || '',
           entities[0] || '', entities[1] || '',
           r.nip || '', r.country || '', r.contract_subject || '',
           r.contact_name || '', r.contact_email || '', r.contact_phone || '',
