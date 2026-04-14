@@ -164,8 +164,8 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
           (company, contact_name, contact_title, email, phone, source, stage,
            value_pln, annual_turnover_currency, probability, close_date, industry,
            assigned_to, tags, notes, hot, created_by,
-           online_pct, agent_name, agent_email, agent_phone)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+           online_pct, agent_name, agent_email, agent_phone, first_contact_date)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
       `, [
         company,
         nStr(row.contact_name || row.kontakt),
@@ -188,6 +188,7 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
         nStr(row.agent_name),
         nStr(row.agent_email),
         nStr(row.agent_phone),
+        nDate(row.first_contact_date || row.pierwszy_kontakt),
       ]);
       imported++;
     } catch (e) {
@@ -582,8 +583,8 @@ router.get('/template/:type', (req, res) => {
   const bom = '\uFEFF'; // BOM dla Excel
   const templates = {
     leads: [
-      'company,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,source[strona_www|polecenie|cold_call|linkedin|targi|partner|agent|kampania|inbound|inne],stage[new|qualification|presentation|offer|negotiation|closed_won|closed_lost],value_pln,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],probability,close_date,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],assigned_to_email,notes,hot,tags,agent_name,agent_email,agent_phone,online_pct',
-      'Przykład Sp. z o.o.,Jan Kowalski,CEO,jan@example.pl,+48600000000,targi,qualification,150000,PLN,40,2025-12-31,IT,handlowiec@firma.pl,Notatka,false,tag1|tag2,,,,,30',
+      'company,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,source[strona_www|polecenie|cold_call|linkedin|targi|partner|agent|kampania|inbound|inne],stage[new|qualification|presentation|offer|negotiation|closed_won|closed_lost],value_pln,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],probability,close_date,first_contact_date[format:YYYY-MM-DD],industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],assigned_to_email,notes,hot,tags,agent_name,agent_email,agent_phone,online_pct',
+      'Przykład Sp. z o.o.,Jan Kowalski,CEO,jan@example.pl,+48600000000,targi,qualification,150000,PLN,40,2025-12-31,2025-10-01,IT,handlowiec@firma.pl,Notatka,false,tag1|tag2,,,,,30',
     ].join('\n'),
     partners: [
       'company,partner_number,nip,address,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],group_name,contract_signed,contract_expires,contract_value,status[onboarding|active|inactive|churned],notes,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],online_pct,tags,billing_contact_name,billing_contact_title,billing_email,billing_phone,credit_limit_value,credit_limit_currency[PLN|EUR|USD|GBP],deposit_value,deposit_currency[PLN|EUR|USD|GBP],deposit_date_in,deposit_date_out,commission_value,commission_basis[nie_dotyczy|segmenty|rezerwacje|progi_obrotowe],agent_name,agent_email,agent_phone,manager_email,subdomain,language[Polski|Angielski|Rosyjski|Rumuński|Niemiecki],partner_currency[PLN|EUR|USD|GBP|CHF],country,billing_address,billing_zip,billing_city,billing_country,billing_email_address,admin_first_name,admin_last_name,admin_email',
@@ -629,7 +630,7 @@ router.get('/export/:type', async (req, res, next) => {
 
     if (type === 'leads') {
       // Header identical to import template (without bracket hints for data rows)
-      const header = 'company,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,source[strona_www|polecenie|cold_call|linkedin|targi|partner|agent|kampania|inbound|inne],stage[new|qualification|presentation|offer|negotiation|closed_won|closed_lost],value_pln,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],probability,close_date,industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],assigned_to_email,notes,hot,tags,agent_name,agent_email,agent_phone,online_pct';
+      const header = 'company,contact_name,contact_title,email,phone,source,stage,value_pln,annual_turnover_currency,probability,close_date,first_contact_date,industry,assigned_to_email,notes,hot,tags,agent_name,agent_email,agent_phone,online_pct';
 
       const params = [];
       const scope = req.scopeFilter ? req.scopeFilter('l', 'assigned_to', params) : '';
@@ -647,7 +648,7 @@ router.get('/export/:type', async (req, res, next) => {
           r.company, r.contact_name, r.contact_title,
           r.email, r.phone, r.source, r.stage,
           r.value_pln, r.annual_turnover_currency, r.probability,
-          fmt(r.close_date), r.industry, r.assigned_to_email_val,
+          fmt(r.close_date), fmt(r.first_contact_date), r.industry, r.assigned_to_email_val,
           r.notes, r.hot ? 'true' : 'false',
           (r.tags || []).join('|'),
           r.agent_name, r.agent_email, r.agent_phone, r.online_pct,

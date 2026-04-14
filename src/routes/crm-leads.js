@@ -126,7 +126,9 @@ router.post('/',
     body('tags').optional().isArray(),
     body('notes').optional().trim(),
     body('hot').optional().isBoolean(),
+    body('first_contact_date').optional({ nullable: true }).isDate(),
     body('nip').optional({ nullable: true }).trim(),
+    body('first_contact_date').optional({ nullable: true }).isDate(),
   ],
   validate,
   async (req, res, next) => {
@@ -145,8 +147,8 @@ router.post('/',
           (company, contact_name, contact_title, email, phone, source, stage,
            value_pln, annual_turnover_currency, online_pct, probability, close_date, industry, assigned_to,
            tags, notes, hot, nip, created_by, agent_name, agent_email, agent_phone,
-           website, logo_url)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+           website, logo_url, first_contact_date)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
         RETURNING *
       `, [
         company, contact_name||null, contact_title||null, email||null,
@@ -155,6 +157,7 @@ router.post('/',
         ownerId, tags||[], notes||null, hot, nip||null, req.user.id,
         req.body.agent_name||null, req.body.agent_email||null, req.body.agent_phone||null,
         req.body.website||null, req.body.logo_url||null,
+        req.body.first_contact_date||null,
       ]);
 
       await audit.log({
@@ -181,7 +184,8 @@ router.get('/users', async (req, res, next) => {
       SELECT id, display_name, email, crm_role
       FROM users
       WHERE is_active = true
-        AND (crm_role IN ('salesperson', 'sales_manager') OR is_admin = true)
+        AND crm_role IN ('salesperson', 'sales_manager')
+        AND is_admin = false
       ORDER BY display_name
     `);
     res.json(rows);
@@ -408,7 +412,7 @@ router.get('/report',
       const closeDateTo   = req.query.period_end ? `'${req.query.period_end}'`
                           : req.query.date_to    ? `'${req.query.date_to}'`    : 'NULL';
 
-      const [kpiRes, funnelRes, monthlyRes, byRepRes, bySourceRes, lostRes] = await Promise.all([
+      const [kpiRes, funnelRes, monthlyRes, byRepRes, bySourceRes, lostRes, velocityRes] = await Promise.all([
 
         // KPI zbiorcze — wartości przeliczane na PLN wg kursów walut
         db.query(`
@@ -421,7 +425,7 @@ router.get('/report',
             COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)                      AS won_value,
             ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
               NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
-            ROUND(AVG(EXTRACT(DAY FROM (l.updated_at - l.created_at)))
+            ROUND(AVG(EXTRACT(DAY FROM (l.updated_at - COALESCE(l.first_contact_date::timestamp, l.created_at))))
               FILTER (WHERE l.stage IN ('closed_won','closed_lost')))::int                    AS avg_cycle_days,
             -- pipeline_in_period: leady aktywne z close_date w wybranym przedziale (pkt 9)
             COALESCE(SUM(${valPln}) FILTER (
@@ -472,7 +476,7 @@ router.get('/report',
                      COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2) AS won_value,
                      ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
                        NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
-                     ROUND(AVG(EXTRACT(DAY FROM (l.updated_at - l.created_at)))
+                     ROUND(AVG(EXTRACT(DAY FROM (l.updated_at - COALESCE(l.first_contact_date::timestamp, l.created_at))))
                        FILTER (WHERE l.stage IN ('closed_won','closed_lost')))::int AS avg_cycle_days
               FROM crm_leads l
               LEFT JOIN users u ON u.id = l.assigned_to
@@ -503,15 +507,37 @@ router.get('/report',
           ORDER BY count DESC
           LIMIT 10
         `, params),
+
+        // Czas w etapie — tylko aktywne etapy (bez closed_won / closed_lost)
+        // Won i Lost wykluczone — akumulują cały czas od początku i zaburzają skalę
+        // Liczony od first_contact_date (lub created_at) do dziś
+        db.query(`
+          SELECT
+            l.stage,
+            COUNT(*)::int AS count,
+            ROUND(AVG(
+              EXTRACT(DAY FROM (
+                NOW() - COALESCE(l.first_contact_date::timestamp, l.created_at)
+              ))
+            ))::int AS avg_days
+          FROM crm_leads l
+          ${where ? where + " AND l.stage NOT IN ('closed_won','closed_lost')"
+                  : "WHERE l.stage NOT IN ('closed_won','closed_lost')"}
+          GROUP BY l.stage
+          ORDER BY CASE l.stage
+            WHEN 'new' THEN 1 WHEN 'qualification' THEN 2 WHEN 'presentation' THEN 3
+            WHEN 'offer' THEN 4 WHEN 'negotiation' THEN 5 ELSE 6 END
+        `, params),
       ]);
 
       res.json({
-        kpi:          { ...(kpiRes.rows[0] || {}), pipeline_in_period: kpiRes.rows[0]?.pipeline_in_period ?? 0 },
-        funnel:       funnelRes.rows,
-        monthly:      monthlyRes.rows,
-        by_rep:       byRepRes.rows,
-        by_source:    bySourceRes.rows,
-        lost_reasons: lostRes.rows,
+        kpi:           { ...(kpiRes.rows[0] || {}), pipeline_in_period: kpiRes.rows[0]?.pipeline_in_period ?? 0 },
+        funnel:        funnelRes.rows,
+        monthly:       monthlyRes.rows,
+        by_rep:        byRepRes.rows,
+        by_source:     bySourceRes.rows,
+        lost_reasons:  lostRes.rows,
+        stage_velocity: velocityRes.rows,
       });
     } catch (err) { next(err); }
   }
@@ -714,6 +740,7 @@ router.patch('/:id',
     body('probability').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
     body('assigned_to').optional().isUUID(),
     body('hot').optional().isBoolean(),
+    body('first_contact_date').optional({ nullable: true }).isDate(),
   ],
   validate,
   async (req, res, next) => {
@@ -731,7 +758,7 @@ router.patch('/:id',
       const allowed = ['company','contact_name','contact_title','email','phone','source',
                        'stage','value_pln','annual_turnover_currency','online_pct','probability','close_date','industry',
                        'assigned_to','tags','notes','hot','lost_reason','nip',
-                       'agent_name','agent_email','agent_phone','website','logo_url'];
+                       'agent_name','agent_email','agent_phone','website','logo_url','first_contact_date'];
 
       const setClauses = [];
       const params     = [];
