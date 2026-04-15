@@ -59,7 +59,7 @@ router.get('/',
       }
       if (req.query.search) {
         params.push(`%${req.query.search}%`);
-        where += ` AND (l.company ILIKE $${params.length} OR l.contact_name ILIKE $${params.length} OR l.email ILIKE $${params.length})`;
+        where += ` AND (l.company ILIKE $${params.length} OR l.contact_name ILIKE $${params.length} OR l.email ILIKE $${params.length} OR l.nip ILIKE $${params.length} OR l.phone ILIKE $${params.length} OR l.notes ILIKE $${params.length} OR EXISTS (SELECT 1 FROM unnest(l.tags) t WHERE t ILIKE $${params.length}))`;
       }
       if (req.query.close_date_from) {
         params.push(req.query.close_date_from);
@@ -141,6 +141,19 @@ router.post('/',
 
       // Handlowiec może przypisać tylko do siebie
       const ownerId = req.isCrmManager ? (assigned_to || req.user.id) : req.user.id;
+
+      // Sprawdź unikalność NIP w leadach i partnerach
+      if (nip) {
+        const { rows: nipCheck } = await db.query(
+          `SELECT 'lead' AS src FROM crm_leads WHERE nip = $1
+           UNION ALL SELECT 'partner' AS src FROM crm_partners WHERE nip = $1
+           LIMIT 1`,
+          [nip]
+        );
+        if (nipCheck.length) {
+          return res.status(409).json({ error: 'Ten Numer NIP jest już przypisany dla innego rekordu.' });
+        }
+      }
 
       const { rows } = await db.query(`
         INSERT INTO crm_leads
@@ -754,6 +767,19 @@ router.patch('/:id',
 
       // Handlowiec nie może reassignować
       if (!req.isCrmManager) delete req.body.assigned_to;
+
+      // Sprawdź unikalność NIP przy aktualizacji (wyklucz własny rekord)
+      if (req.body.nip) {
+        const { rows: nipCheck } = await db.query(
+          `SELECT 'lead' AS src FROM crm_leads WHERE nip = $1 AND id != $2
+           UNION ALL SELECT 'partner' AS src FROM crm_partners WHERE nip = $1
+           LIMIT 1`,
+          [req.body.nip, id]
+        );
+        if (nipCheck.length) {
+          return res.status(409).json({ error: 'Ten Numer NIP jest już przypisany dla innego rekordu.' });
+        }
+      }
 
       const allowed = ['company','contact_name','contact_title','email','phone','source',
                        'stage','value_pln','annual_turnover_currency','online_pct','probability','close_date','industry',

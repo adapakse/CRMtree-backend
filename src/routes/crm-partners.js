@@ -42,7 +42,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
 
     if (search) {
       params.push(`%${search}%`);
-      where.push(`(p.company ILIKE $${params.length} OR p.email ILIKE $${params.length} OR p.partner_number ILIKE $${params.length})`);
+      where.push(`(p.company ILIKE $${params.length} OR p.email ILIKE $${params.length} OR p.partner_number ILIKE $${params.length} OR p.nip ILIKE $${params.length} OR p.contact_name ILIKE $${params.length} OR p.phone ILIKE $${params.length})`);
     }
     if (status) {
       params.push(status);
@@ -164,6 +164,27 @@ router.post("/", requireAuth, crmAuth, async (req, res) => {
 
     if (!company) return res.status(400).json({ error: "Pole company jest wymagane" });
 
+    // Parsuj tags bezpiecznie — frontend może wysłać string zamiast tablicy
+    let safeTags = [];
+    if (Array.isArray(tags)) {
+      safeTags = tags;
+    } else if (typeof tags === 'string' && tags.trim()) {
+      try { safeTags = JSON.parse(tags); } catch (_) { safeTags = []; }
+    }
+
+    // Sprawdź unikalność NIP
+    if (nip) {
+      const nipCheck = await pool.query(
+        `SELECT 'lead' AS src FROM crm_leads WHERE nip = $1
+         UNION ALL SELECT 'partner' AS src FROM crm_partners WHERE nip = $1
+         LIMIT 1`,
+        [nip]
+      );
+      if (nipCheck.rows.length) {
+        return res.status(409).json({ error: 'Ten Numer NIP jest już przypisany dla innego rekordu.' });
+      }
+    }
+
     const r = await pool.query(
       `INSERT INTO crm_partners (
         company, partner_number, status,
@@ -196,7 +217,7 @@ router.post("/", requireAuth, crmAuth, async (req, res) => {
         contract_signed || null, contract_expires || null,
         contract_value ?? null, annual_turnover_currency || "PLN",
         online_pct ?? null, active_users ?? null,
-        tags ? JSON.stringify(tags) : "[]",
+        safeTags,
         notes || null,
         agent_name || null, agent_email || null, agent_phone || null,
         req.user.id,
@@ -215,6 +236,20 @@ router.post("/", requireAuth, crmAuth, async (req, res) => {
 router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
   try {
     const { id } = req.params;
+
+    // Sprawdź unikalność NIP przy aktualizacji (wyklucz własny rekord)
+    if (req.body.nip) {
+      const nipCheck = await pool.query(
+        `SELECT 'lead' AS src FROM crm_leads WHERE nip = $1
+         UNION ALL SELECT 'partner' AS src FROM crm_partners WHERE nip = $1 AND id != $2
+         LIMIT 1`,
+        [req.body.nip, parseInt(id)]
+      );
+      if (nipCheck.rows.length) {
+        return res.status(409).json({ error: 'Ten Numer NIP jest już przypisany dla innego rekordu.' });
+      }
+    }
+
     const allowed = [
       "company", "partner_number", "status",
       "nip", "address", "industry",
@@ -650,6 +685,30 @@ router.post("/:id/onboarding-step", requireAuth, crmAuth, async (req, res) => {
     if (!r.rows.length) return res.status(404).json({ error: "Nie znaleziono" });
     res.json(r.rows[0]);
   } catch (err) {
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+// ── PATCH /:id/onboarding — alias wywoływany przez frontend (crm-api.service.ts)
+router.patch("/:id/onboarding", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const { step } = req.body;
+    if (step === undefined || step === null) {
+      return res.status(400).json({ error: "Pole step jest wymagane" });
+    }
+    const stepInt = parseInt(step);
+    const isFinishing = stepInt >= 4;
+    const update = isFinishing
+      ? "SET onboarding_step = 4, status = 'active', updated_at = NOW()"
+      : `SET onboarding_step = ${stepInt}, updated_at = NOW()`;
+    const r = await pool.query(
+      `UPDATE crm_partners ${update} WHERE id = $1 RETURNING *`,
+      [req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: "Nie znaleziono partnera" });
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error("PATCH /onboarding error:", err);
     res.status(500).json({ error: "Błąd serwera" });
   }
 });
