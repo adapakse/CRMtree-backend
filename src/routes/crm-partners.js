@@ -23,6 +23,110 @@ function assertManager(req, res) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // LISTA PARTNERÓW
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ONBOARDING PANEL — globalne endpointy dla panelu Onboarding
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/crm/partners/onboarding — lista partnerów w statusie 'onboarding'
+// z zadaniami i postępem. Manager widzi wszystkich, handlowiec tylko swoich.
+router.get("/onboarding", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const isManager = req.isCrmManager;
+
+    const { search = '', assigned_to = '' } = req.query;
+    const params = [];
+    const conds  = ["p.status = 'onboarding'"];
+
+    if (!isManager) {
+      // Handlowiec widzi tylko partnerów gdzie ma przypisane zadania
+      params.push(userId);
+      conds.push(`EXISTS (
+        SELECT 1 FROM crm_onboarding_tasks t
+        WHERE t.partner_id = p.id AND t.assigned_to = $${params.length}
+      )`);
+    }
+    if (search) {
+      params.push(`%${search}%`);
+      conds.push(`(p.company ILIKE $${params.length} OR p.nip ILIKE $${params.length})`);
+    }
+
+    const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+
+    const { rows: partners } = await pool.query(`
+      SELECT p.id, p.company, p.nip, p.onboarding_step, p.status,
+             p.created_at, p.manager_id,
+             u.display_name AS manager_name,
+             (SELECT COUNT(*) FROM crm_onboarding_tasks t WHERE t.partner_id = p.id)::int AS task_count,
+             (SELECT COUNT(*) FROM crm_onboarding_tasks t WHERE t.partner_id = p.id AND t.done = true)::int AS done_count
+      FROM crm_partners p
+      LEFT JOIN users u ON u.id = p.manager_id
+      ${where}
+      ORDER BY p.created_at DESC
+    `, params);
+
+    res.json(partners);
+  } catch (err) {
+    console.error("GET /onboarding error:", err);
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+// GET /api/crm/partners/onboarding/tasks — wszystkie zadania dla panelu onboarding
+// Filtry: partner_id, assigned_to, step, done
+router.get("/onboarding/tasks", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const userId   = req.user.id;
+    const isManager = req.isCrmManager;
+    const { partner_id, assigned_to, step, done } = req.query;
+
+    const params = [];
+    const conds  = ["p.status = 'onboarding'"];
+
+    if (!isManager) {
+      params.push(userId);
+      conds.push(`t.assigned_to = $${params.length}`);
+    } else if (assigned_to) {
+      params.push(assigned_to);
+      conds.push(`t.assigned_to = $${params.length}`);
+    }
+
+    if (partner_id) {
+      params.push(parseInt(partner_id));
+      conds.push(`t.partner_id = $${params.length}`);
+    }
+    if (step !== undefined && step !== '') {
+      params.push(parseInt(step));
+      conds.push(`t.step = $${params.length}`);
+    }
+    if (done !== undefined && done !== '') {
+      params.push(done === 'true');
+      conds.push(`t.done = $${params.length}`);
+    }
+
+    const where = 'WHERE ' + conds.join(' AND ');
+
+    const { rows } = await pool.query(`
+      SELECT t.*,
+             p.company AS partner_name, p.nip AS partner_nip, p.onboarding_step AS partner_step,
+             u.display_name AS assigned_to_name,
+             db.display_name AS done_by_name
+      FROM crm_onboarding_tasks t
+      JOIN crm_partners p ON p.id = t.partner_id
+      LEFT JOIN users u  ON u.id  = t.assigned_to
+      LEFT JOIN users db ON db.id = t.done_by
+      ${where}
+      ORDER BY t.due_date ASC NULLS LAST, t.created_at ASC
+    `, params);
+
+    res.json(rows);
+  } catch (err) {
+    console.error("GET /onboarding/tasks error:", err);
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
 router.get("/", requireAuth, crmAuth, async (req, res) => {
   try {
     const {
@@ -39,6 +143,9 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [];
     const where  = [];
+
+    // Rejestr partnerów wyklucza status 'onboarding' — trafiają do panelu Onboarding
+    where.push(`p.status != 'onboarding'`);
 
     if (search) {
       params.push(`%${search}%`);
@@ -236,6 +343,24 @@ router.post("/", requireAuth, crmAuth, async (req, res) => {
 router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
   try {
     const { id } = req.params;
+
+    // Blokuj zmianę statusu z 'onboarding' gdy są nieukończone zadania
+    if (req.body.status && req.body.status !== 'onboarding') {
+      const current = await pool.query(
+        `SELECT status FROM crm_partners WHERE id = $1`, [id]
+      );
+      if (current.rows[0]?.status === 'onboarding') {
+        const { rows: openTasks } = await pool.query(
+          `SELECT COUNT(*)::int AS cnt FROM crm_onboarding_tasks WHERE partner_id = $1 AND done = false`,
+          [parseInt(id)]
+        );
+        if (openTasks[0].cnt > 0) {
+          return res.status(409).json({
+            error: `Nie można zakończyć wdrożenia — pozostało ${openTasks[0].cnt} nieukończonych zadań.`
+          });
+        }
+      }
+    }
 
     // Sprawdź unikalność NIP przy aktualizacji (wyklucz własny rekord)
     if (req.body.nip) {
@@ -495,12 +620,12 @@ router.get("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
 
 router.post("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
   try {
-    const { step = 0, title, body, type = "task", assigned_to, due_date } = req.body;
+    const { step = 0, title, body, type = "task", assigned_to, due_date, due_time } = req.body;
     if (!title) return res.status(400).json({ error: "title jest wymagane" });
     const r = await pool.query(
-      `INSERT INTO crm_onboarding_tasks (partner_id, step, title, body, type, assigned_to, due_date, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [req.params.id, step, title, body || null, type, assigned_to || null, due_date || null, req.user.id]
+      `INSERT INTO crm_onboarding_tasks (partner_id, step, title, body, type, assigned_to, due_date, due_time, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [req.params.id, step, title, body || null, type, assigned_to || null, due_date || null, due_time || null, req.user.id]
     );
     const task = r.rows[0];
     if (assigned_to) {
@@ -516,7 +641,7 @@ router.post("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
 router.patch("/:id/onboarding-tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
   try {
     const { id, taskId } = req.params;
-    const allowed = ["title", "body", "type", "assigned_to", "due_date", "done"];
+    const allowed = ["title", "body", "type", "assigned_to", "due_date", "due_time", "done"];
     const sets   = [];
     const params = [];
     for (const key of allowed) {
@@ -591,12 +716,12 @@ router.get("/:id/tasks", requireAuth, crmAuth, async (req, res) => {
 
 router.post("/:id/tasks", requireAuth, crmAuth, async (req, res) => {
   try {
-    const { step = 0, title, body, type = "task", assigned_to, due_date } = req.body;
+    const { step = 0, title, body, type = "task", assigned_to, due_date, due_time } = req.body;
     if (!title) return res.status(400).json({ error: "title jest wymagane" });
     const r = await pool.query(
-      `INSERT INTO crm_onboarding_tasks (partner_id, step, title, body, type, assigned_to, due_date, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [req.params.id, step, title, body || null, type, assigned_to || null, due_date || null, req.user.id]
+      `INSERT INTO crm_onboarding_tasks (partner_id, step, title, body, type, assigned_to, due_date, due_time, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [req.params.id, step, title, body || null, type, assigned_to || null, due_date || null, due_time || null, req.user.id]
     );
     const task = r.rows[0];
     if (assigned_to) {
@@ -612,7 +737,7 @@ router.post("/:id/tasks", requireAuth, crmAuth, async (req, res) => {
 router.patch("/:id/tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
   try {
     const { id, taskId } = req.params;
-    const allowed = ["title", "body", "type", "assigned_to", "due_date", "done"];
+    const allowed = ["title", "body", "type", "assigned_to", "due_date", "due_time", "done"];
     const sets   = [];
     const params = [];
     for (const key of allowed) {

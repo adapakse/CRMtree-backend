@@ -47,8 +47,15 @@ router.get('/',
         where += ` AND l.stage = $${params.length}`;
       }
       if (req.query.source) {
-        params.push(req.query.source);
-        where += ` AND l.source = $${params.length}`;
+        // Może być pojedyncza wartość lub lista oddzielona przecinkami (filtr grupy)
+        const srcValues = String(req.query.source).split(',').map(s => s.trim()).filter(Boolean);
+        if (srcValues.length === 1) {
+          params.push(srcValues[0]);
+          where += ` AND l.source = $${params.length}`;
+        } else {
+          params.push(srcValues);
+          where += ` AND l.source = ANY($${params.length}::text[])`;
+        }
       }
       if (req.query.assigned_to && req.isCrmManager) {
         params.push(req.query.assigned_to);
@@ -211,18 +218,29 @@ router.get('/sources', async (req, res, next) => {
     const { rows } = await db.query(
       `SELECT value FROM app_settings WHERE key = 'crm_lead_sources'`
     );
-    const LABELS = {
-      strona_www: 'Strona www', polecenie: 'Polecenie', cold_call: 'Cold call',
-      linkedin: 'LinkedIn', targi: 'Targi / Wydarzenie', partner: 'Partner',
-      agent: 'Agent', kampania: 'Kampania email', inbound: 'Inbound', inne: 'Inne',
-    };
-    let keys = [];
+    let sources = [];
     if (rows.length) {
-      try { keys = JSON.parse(rows[0].value); } catch(e) { keys = []; }
+      try {
+        const parsed = JSON.parse(rows[0].value);
+        // Nowy format: tablica obiektów {value, label, group}
+        if (parsed.length && typeof parsed[0] === 'object') {
+          sources = parsed;
+        } else {
+          // Stary format: tablica stringów — fallback
+          sources = parsed.map(k => ({ value: k, label: k, group: null }));
+        }
+      } catch(e) { sources = []; }
     }
-    // Fallback if setting not defined
-    if (!keys.length) keys = ['strona_www','polecenie','cold_call','linkedin','targi','partner','agent','kampania','inbound','inne'];
-    const sources = keys.map(k => ({ value: k, label: LABELS[k] || k }));
+    if (!sources.length) {
+      sources = [
+        { value: 'Własne',             label: 'Własne',               group: null },
+        { value: 'Cold_Call',          label: 'Cold Call',            group: null },
+        { value: 'Partner',            label: 'Partner',              group: null },
+        { value: 'Ajent',              label: 'Agent',                group: null },
+        { value: 'LinkedIn_Lead_Form', label: 'LinkedIn Lead Form',   group: 'Marketing' },
+        { value: 'Formularz_online',   label: 'Formularz online',     group: 'Marketing' },
+      ];
+    }
     res.json(sources);
   } catch (err) { next(err); }
 });
@@ -735,7 +753,13 @@ router.get('/:id',
       `, params);
 
       if (!rows.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
-      res.json(rows[0]);
+
+      // Dodatkowe kontakty
+      const { rows: extraContacts } = await db.query(
+        `SELECT * FROM crm_lead_contacts WHERE lead_id=$1 ORDER BY created_at`,
+        [parseInt(req.params.id)]
+      );
+      res.json({ ...rows[0], extra_contacts: extraContacts });
     } catch (err) { next(err); }
   }
 );
@@ -1222,6 +1246,46 @@ router.post('/:id/test-account',
 );
 
 // ── Migracja Lead → Partner (lead pozostaje w rejestrze w statusie Won) ──────
+
+// ── GET /api/crm/leads/:id/contacts ──────────────────────────────
+router.get('/:id/contacts', crmScope, [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT * FROM crm_lead_contacts WHERE lead_id=$1 ORDER BY created_at`,
+        [parseInt(req.params.id)]
+      );
+      res.json(rows);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /api/crm/leads/:id/contacts ─────────────────────────────
+router.post('/:id/contacts', crmScope, [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const { contacts } = req.body; // array of {contact_name, contact_title, email, phone}
+      if (!Array.isArray(contacts)) return res.status(400).json({ error: 'contacts must be array' });
+
+      // Delete existing and replace with new set
+      await db.query('DELETE FROM crm_lead_contacts WHERE lead_id=$1', [parseInt(req.params.id)]);
+
+      const inserted = [];
+      for (const c of contacts) {
+        // Skip empty rows
+        if (!c.contact_name && !c.email && !c.phone) continue;
+        const { rows } = await db.query(
+          `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone)
+           VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+          [parseInt(req.params.id), c.contact_name||null, c.contact_title||null, c.email||null, c.phone||null]
+        );
+        inserted.push(rows[0]);
+      }
+      res.json(inserted);
+    } catch (err) { next(err); }
+  }
+);
+
 router.post('/:id/migrate',
   [
     param('id').isInt(),
@@ -1277,6 +1341,55 @@ router.post('/:id/migrate',
           lead.logo_url||null,
           testAccountNumber,   // ← numer konta testowego → partner_number
         ]);
+
+        // ── Automatyczne zadania standardowe z AppSettings ──────────────────────
+        try {
+          const { rows: settingsRows } = await client.query(
+            `SELECT value FROM app_settings WHERE key = 'onboarding_task_templates'`
+          );
+          if (settingsRows.length && settingsRows[0].value) {
+            const templates = JSON.parse(settingsRows[0].value);
+            const partnerId  = partner[0].id;
+            const createdAt  = partner[0].created_at || new Date();
+            const handlowiec = lead.assigned_to; // Krok 0 zawsze idzie do handlowca
+
+            for (const tpl of templates) {
+              if (!tpl.standard) continue; // tylko zadania standardowe
+
+              // Wyznacz datę: created_at + tpl.days dni, godzina 09:00
+              let dueDate = null;
+              if (tpl.days != null && tpl.days >= 0) {
+                const d = new Date(createdAt);
+                d.setDate(d.getDate() + parseInt(tpl.days));
+                dueDate = d.toISOString().slice(0, 10);
+              }
+
+              // Assignee: krok 0 zawsze handlowiec, reszta wg szablonu
+              const assignedTo = tpl.step === 0
+                ? (handlowiec || null)
+                : (tpl.assignee || null);
+
+              await client.query(
+                `INSERT INTO crm_onboarding_tasks
+                   (partner_id, step, title, type, assigned_to, due_date, due_time, created_by)
+                 VALUES ($1,$2,$3,$4,$5,$6,'09:00',$7)`,
+                [
+                  partnerId,
+                  tpl.step,
+                  tpl.title,
+                  tpl.type || 'task',
+                  assignedTo,
+                  dueDate,
+                  req.user.id,
+                ]
+              );
+            }
+          }
+        } catch (tplErr) {
+          // Błąd szablonów nie blokuje migracji — logujemy ostrzeżenie
+          const logger = require('../utils/logger');
+          logger.warn('Błąd tworzenia zadań z szablonów onboarding', { error: tplErr.message });
+        }
 
         // Lead pozostaje widoczny na liście w statusie closed_won.
         // converted_at jest ustawiane tylko dla zapisu — NIE filtrujemy już po tym polu.
