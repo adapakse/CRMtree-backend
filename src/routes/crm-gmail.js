@@ -118,18 +118,18 @@ router.get("/oauth/url", requireAuth, (req, res) => {
 router.get("/oauth/callback", requireAuth, async (req, res) => {
   try {
     const { code, error } = req.query;
-    if (error) return res.redirect(`${config.frontendUrl}/#/settings?gmail=error&reason=${error}`);
-    if (!code)  return res.redirect(`${config.frontendUrl}/#/settings?gmail=error&reason=no_code`);
+    if (error) return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=${encodeURIComponent(error)}`);
+    if (!code)  return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=no_code`);
 
     await gmailService.exchangeCodeAndSave(code, req.user.id);
 
     // Zarejestruj Pub/Sub watch (ignoruj błąd jeśli brak konfiguracji)
     try { await gmailService.registerWatch(req.user.id); } catch (_) {}
 
-    res.redirect(`${config.frontendUrl}/#/settings?gmail=connected`);
+    res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=connected`);
   } catch (err) {
     console.error("[Gmail] OAuth callback error:", err.message);
-    res.redirect(`${config.frontendUrl}/#/settings?gmail=error&reason=callback_failed`);
+    res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=callback_failed`);
   }
 });
 

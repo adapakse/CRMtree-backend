@@ -8,6 +8,7 @@ const { pool } = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
 const { crmAuth, loadCrmScope } = require("../middleware/crm-rbac");
 const calendarService = require("../services/calendarService");
+const audit    = require("../services/auditService");
 const config   = require("../config");
 
 // Wspólne middleware dla wszystkich tras (requireAuth + crmAuth są też per-route dla jasności)
@@ -217,6 +218,77 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ZADANIA — partner activities (non-email), for calendar "Zadania" tab
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/crm/partners/tasks
+// query: assigned_to (UUID), type (string), include_closed (bool)
+router.get("/tasks", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const { assigned_to, type, include_closed } = req.query;
+    const showClosed = include_closed === 'true';
+
+    const conds  = ["a.type != 'email'"];
+    const params = [];
+
+    if (!showClosed) conds.push("a.status != 'closed'");
+    if (type) { params.push(type); conds.push(`a.type = $${params.length}`); }
+
+    // Scope — kto widzi które aktywności
+    // assigned_to może być pojedynczym UUID lub listą rozdzieloną przecinkami (filtr po grupie)
+    const assignedIds = assigned_to ? assigned_to.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const pushAssignedFilter = (col) => {
+      if (assignedIds.length === 1) {
+        params.push(assignedIds[0]); conds.push(`${col} = $${params.length}`);
+      } else {
+        params.push(assignedIds); conds.push(`${col} = ANY($${params.length}::uuid[])`);
+      }
+    };
+    if (req.user.is_admin) {
+      if (assignedIds.length) pushAssignedFilter('COALESCE(a.assigned_to, p.manager_id)');
+    } else if (req.user.crm_role === 'sales_manager') {
+      if (assignedIds.length) {
+        pushAssignedFilter('COALESCE(a.assigned_to, p.manager_id)');
+      } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
+        params.push(req.crmScopeUserIds); conds.push(`COALESCE(a.assigned_to, p.manager_id) = ANY($${params.length}::uuid[])`);
+      } else { conds.push('1=0'); }
+    } else {
+      params.push(req.user.id); conds.push(`COALESCE(a.assigned_to, p.manager_id) = $${params.length}`);
+    }
+
+    const where = 'WHERE ' + conds.join(' AND ');
+
+    const { rows } = await pool.query(`
+      SELECT
+        a.id, a.type, a.title, a.body, a.activity_at, a.duration_min,
+        a.participants, a.meeting_location, a.created_by, a.status, a.close_comment,
+        a.updated_at,
+        u.display_name   AS created_by_name,
+        'partner'        AS source_type,
+        p.id             AS source_id,
+        p.company        AS source_name,
+        mu.display_name  AS assigned_to_name,
+        mu.id            AS assigned_to_id,
+        au.display_name  AS act_assigned_to_name,
+        a.assigned_to    AS act_assigned_to_id
+      FROM crm_partner_activities a
+      JOIN crm_partners p   ON p.id  = a.partner_id
+      LEFT JOIN users u     ON u.id  = a.created_by
+      LEFT JOIN users mu    ON mu.id = p.manager_id
+      LEFT JOIN users au    ON au.id = a.assigned_to
+      ${where}
+      ORDER BY
+        CASE WHEN a.activity_at IS NULL THEN 1 ELSE 0 END,
+        a.activity_at ASC
+    `, params);
+
+    res.json(rows);
+  } catch (err) {
+    console.error("GET /crm/partners/tasks error:", err);
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SZCZEGÓŁY PARTNERA
 // ═══════════════════════════════════════════════════════════════════════════════
 router.get("/:id", requireAuth, crmAuth, async (req, res) => {
@@ -238,11 +310,14 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
 
     // Aktywności
     const actsQ = await pool.query(
-      `SELECT a.*, u.display_name AS created_by_name
+      `SELECT a.*,
+              u.display_name  AS created_by_name,
+              au.display_name AS assigned_to_name
        FROM crm_partner_activities a
-       LEFT JOIN users u ON u.id = a.created_by
+       LEFT JOIN users u  ON u.id  = a.created_by
+       LEFT JOIN users au ON au.id = a.assigned_to
        WHERE a.partner_id = $1
-       ORDER BY a.activity_at DESC`,
+       ORDER BY a.activity_at DESC NULLS LAST`,
       [id]
     );
     partner.activities = actsQ.rows;
@@ -490,6 +565,7 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
     const {
       type = "note", title, body,
       activity_at, duration_min, meeting_location, participants,
+      assigned_to,
       // pola szansy sprzedaży
       opp_value, opp_currency, opp_status, opp_due_date,
       // Gmail thread
@@ -506,22 +582,25 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
     if (!partnerQ.rows.length) return res.status(404).json({ error: "Nie znaleziono partnera" });
     const partner = partnerQ.rows[0];
 
-    const now = new Date().toISOString();
     const r = await pool.query(
       `INSERT INTO crm_partner_activities (
         partner_id, type, title, body,
         activity_at, duration_min, meeting_location, participants,
+        assigned_to,
         opp_value, opp_currency, opp_status, opp_due_date,
         gmail_thread_id, gmail_message_id,
-        created_by
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-      RETURNING *`,
+        created_by, status
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'new')
+      RETURNING *,
+        (SELECT display_name FROM users WHERE id = created_by)  AS created_by_name,
+        (SELECT display_name FROM users WHERE id = assigned_to) AS assigned_to_name`,
       [
         partnerId, type, title, body || null,
-        activity_at || now,
+        activity_at || null,
         duration_min ? parseInt(duration_min) : null,
         meeting_location || null,
         participants || null,
+        assigned_to || null,
         opp_value ?? null, opp_currency || "PLN",
         opp_status || null, opp_due_date || null,
         gmail_thread_id || null, gmail_message_id || null,
@@ -529,6 +608,13 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
       ]
     );
     const newAct = r.rows[0];
+
+    await audit.log({
+      user:       req.user,
+      action:     'crm_activity_create',
+      afterState: { type, title, assigned_to: assigned_to || null, activity_at: activity_at || null },
+      metadata:   { partner_id: partnerId, activity_id: newAct.id, source: 'partner' },
+    });
 
     // ── Integracja Google Calendar (tylko dla spotkań) ─────────────────────────
     if (type === "meeting" && activity_at) {
@@ -562,10 +648,6 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
       });
     }
 
-    // Dołącz display_name
-    const userQ = await pool.query("SELECT display_name FROM users WHERE id = $1", [req.user.id]);
-    newAct.created_by_name = userQ.rows[0]?.display_name || null;
-
     res.status(201).json(newAct);
   } catch (err) {
     console.error("POST /crm/partners/:id/activities error:", err);
@@ -575,31 +657,69 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
 
 router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const { id, actId } = req.params;
-    const allowed = [
-      "type", "title", "body", "activity_at", "duration_min",
-      "meeting_location", "participants",
-      "opp_value", "opp_currency", "opp_status", "opp_due_date",
-    ];
-    const sets   = [];
-    const params = [];
-    for (const key of allowed) {
-      if (key in req.body) {
-        params.push(req.body[key] === "" ? null : req.body[key]);
-        sets.push(`${key} = $${params.length}`);
-      }
-    }
-    if (!sets.length) return res.status(400).json({ error: "Brak pól" });
-    params.push(actId, id);
-    const r = await pool.query(
-      `UPDATE crm_partner_activities SET ${sets.join(", ")}, updated_at = NOW()
-       WHERE id = $${params.length - 1} AND partner_id = $${params.length}
-       RETURNING *`,
-      params
+    const partnerId = parseInt(req.params.id);
+    const actId     = parseInt(req.params.actId);
+
+    const { rows: existing } = await pool.query(
+      'SELECT * FROM crm_partner_activities WHERE id=$1 AND partner_id=$2',
+      [actId, partnerId]
     );
-    if (!r.rows.length) return res.status(404).json({ error: "Nie znaleziono" });
-    res.json(r.rows[0]);
+    if (!existing.length) return res.status(404).json({ error: 'Aktywność nie znaleziona' });
+    const act = existing[0];
+
+    const isManager = req.user.is_admin || req.user.crm_role === 'sales_manager';
+    if (act.created_by !== req.user.id && !isManager) {
+      return res.status(403).json({ error: 'Brak uprawnień do edycji tej aktywności' });
+    }
+
+    const newStatus = req.body.status ?? act.status;
+    if (newStatus === 'closed' && !req.body.close_comment && !act.close_comment) {
+      return res.status(400).json({ error: 'Komentarz jest wymagany przy zamknięciu aktywności' });
+    }
+
+    const type             = req.body.type             ?? act.type;
+    const title            = req.body.title            ?? act.title;
+    const body             = req.body.body             !== undefined ? req.body.body             : act.body;
+    const activity_at      = req.body.activity_at      !== undefined ? req.body.activity_at      : act.activity_at;
+    const participants     = req.body.participants     !== undefined ? req.body.participants     : act.participants;
+    const meeting_location = req.body.meeting_location !== undefined ? req.body.meeting_location : act.meeting_location;
+    const assigned_to      = req.body.assigned_to      !== undefined ? req.body.assigned_to      : act.assigned_to;
+    const close_comment    = req.body.close_comment    !== undefined ? req.body.close_comment    : act.close_comment;
+    const opp_value        = req.body.opp_value        !== undefined ? req.body.opp_value        : act.opp_value;
+    const opp_currency     = req.body.opp_currency     !== undefined ? req.body.opp_currency     : act.opp_currency;
+    const opp_status       = req.body.opp_status       !== undefined ? req.body.opp_status       : act.opp_status;
+    const opp_due_date     = req.body.opp_due_date     !== undefined ? req.body.opp_due_date     : act.opp_due_date;
+
+    const { rows } = await pool.query(`
+      UPDATE crm_partner_activities
+      SET type=$1, title=$2, body=$3, activity_at=$4, participants=$5, meeting_location=$6,
+          assigned_to=$7, status=$8, close_comment=$9,
+          opp_value=$10, opp_currency=$11, opp_status=$12, opp_due_date=$13,
+          updated_at=NOW()
+      WHERE id=$14
+      RETURNING *,
+        (SELECT display_name FROM users WHERE id = created_by)  AS created_by_name,
+        (SELECT display_name FROM users WHERE id = assigned_to) AS assigned_to_name
+    `, [type, title, body||null, activity_at||null, participants||null, meeting_location||null,
+        assigned_to||null, newStatus, close_comment||null,
+        opp_value??null, opp_currency||'PLN', opp_status||null, opp_due_date||null,
+        actId]);
+
+    const auditAction = newStatus === 'closed' && act.status !== 'closed'
+      ? 'crm_activity_close'
+      : 'crm_activity_update';
+
+    await audit.log({
+      user:        req.user,
+      action:      auditAction,
+      beforeState: { type: act.type, title: act.title, status: act.status, assigned_to: act.assigned_to },
+      afterState:  { type, title, status: newStatus, assigned_to, close_comment },
+      metadata:    { partner_id: partnerId, activity_id: actId, source: 'partner' },
+    });
+
+    res.json(rows[0]);
   } catch (err) {
+    console.error("PATCH /crm/partners/:id/activities/:actId error:", err);
     res.status(500).json({ error: "Błąd serwera" });
   }
 });

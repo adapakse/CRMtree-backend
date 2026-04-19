@@ -312,6 +312,72 @@ router.get('/contact-suggestions', async (req, res, next) => {
 });
 
 
+// ── GET /api/crm/leads/tasks ─────────────────────────────────────────────────
+// Zwraca wszystkie aktywności (poza email) do widoku "Zadania"
+// query: assigned_to (UUID), type (string), include_closed (bool)
+router.get('/tasks', async (req, res, next) => {
+  try {
+    const { assigned_to, type, include_closed } = req.query;
+    const showClosed = include_closed === 'true';
+
+    const conds  = ["a.type != 'email'"];
+    const params = [];
+
+    if (!showClosed) conds.push("a.status != 'closed'");
+    if (type) { params.push(type); conds.push(`a.type = $${params.length}`); }
+
+    // Scope — kto widzi które aktywności
+    // assigned_to może być pojedynczym UUID lub listą rozdzieloną przecinkami (filtr po grupie)
+    const assignedIds = assigned_to ? assigned_to.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const pushAssignedFilter = (col) => {
+      if (assignedIds.length === 1) {
+        params.push(assignedIds[0]); conds.push(`${col} = $${params.length}`);
+      } else {
+        params.push(assignedIds); conds.push(`${col} = ANY($${params.length}::uuid[])`);
+      }
+    };
+    if (req.user.is_admin) {
+      if (assignedIds.length) pushAssignedFilter('COALESCE(a.assigned_to, l.assigned_to)');
+    } else if (req.user.crm_role === 'sales_manager') {
+      if (assignedIds.length) {
+        pushAssignedFilter('COALESCE(a.assigned_to, l.assigned_to)');
+      } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
+        params.push(req.crmScopeUserIds); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = ANY($${params.length}::uuid[])`);
+      } else { conds.push('1=0'); }
+    } else {
+      params.push(req.user.id); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = $${params.length}`);
+    }
+
+    const where = 'WHERE ' + conds.join(' AND ');
+
+    const { rows } = await db.query(`
+      SELECT
+        a.id, a.type, a.title, a.body, a.activity_at, a.duration_min,
+        a.participants, a.meeting_location, a.created_by, a.status, a.close_comment,
+        a.updated_at,
+        u.display_name  AS created_by_name,
+        'lead'          AS source_type,
+        l.id            AS source_id,
+        l.company       AS source_name,
+        lu.display_name AS assigned_to_name,
+        lu.id           AS assigned_to_id,
+        au.display_name AS act_assigned_to_name,
+        a.assigned_to   AS act_assigned_to_id
+      FROM crm_lead_activities a
+      JOIN crm_leads l      ON l.id   = a.lead_id
+      LEFT JOIN users u     ON u.id   = a.created_by
+      LEFT JOIN users lu    ON lu.id  = l.assigned_to
+      LEFT JOIN users au    ON au.id  = a.assigned_to
+      ${where}
+      ORDER BY
+        CASE WHEN a.activity_at IS NULL THEN 1 ELSE 0 END,
+        a.activity_at ASC
+    `, params);
+
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
 // ── GET /api/crm/leads/calendar ────────────────────────────────────────────
 // Zwraca aktywności typu "meeting" dla kalendarza (leady + partnerzy)
 // query: date_from (YYYY-MM-DD), date_to, assigned_to (UUID, tylko manager)
@@ -320,86 +386,88 @@ router.get('/calendar', async (req, res, next) => {
   try {
     const { date_from, date_to, assigned_to } = req.query;
 
-    const conds  = [];
+    // ── Lead activities ──────────────────────────────────────────────────────
+    const conds  = ["a.type != 'email'", "a.activity_at IS NOT NULL"];
     const params = [];
 
-    // Zakres dat
     if (date_from) { params.push(date_from); conds.push(`a.activity_at >= $${params.length}::date`); }
     if (date_to)   { params.push(date_to);   conds.push(`a.activity_at <  ($${params.length}::date + interval '1 day')`); }
 
-    // Scope dla leadów
     if (req.user.is_admin) {
-      if (assigned_to) { params.push(assigned_to); conds.push(`l.assigned_to = $${params.length}`); }
+      if (assigned_to) { params.push(assigned_to); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = $${params.length}`); }
     } else if (req.user.crm_role === 'sales_manager') {
       if (assigned_to) {
-        params.push(assigned_to); conds.push(`l.assigned_to = $${params.length}`);
+        params.push(assigned_to); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = $${params.length}`);
       } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-        params.push(req.crmScopeUserIds); conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`);
+        params.push(req.crmScopeUserIds); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = ANY($${params.length}::uuid[])`);
       } else { conds.push('1=0'); }
     } else {
-      params.push(req.user.id); conds.push(`l.assigned_to = $${params.length}`);
+      params.push(req.user.id); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = $${params.length}`);
     }
 
-    const where = conds.length ? "WHERE a.type = 'meeting' AND " + conds.join(' AND ') : "WHERE a.type = 'meeting'";
+    const where = 'WHERE ' + conds.join(' AND ');
 
-    // Aktywności z leadów
     const { rows: leadActs } = await db.query(`
       SELECT
         a.id, a.type, a.title, a.body, a.activity_at, a.duration_min,
-        a.participants, a.meeting_location, a.created_by,
+        a.participants, a.meeting_location, a.created_by, a.status, a.close_comment,
         u.display_name  AS created_by_name,
         'lead'          AS source_type,
         l.id            AS source_id,
         l.company       AS source_name,
         lu.display_name AS assigned_to_name,
-        lu.id           AS assigned_to_id
+        lu.id           AS assigned_to_id,
+        au.display_name AS act_assigned_to_name,
+        a.assigned_to   AS act_assigned_to_id
       FROM crm_lead_activities a
-      JOIN crm_leads l      ON l.id  = a.lead_id
-      LEFT JOIN users u     ON u.id  = a.created_by
-      LEFT JOIN users lu    ON lu.id = l.assigned_to
+      JOIN crm_leads l      ON l.id   = a.lead_id
+      LEFT JOIN users u     ON u.id   = a.created_by
+      LEFT JOIN users lu    ON lu.id  = l.assigned_to
+      LEFT JOIN users au    ON au.id  = a.assigned_to
       ${where}
-      ORDER BY a.activity_at DESC
+      ORDER BY a.activity_at
     `, params);
 
-    // Aktywności z partnerów — osobne zapytanie z innymi warunkami scope
-    const condsPart  = [];
+    // ── Partner activities ───────────────────────────────────────────────────
+    const condsPart  = ["a.type != 'email'", "a.activity_at IS NOT NULL"];
     const paramsPart = [];
 
     if (date_from) { paramsPart.push(date_from); condsPart.push(`a.activity_at >= $${paramsPart.length}::date`); }
     if (date_to)   { paramsPart.push(date_to);   condsPart.push(`a.activity_at <  ($${paramsPart.length}::date + interval '1 day')`); }
 
     if (req.user.is_admin) {
-      if (assigned_to) { paramsPart.push(assigned_to); condsPart.push(`p.manager_id = $${paramsPart.length}`); }
+      if (assigned_to) { paramsPart.push(assigned_to); condsPart.push(`COALESCE(a.assigned_to, p.manager_id) = $${paramsPart.length}`); }
     } else if (req.user.crm_role === 'sales_manager') {
       if (assigned_to) {
-        paramsPart.push(assigned_to); condsPart.push(`p.manager_id = $${paramsPart.length}`);
+        paramsPart.push(assigned_to); condsPart.push(`COALESCE(a.assigned_to, p.manager_id) = $${paramsPart.length}`);
       } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-        paramsPart.push(req.crmScopeUserIds); condsPart.push(`p.manager_id = ANY($${paramsPart.length}::uuid[])`);
+        paramsPart.push(req.crmScopeUserIds); condsPart.push(`COALESCE(a.assigned_to, p.manager_id) = ANY($${paramsPart.length}::uuid[])`);
       } else { condsPart.push('1=0'); }
     } else {
-      paramsPart.push(req.user.id); condsPart.push(`p.manager_id = $${paramsPart.length}`);
+      paramsPart.push(req.user.id); condsPart.push(`COALESCE(a.assigned_to, p.manager_id) = $${paramsPart.length}`);
     }
 
-    const wherePart = condsPart.length
-      ? "WHERE a.type = 'meeting' AND " + condsPart.join(' AND ')
-      : "WHERE a.type = 'meeting'";
+    const wherePart = 'WHERE ' + condsPart.join(' AND ');
 
     const { rows: partnerActs } = await db.query(`
       SELECT
         a.id, a.type, a.title, a.body, a.activity_at, a.duration_min,
-        a.participants, a.meeting_location, a.created_by,
+        a.participants, a.meeting_location, a.created_by, a.status, a.close_comment,
         u.display_name  AS created_by_name,
         'partner'       AS source_type,
         p.id            AS source_id,
         p.company       AS source_name,
         mu.display_name AS assigned_to_name,
-        mu.id           AS assigned_to_id
+        mu.id           AS assigned_to_id,
+        au.display_name AS act_assigned_to_name,
+        a.assigned_to   AS act_assigned_to_id
       FROM crm_partner_activities a
-      JOIN crm_partners p   ON p.id  = a.partner_id
-      LEFT JOIN users u     ON u.id  = a.created_by
-      LEFT JOIN users mu    ON mu.id = p.manager_id
+      JOIN crm_partners p   ON p.id   = a.partner_id
+      LEFT JOIN users u     ON u.id   = a.created_by
+      LEFT JOIN users mu    ON mu.id  = p.manager_id
+      LEFT JOIN users au    ON au.id  = a.assigned_to
       ${wherePart}
-      ORDER BY a.activity_at DESC
+      ORDER BY a.activity_at
     `, paramsPart);
 
     res.json([...leadActs, ...partnerActs].sort((a, b) =>
@@ -773,11 +841,23 @@ router.get('/:id',
           u.display_name AS assigned_to_name,
           u.email        AS assigned_to_email,
           COALESCE(
-            json_agg(DISTINCT jsonb_build_object(
-              'id',a.id,'type',a.type,'title',a.title,'body',a.body,
-              'activity_at',a.activity_at,'duration_min',a.duration_min,
-              'participants',a.participants,'meeting_location',a.meeting_location,'created_by_name',au.display_name
-            )) FILTER (WHERE a.id IS NOT NULL), '[]'
+            (SELECT json_agg(act ORDER BY act->>'activity_at' DESC NULLS LAST)
+             FROM (
+               SELECT DISTINCT jsonb_build_object(
+                 'id',a.id,'type',a.type,'title',a.title,'body',a.body,
+                 'activity_at',a.activity_at,'duration_min',a.duration_min,
+                 'participants',a.participants,'meeting_location',a.meeting_location,
+                 'created_by',a.created_by,'created_by_name',au.display_name,
+                 'assigned_to',a.assigned_to,'assigned_to_name',au2.display_name,
+                 'status',a.status,'close_comment',a.close_comment,
+                 'gmail_thread_id',a.gmail_thread_id,'gmail_message_id',a.gmail_message_id
+               ) AS act
+               FROM crm_lead_activities a
+               LEFT JOIN users au  ON au.id  = a.created_by
+               LEFT JOIN users au2 ON au2.id = a.assigned_to
+               WHERE a.lead_id = l.id
+             ) sub
+            ), '[]'
           ) AS activities,
           COALESCE(
             json_agg(DISTINCT jsonb_build_object(
@@ -786,8 +866,6 @@ router.get('/:id',
           ) AS linked_documents
         FROM crm_leads l
         LEFT JOIN users u  ON u.id = l.assigned_to
-        LEFT JOIN crm_lead_activities a ON a.lead_id = l.id
-        LEFT JOIN users au ON au.id = a.created_by
         LEFT JOIN crm_lead_documents ld ON ld.lead_id = l.id
         WHERE l.id = $1
         GROUP BY l.id, u.display_name, u.email
@@ -956,31 +1034,36 @@ router.post('/:id/activities',
     body('type').notEmpty().isIn(['call','email','meeting','note','doc_sent']),
     body('title').notEmpty().trim(),
     body('body').optional().trim(),
-    body('activity_at').optional().isISO8601(),
+    body('activity_at').optional({ nullable: true }).isISO8601(),
     body('duration_min').optional({ nullable: true }).isInt({ min: 0 }),
     body('participants').optional().trim(),
     body('meeting_location').optional({ nullable: true }).trim(),
+    body('assigned_to').optional({ nullable: true }).isUUID(),
   ],
   validate,
   async (req, res, next) => {
     try {
       const id = parseInt(req.params.id);
-      const { type, title, body: bodyText, activity_at, duration_min, participants, meeting_location } = req.body;
+      const { type, title, body: bodyText, activity_at, duration_min, participants, meeting_location, assigned_to } = req.body;
 
       const { rows } = await db.query(`
         INSERT INTO crm_lead_activities
-          (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-        RETURNING *, (SELECT display_name FROM users WHERE id = created_by) AS created_by_name
-      `, [id, type, title, bodyText||null, activity_at||new Date(),
-          duration_min||null, participants||null, meeting_location||null, req.user.id]);
+          (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, assigned_to, created_by, status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new')
+        RETURNING *,
+          (SELECT display_name FROM users WHERE id = created_by) AS created_by_name,
+          (SELECT display_name FROM users WHERE id = assigned_to) AS assigned_to_name
+      `, [id, type, title, bodyText||null,
+          activity_at||null,
+          duration_min||null, participants||null, meeting_location||null,
+          assigned_to||null, req.user.id]);
 
       await db.query('UPDATE crm_leads SET updated_at=now() WHERE id=$1', [id]);
       await audit.log({
         user:       req.user,
-        action:     'crm_lead_update',
-        afterState: { activity_action: 'created', type, title },
-        metadata:   { lead_id: id, activity_id: rows[0].id },
+        action:     'crm_activity_create',
+        afterState: { type, title, assigned_to: assigned_to||null, activity_at: activity_at||null },
+        metadata:   { lead_id: id, activity_id: rows[0].id, source: 'lead' },
         ipAddress:  req.auditContext?.ipAddress,
       });
       res.status(201).json(rows[0]);
@@ -997,9 +1080,12 @@ router.patch('/:id/activities/:actId',
     body('type').optional().isIn(['call','email','meeting','note','doc_sent']),
     body('title').optional().notEmpty().trim(),
     body('body').optional({ nullable: true }).trim(),
-    body('activity_at').optional().isISO8601(),
+    body('activity_at').optional({ nullable: true }),
     body('participants').optional({ nullable: true }).trim(),
     body('meeting_location').optional({ nullable: true }).trim(),
+    body('assigned_to').optional({ nullable: true }),
+    body('status').optional().isIn(['new','open','closed']),
+    body('close_comment').optional({ nullable: true }).trim(),
   ],
   validate,
   async (req, res, next) => {
@@ -1015,18 +1101,46 @@ router.patch('/:id/activities/:actId',
       if (act.created_by !== req.user.id && !req.isCrmManager) {
         return res.status(403).json({ error: 'Brak uprawnień do edycji tej aktywności' });
       }
+
+      const newStatus = req.body.status ?? act.status;
+      // Closing requires a comment
+      if (newStatus === 'closed' && !req.body.close_comment && !act.close_comment) {
+        return res.status(400).json({ error: 'Komentarz jest wymagany przy zamknięciu aktywności' });
+      }
+
       const type             = req.body.type             ?? act.type;
       const title            = req.body.title            ?? act.title;
-      const body             = req.body.body             !== undefined ? req.body.body : act.body;
-      const activity_at      = req.body.activity_at      ?? act.activity_at;
-      const participants     = req.body.participants     !== undefined ? req.body.participants : act.participants;
+      const body             = req.body.body             !== undefined ? req.body.body             : act.body;
+      const activity_at      = req.body.activity_at      !== undefined ? req.body.activity_at      : act.activity_at;
+      const participants     = req.body.participants     !== undefined ? req.body.participants     : act.participants;
       const meeting_location = req.body.meeting_location !== undefined ? req.body.meeting_location : act.meeting_location;
+      const assigned_to      = req.body.assigned_to      !== undefined ? req.body.assigned_to      : act.assigned_to;
+      const close_comment    = req.body.close_comment    !== undefined ? req.body.close_comment    : act.close_comment;
+
       const { rows } = await db.query(`
         UPDATE crm_lead_activities
-        SET type=$1, title=$2, body=$3, activity_at=$4, participants=$5, meeting_location=$6, updated_at=now()
-        WHERE id=$7
-        RETURNING *, (SELECT display_name FROM users WHERE id = created_by) AS created_by_name
-      `, [type, title, body||null, activity_at, participants||null, meeting_location||null, actId]);
+        SET type=$1, title=$2, body=$3, activity_at=$4, participants=$5, meeting_location=$6,
+            assigned_to=$7, status=$8, close_comment=$9, updated_at=now()
+        WHERE id=$10
+        RETURNING *,
+          (SELECT display_name FROM users WHERE id = created_by) AS created_by_name,
+          (SELECT display_name FROM users WHERE id = assigned_to) AS assigned_to_name
+      `, [type, title, body||null, activity_at||null, participants||null, meeting_location||null,
+          assigned_to||null, newStatus, close_comment||null, actId]);
+
+      const auditAction = newStatus === 'closed' && act.status !== 'closed'
+        ? 'crm_activity_close'
+        : 'crm_activity_update';
+
+      await audit.log({
+        user:        req.user,
+        action:      auditAction,
+        beforeState: { type: act.type, title: act.title, status: act.status, assigned_to: act.assigned_to },
+        afterState:  { type, title, status: newStatus, assigned_to, close_comment },
+        metadata:    { lead_id: leadId, activity_id: actId, source: 'lead' },
+        ipAddress:   req.auditContext?.ipAddress,
+      });
+
       res.json(rows[0]);
     } catch (err) { next(err); }
   }
