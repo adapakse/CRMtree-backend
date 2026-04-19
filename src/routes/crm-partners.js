@@ -6,9 +6,12 @@ const express  = require("express");
 const router   = express.Router();
 const { pool } = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
-const { crmAuth }     = require("../middleware/crm-rbac");
+const { crmAuth, loadCrmScope } = require("../middleware/crm-rbac");
 const calendarService = require("../services/calendarService");
 const config   = require("../config");
+
+// Wspólne middleware dla wszystkich tras (requireAuth + crmAuth są też per-route dla jasności)
+router.use(requireAuth, crmAuth, loadCrmScope);
 
 // ── Pomocnicze ────────────────────────────────────────────────────────────────
 function assertManager(req, res) {
@@ -39,7 +42,14 @@ router.get("/onboarding", requireAuth, crmAuth, async (req, res) => {
     const params = [];
     const conds  = ["p.status = 'onboarding'"];
 
-    if (!isManager) {
+    if (req.user.is_admin) {
+      // admin — bez ograniczeń
+    } else if (req.user.crm_role === 'sales_manager') {
+      if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
+        params.push(req.crmScopeUserIds);
+        conds.push(`p.manager_id = ANY($${params.length}::uuid[])`);
+      } else { conds.push('1=0'); }
+    } else {
       // Handlowiec widzi tylko partnerów gdzie ma przypisane zadania
       params.push(userId);
       conds.push(`EXISTS (
@@ -163,13 +173,18 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
       params.push(industry);
       where.push(`p.industry = $${params.length}`);
     }
-    // handlowiec widzi tylko swoich, manager widzi wszystkich (lub filtruje po wybranym)
-    if (!req.user.is_admin && req.user.crm_role !== "sales_manager") {
-      params.push(req.user.id);
-      where.push(`p.manager_id = $${params.length}`);
-    } else if (manager_id) {
-      params.push(manager_id);
-      where.push(`p.manager_id = $${params.length}`);
+    // Scope widoczności
+    if (req.user.is_admin) {
+      if (manager_id) { params.push(manager_id); where.push(`p.manager_id = $${params.length}`); }
+    } else if (req.user.crm_role === 'sales_manager') {
+      if (manager_id) {
+        // ekspansja — konkretny user (może być spoza grupy — tylko podgląd)
+        params.push(manager_id); where.push(`p.manager_id = $${params.length}`);
+      } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
+        params.push(req.crmScopeUserIds); where.push(`p.manager_id = ANY($${params.length}::uuid[])`);
+      } else { where.push('1=0'); }
+    } else {
+      params.push(req.user.id); where.push(`p.manager_id = $${params.length}`);
     }
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -343,6 +358,19 @@ router.post("/", requireAuth, crmAuth, async (req, res) => {
 router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
   try {
     const { id } = req.params;
+
+    // Scope check: manager może edytować tylko partnerów ze swojej grupy
+    if (!req.user.is_admin && req.user.crm_role === 'sales_manager' && req.crmScopeUserIds) {
+      const { rows: partnerRows } = await pool.query(
+        'SELECT manager_id FROM crm_partners WHERE id = $1', [id],
+      );
+      if (!partnerRows.length) return res.status(404).json({ error: 'Partner nie znaleziony' });
+      if (!req.crmScopeUserIds.includes(partnerRows[0].manager_id)) {
+        return res.status(403).json({
+          error: 'Nie możesz edytować tego partnera — jego manager nie należy do Twojej grupy.',
+        });
+      }
+    }
 
     // Blokuj zmianę statusu z 'onboarding' gdy są nieukończone zadania
     if (req.body.status && req.body.status !== 'onboarding') {

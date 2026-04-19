@@ -272,8 +272,24 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
 // ─── 404 & error handler ──────────────────────────
 // dev-login is registered in routes/auth.js (active only when NODE_ENV=development)
 
-
 app.use(notFound);
 app.use(errorHandler);
+
+// ─── Gmail watch auto-renewal (co 6 dni) ──────────────────────────────────────
+// Gmail watch wygasa po 7 dniach — odnawiamy co 6 dni aby nie stracić push-notyfikacji.
+// Uruchamiamy przy starcie serwera, a potem co 6 * 24h.
+if (config.google.pubsubTopic) {
+  const gmailService = require('./services/gmailService');
+  const { pool: dbPool } = require('./config/database');
+  const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
+
+  const scheduleWatchRenewal = () => {
+    gmailService.renewAllWatches(dbPool).catch(() => {});
+    setTimeout(scheduleWatchRenewal, SIX_DAYS_MS);
+  };
+  // Pierwsze odnowienie po 60s od startu (serwer musi być gotowy)
+  setTimeout(scheduleWatchRenewal, 60 * 1000);
+  logger.info('[Gmail] Watch renewal scheduled every 6 days');
+}
 
 module.exports = app;

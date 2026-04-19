@@ -1,15 +1,17 @@
 "use strict";
 // src/routes/crm-gmail.js
 
-const express      = require("express");
-const router       = express.Router();
-const { pool }     = require("../config/database");
+const express         = require("express");
+const router          = express.Router();
+const { pool }        = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
 const { crmAuth }     = require("../middleware/crm-rbac");
-const gmailService = require("../services/gmailService");
-const config       = require("../config");
+const gmailService    = require("../services/gmailService");
+const storageService  = require("../services/storageService");
+const config          = require("../config");
+const { v4: uuidv4 }  = require("uuid");
 
-// multer — opcjonalny (do załączników). Jeśli nie zainstalowany — działa bez załączników.
+// multer — do załączników w wysyłce
 let upload = null;
 try {
   const multer = require("multer");
@@ -18,11 +20,93 @@ try {
   console.warn("[Gmail] multer niedostępny — wysyłka bez załączników. Uruchom: npm install multer");
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Parsuje nagłówek "Name <email>" lub "email" i zwraca { name, email }.
+ */
+function parseEmailHeader(header) {
+  const str = String(header || "").trim();
+  const m   = str.match(/^(.*?)\s*<([^>]+)>$/);
+  if (m) {
+    return { name: m[1].trim().replace(/^["']|["']$/g, ""), email: m[2].trim().toLowerCase() };
+  }
+  return { name: "", email: str.toLowerCase() };
+}
+
+/**
+ * Zapisuje adresy email z nagłówków do crm_lead_contacts (jeśli jeszcze nie istnieją).
+ * Nie rzuca — błędy są logowane i ignorowane.
+ */
+async function autoSaveLeadContacts(leadId, emailHeaders) {
+  for (const header of emailHeaders) {
+    const { name, email } = parseEmailHeader(header);
+    if (!email || !email.includes("@")) continue;
+    try {
+      // Sprawdź czy już istnieje (email główny leada lub w extra_contacts)
+      const [mainQ, extraQ] = await Promise.all([
+        pool.query("SELECT id FROM crm_leads WHERE id = $1 AND LOWER(email) = $2", [leadId, email]),
+        pool.query("SELECT id FROM crm_lead_contacts WHERE lead_id = $1 AND LOWER(email) = $2", [leadId, email]),
+      ]);
+      if (mainQ.rows.length || extraQ.rows.length) continue;
+
+      await pool.query(
+        "INSERT INTO crm_lead_contacts (lead_id, contact_name, email) VALUES ($1, $2, $3)",
+        [leadId, name || email, email],
+      );
+    } catch (e) {
+      console.warn("[Gmail] autoSaveLeadContacts error:", e.message);
+    }
+  }
+}
+
+/**
+ * Zapisuje załącznik do Azure Blob i aktualizuje/wstawia rekord w crm_email_attachments.
+ */
+async function storeAttachment({ leadId, partnerId, messageId, attachmentId, filename, mimeType, buffer, direction }) {
+  const safeFilename = String(filename).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const blobPath     = `crm-attachments/${new Date().toISOString().slice(0, 10)}-${uuidv4().slice(0, 8)}-${safeFilename}`;
+
+  await storageService.uploadBuffer(blobPath, buffer, mimeType || "application/octet-stream");
+
+  const idCol = leadId ? "lead_id" : "partner_id";
+  const idVal = leadId || partnerId;
+
+  // Upsert — jeśli rekord z tym message_id + attachment_id już istnieje, zaktualizuj blob_path
+  await pool.query(
+    `INSERT INTO crm_email_attachments
+       (${idCol}, gmail_message_id, gmail_attachment_id, filename, mime_type, blob_path, file_size, direction)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     ON CONFLICT DO NOTHING`,
+    [idVal, messageId, attachmentId || null, filename, mimeType || "application/octet-stream", blobPath, buffer.length, direction || "received"],
+  );
+  return blobPath;
+}
+
+/**
+ * Zapisuje metadane załączników do crm_email_attachments bez pobierania treści (blob_path = NULL).
+ * Wywołana przy pobieraniu wątku — umożliwia późniejsze pobranie.
+ */
+async function registerAttachmentRefs({ leadId, partnerId, messageId, attachments }) {
+  const idCol = leadId ? "lead_id" : "partner_id";
+  const idVal = leadId || partnerId;
+  for (const att of attachments || []) {
+    try {
+      await pool.query(
+        `INSERT INTO crm_email_attachments
+           (${idCol}, gmail_message_id, gmail_attachment_id, filename, mime_type, direction)
+         VALUES ($1, $2, $3, $4, $5, 'received')
+         ON CONFLICT DO NOTHING`,
+        [idVal, messageId, att.attachmentId, att.filename, att.mimeType || "application/octet-stream"],
+      );
+    } catch (_) {}
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // OAUTH2
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Pobierz URL do autoryzacji Google
 router.get("/oauth/url", requireAuth, (req, res) => {
   if (!config.google.clientId || !config.google.clientSecret) {
     return res.status(503).json({ error: "Gmail OAuth nie jest skonfigurowany (brak GOOGLE_CLIENT_ID/SECRET)" });
@@ -31,7 +115,6 @@ router.get("/oauth/url", requireAuth, (req, res) => {
   res.json({ url });
 });
 
-// Callback po autoryzacji Google
 router.get("/oauth/callback", requireAuth, async (req, res) => {
   try {
     const { code, error } = req.query;
@@ -50,7 +133,6 @@ router.get("/oauth/callback", requireAuth, async (req, res) => {
   }
 });
 
-// Sprawdź status połączenia
 router.get("/status", requireAuth, async (req, res) => {
   try {
     const status = await gmailService.getStatus(req.user.id);
@@ -60,7 +142,6 @@ router.get("/status", requireAuth, async (req, res) => {
   }
 });
 
-// Rozłącz konto Gmail
 router.delete("/oauth/disconnect", requireAuth, async (req, res) => {
   try {
     await gmailService.disconnect(req.user.id);
@@ -90,6 +171,7 @@ async function sendLeadHandler(req, res) {
       filename: f.originalname,
       mimeType: f.mimetype,
       data:     f.buffer.toString("base64"),
+      _buffer:  f.buffer,  // zachowaj Buffer do zapisu w blob
     }));
 
     const { messageId, threadId: sentThreadId } = await gmailService.sendEmail({
@@ -97,16 +179,34 @@ async function sendLeadHandler(req, res) {
       to, subject,
       body:        body || "",
       threadId:    threadId || null,
-      attachments,
+      attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
     });
 
+    // Zapisz aktywność
     const actR = await pool.query(
       `INSERT INTO crm_lead_activities
          (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by)
        VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6)
-       RETURNING *`,
+       RETURNING id`,
       [leadId, subject, body || null, sentThreadId, messageId, req.user.id],
     );
+
+    // Zapisz wysłane załączniki do Blob (asynchronicznie — nie blokuj odpowiedzi)
+    for (const att of attachments) {
+      storeAttachment({
+        leadId,
+        messageId,
+        attachmentId: null,   // wysłane attachmenty nie mają Gmail attachmentId
+        filename:     att.filename,
+        mimeType:     att.mimeType,
+        buffer:       att._buffer,
+        direction:    "sent",
+      }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
+    }
+
+    // Auto-zapis odbiorców do extra_contacts leada
+    const recipients = String(to).split(",").map((s) => s.trim()).filter(Boolean);
+    autoSaveLeadContacts(leadId, recipients).catch(() => {});
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
@@ -144,6 +244,7 @@ async function sendPartnerHandler(req, res) {
       filename: f.originalname,
       mimeType: f.mimetype,
       data:     f.buffer.toString("base64"),
+      _buffer:  f.buffer,
     }));
 
     const { messageId, threadId: sentThreadId } = await gmailService.sendEmail({
@@ -151,16 +252,28 @@ async function sendPartnerHandler(req, res) {
       to, subject,
       body:        body || "",
       threadId:    threadId || null,
-      attachments,
+      attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
     });
 
     const actR = await pool.query(
       `INSERT INTO crm_partner_activities
          (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by)
        VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6)
-       RETURNING *`,
+       RETURNING id`,
       [partnerId, subject, body || null, sentThreadId, messageId, req.user.id],
     );
+
+    for (const att of attachments) {
+      storeAttachment({
+        partnerId,
+        messageId,
+        attachmentId: null,
+        filename:     att.filename,
+        mimeType:     att.mimeType,
+        buffer:       att._buffer,
+        direction:    "sent",
+      }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
+    }
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
@@ -179,35 +292,111 @@ if (upload) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// WĄTKI
+// POBIERANIE WĄTKÓW (z rejestracją załączników w DB)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, res) => {
   try {
+    const leadId  = parseInt(req.params.leadId);
     const messages = await gmailService.getThread(req.user.id, req.params.threadId);
+
+    // Zapisz referencje do załączników w DB (bez pobierania treści)
+    for (const msg of messages) {
+      if (msg.attachments?.length) {
+        registerAttachmentRefs({ leadId, messageId: msg.id, attachments: msg.attachments }).catch(() => {});
+      }
+    }
+
     res.json(messages);
   } catch (err) {
-    console.error("[Gmail] getThread error:", err.message);
+    console.error("[Gmail] getThread/lead error:", err.message);
     res.status(500).json({ error: "Błąd pobierania wątku: " + err.message });
   }
 });
 
 router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const messages = await gmailService.getThread(req.user.id, req.params.threadId);
+    const partnerId = parseInt(req.params.partnerId);
+    const messages  = await gmailService.getThread(req.user.id, req.params.threadId);
+
+    for (const msg of messages) {
+      if (msg.attachments?.length) {
+        registerAttachmentRefs({ partnerId, messageId: msg.id, attachments: msg.attachments }).catch(() => {});
+      }
+    }
+
     res.json(messages);
   } catch (err) {
-    console.error("[Gmail] getThread error:", err.message);
+    console.error("[Gmail] getThread/partner error:", err.message);
     res.status(500).json({ error: "Błąd pobierania wątku: " + err.message });
   }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PUB/SUB WEBHOOK (push z Google)
+// POBIERANIE ZAŁĄCZNIKA
+// Serwuje z Azure Blob (trwałe), lub pobiera z Gmail API i zapisuje do Blob.
+// Działa nawet po rozłączeniu konta Gmail — o ile blob_path jest wypełniony.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (req, res) => {
+  const { messageId, attachmentId } = req.params;
+  const filename = String(req.query.filename || "attachment").replace(/[^a-zA-Z0-9._\- ]/g, "_");
+  const mimeType = String(req.query.mime    || "application/octet-stream");
+
+  try {
+    // 1. Sprawdź czy mamy blobPath w DB
+    const { rows } = await pool.query(
+      `SELECT blob_path, filename, mime_type
+       FROM crm_email_attachments
+       WHERE gmail_message_id = $1 AND gmail_attachment_id = $2
+       LIMIT 1`,
+      [messageId, attachmentId],
+    );
+
+    if (rows.length && rows[0].blob_path) {
+      // Serwuj przez SAS URL (redirect) — przeglądarka pobiera bezpośrednio z Azure
+      const sasUrl = await storageService.generateSasUrl(rows[0].blob_path, 10);
+      return res.redirect(302, sasUrl);
+    }
+
+    // 2. Nie ma w Blob — pobierz z Gmail API używając tokenu bieżącego usera
+    const buffer = await gmailService.getAttachmentBuffer(req.user.id, messageId, attachmentId);
+
+    // 3. Zapisz do Blob asynchronicznie, żeby następne pobranie było z Blob
+    const safeFilename = filename.replace(/\s+/g, "_");
+    const blobPath     = `crm-attachments/${new Date().toISOString().slice(0, 10)}-${uuidv4().slice(0, 8)}-${safeFilename}`;
+    storageService.uploadBuffer(blobPath, buffer, mimeType)
+      .then(() => pool.query(
+        `UPDATE crm_email_attachments
+         SET blob_path = $1
+         WHERE gmail_message_id = $2 AND gmail_attachment_id = $3`,
+        [blobPath, messageId, attachmentId],
+      ))
+      .catch((e) => console.warn("[Gmail] Attachment blob cache failed:", e.message));
+
+    // 4. Wyślij do klienta
+    res.set("Content-Type",        mimeType);
+    res.set("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.set("Content-Length",      buffer.length);
+    return res.send(buffer);
+
+  } catch (err) {
+    console.error("[Gmail] getAttachment error:", err.message);
+    if (err.message?.includes("Brak połączonego konta")) {
+      return res.status(404).json({
+        error: "Załącznik niedostępny — konto Gmail niepołączone. Skontaktuj się z administratorem.",
+      });
+    }
+    res.status(500).json({ error: "Błąd pobierania załącznika: " + err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PUB/SUB WEBHOOK — auto-import przychodzących emaili
 // ═══════════════════════════════════════════════════════════════════════════════
 
 router.post("/webhook/pubsub", async (req, res) => {
-  // Zawsze odpowiadaj 200 — inaczej Pub/Sub będzie ponawiał w nieskończoność
+  // Zawsze odpowiadaj 200 natychmiast — inaczej Pub/Sub będzie ponawiał
   res.sendStatus(200);
 
   try {
@@ -215,13 +404,112 @@ router.post("/webhook/pubsub", async (req, res) => {
     if (!message?.data) return;
 
     const decoded = JSON.parse(Buffer.from(message.data, "base64").toString("utf8"));
-    console.log("[Gmail] Pub/Sub push:", JSON.stringify(decoded));
+    const { emailAddress, historyId: newHistoryId } = decoded;
+    if (!emailAddress || !newHistoryId) return;
 
-    // decoded.emailAddress — adres skrzynki która dostała wiadomość
-    // decoded.historyId    — nowe historyId do pobrania zmian
-    // Tutaj możesz dodać logikę automatycznego importu wiadomości do CRM
+    // Znajdź usera po adresie Gmail
+    const { rows: userRows } = await pool.query(
+      "SELECT user_id, history_id FROM user_gmail_tokens WHERE LOWER(email) = LOWER($1)",
+      [emailAddress],
+    );
+    if (!userRows.length) return;
+
+    const { user_id: userId, history_id: lastHistoryId } = userRows[0];
+    if (!lastHistoryId) {
+      // Brak punktu odniesienia — zapisz nowy historyId i zakończ
+      await pool.query(
+        "UPDATE user_gmail_tokens SET history_id = $1 WHERE user_id = $2",
+        [String(newHistoryId), userId],
+      );
+      return;
+    }
+
+    // Pobierz nowe wiadomości od ostatniego historyId
+    const { messageIds, historyId: fetchedHistoryId } = await gmailService.getNewMessages(userId, lastHistoryId);
+
+    // Zaktualizuj historyId
+    await pool.query(
+      "UPDATE user_gmail_tokens SET history_id = $1 WHERE user_id = $2",
+      [String(fetchedHistoryId || newHistoryId), userId],
+    );
+
+    for (const msgId of messageIds) {
+      try {
+        const msg = await gmailService.getMessage(userId, msgId);
+
+        // Dopasuj wątek do leada lub partnera
+        const [leadQ, partnerQ] = await Promise.all([
+          pool.query(
+            "SELECT lead_id FROM crm_lead_activities WHERE gmail_thread_id = $1 LIMIT 1",
+            [msg.threadId],
+          ),
+          pool.query(
+            "SELECT partner_id FROM crm_partner_activities WHERE gmail_thread_id = $1 LIMIT 1",
+            [msg.threadId],
+          ),
+        ]);
+
+        const leadId    = leadQ.rows[0]?.lead_id    || null;
+        const partnerId = partnerQ.rows[0]?.partner_id || null;
+        if (!leadId && !partnerId) continue; // Nieznany wątek — pomiń
+
+        const actTable = leadId ? "crm_lead_activities"   : "crm_partner_activities";
+        const idCol    = leadId ? "lead_id"               : "partner_id";
+        const recordId = leadId || partnerId;
+
+        // Sprawdź czy wiadomość już zaimportowana
+        const existing = await pool.query(
+          `SELECT id FROM ${actTable} WHERE gmail_message_id = $1 LIMIT 1`,
+          [msg.id],
+        );
+        if (existing.rows.length) continue;
+
+        // Utwórz aktywność dla przychodzącego emaila
+        const actR = await pool.query(
+          `INSERT INTO ${actTable}
+             (${idCol}, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by)
+           VALUES ($1, 'email', $2, $3, $4, $5, $6, NULL)
+           RETURNING id`,
+          [
+            recordId,
+            `↩ ${msg.subject || "(bez tematu)"}`,
+            msg.body || msg.snippet || null,
+            msg.date,
+            msg.threadId,
+            msg.id,
+          ],
+        );
+
+        // Pobierz i zapisz załączniki do Blob
+        for (const att of msg.attachments || []) {
+          try {
+            const buffer = await gmailService.getAttachmentBuffer(userId, msg.id, att.attachmentId);
+            await storeAttachment({
+              leadId:       leadId    || undefined,
+              partnerId:    partnerId || undefined,
+              messageId:    msg.id,
+              attachmentId: att.attachmentId,
+              filename:     att.filename,
+              mimeType:     att.mimeType,
+              buffer,
+              direction:    "received",
+            });
+          } catch (attErr) {
+            console.warn("[Gmail] Pub/Sub attachment download failed:", attErr.message);
+          }
+        }
+
+        // Auto-zapis nadawcy do extra_contacts leada
+        if (leadId && msg.from) {
+          autoSaveLeadContacts(leadId, [msg.from]).catch(() => {});
+        }
+
+      } catch (msgErr) {
+        console.error("[Gmail] Pub/Sub message processing error:", msgErr.message);
+      }
+    }
   } catch (err) {
-    console.error("[Gmail] Pub/Sub parse error:", err.message);
+    console.error("[Gmail] Pub/Sub processing error:", err.message);
   }
 });
 

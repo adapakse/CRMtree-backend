@@ -214,6 +214,83 @@ function parseMessage(msg) {
   };
 }
 
+// ── Pobierz zawartość załącznika z Gmail API ──────────────────────────────────
+async function getAttachmentBuffer(userId, messageId, attachmentId) {
+  const oauth2 = await getAuthForUser(userId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  const res    = await gmail.users.messages.attachments.get({
+    userId: "me",
+    messageId,
+    id: attachmentId,
+  });
+  // Gmail zwraca URL-safe base64 (- zamiast +, _ zamiast /)
+  const base64 = res.data.data.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(base64, "base64");
+}
+
+// ── Pobierz pojedynczą wiadomość Gmail (sparsowaną) ───────────────────────────
+async function getMessage(userId, messageId) {
+  const oauth2 = await getAuthForUser(userId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  const res    = await gmail.users.messages.get({
+    userId:   "me",
+    id:       messageId,
+    format:   "full",
+  });
+  return parseMessage(res.data);
+}
+
+// ── Pobierz nowe wiadomości od danego historyId (dla Pub/Sub) ─────────────────
+async function getNewMessages(userId, startHistoryId) {
+  const oauth2 = await getAuthForUser(userId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  try {
+    const res = await gmail.users.history.list({
+      userId:         "me",
+      startHistoryId: String(startHistoryId),
+      historyTypes:   ["messageAdded"],
+      labelId:        "INBOX",
+    });
+    const history    = res.data.history || [];
+    const messageIds = new Set();
+    for (const h of history) {
+      for (const ma of h.messagesAdded || []) {
+        messageIds.add(ma.message.id);
+      }
+    }
+    return {
+      messageIds: [...messageIds],
+      historyId:  res.data.historyId || startHistoryId,
+    };
+  } catch (e) {
+    // 404 = historyId zbyt stary (historia wyczyszczona przez Google)
+    if (e.code === 404 || e.status === 404) {
+      return { messageIds: [], historyId: startHistoryId };
+    }
+    throw e;
+  }
+}
+
+// ── Odnów watch dla wszystkich połączonych userów ─────────────────────────────
+async function renewAllWatches(pool) {
+  if (!config.google.pubsubTopic) return;
+  try {
+    const { rows } = await pool.query(
+      "SELECT user_id FROM user_gmail_tokens WHERE refresh_token IS NOT NULL",
+    );
+    for (const row of rows) {
+      try {
+        await registerWatch(row.user_id);
+      } catch (e) {
+        console.warn("[Gmail] Watch renewal failed for user", row.user_id, e.message);
+      }
+    }
+    console.log(`[Gmail] Watch renewal completed for ${rows.length} user(s)`);
+  } catch (e) {
+    console.error("[Gmail] renewAllWatches error:", e.message);
+  }
+}
+
 // ── Rejestracja Pub/Sub watch ─────────────────────────────────────────────────
 async function registerWatch(userId) {
   if (!config.google.pubsubTopic) return null;
@@ -243,4 +320,8 @@ module.exports = {
   getThread,
   registerWatch,
   getAuthForUser,
+  getAttachmentBuffer,
+  getMessage,
+  getNewMessages,
+  renewAllWatches,
 };

@@ -146,8 +146,26 @@ async function deleteBlob(blobPath) {
   logger.info("Blob deleted", { blobPath });
 }
 
+/**
+ * Upload a raw buffer to a specific blob path (used for email attachments).
+ * Unlike uploadDocument, the caller provides the full blobPath.
+ * @param {string} blobPath   - e.g. 'crm-attachments/20240101-invoice.pdf'
+ * @param {Buffer} buffer
+ * @param {string} mimeType
+ */
+async function uploadBuffer(blobPath, buffer, mimeType = "application/octet-stream") {
+  const container = getContainerClient();
+  const blockBlobClient = container.getBlockBlobClient(blobPath);
+  await blockBlobClient.upload(buffer, buffer.length, {
+    blobHTTPHeaders: { blobContentType: mimeType },
+  });
+  logger.info("Buffer uploaded to blob", { blobPath, size: buffer.length });
+  return blobPath;
+}
+
 module.exports = {
   uploadDocument,
+  uploadBuffer,
   downloadDocument,
   generateSasUrl,
   generateWriteSasUrl,

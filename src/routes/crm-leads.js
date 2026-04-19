@@ -10,10 +10,10 @@ const audit  = require('../services/auditService');
 const logger = require('../utils/logger');
 const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
-const { crmAuth, crmScope, requireCrmManager, assertOwnership } = require('../middleware/crm-rbac');
+const { crmAuth, loadCrmScope, crmScope, requireCrmManager, assertOwnership } = require('../middleware/crm-rbac');
 const testAccountSvc = require('../services/testAccountService');
 
-router.use(requireAuth, injectAuditContext, crmAuth);
+router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope);
 
 // ── GET /api/crm/leads ────────────────────────────────────────────
 router.get('/',
@@ -21,7 +21,7 @@ router.get('/',
   [
     query('stage').optional().isString(),
     query('source').optional().isString().trim(),
-    query('assigned_to').optional().isUUID(),
+    query('assigned_to').optional().isString().trim(),
     query('hot').optional().isBoolean().toBoolean(),
     query('search').optional().isString().trim(),
     query('close_date_from').optional().isDate(),
@@ -58,8 +58,14 @@ router.get('/',
         }
       }
       if (req.query.assigned_to && req.isCrmManager) {
-        params.push(req.query.assigned_to);
-        where += ` AND l.assigned_to = $${params.length}`;
+        const assignedIds = String(req.query.assigned_to).split(',').map(s => s.trim()).filter(Boolean);
+        if (assignedIds.length === 1) {
+          params.push(assignedIds[0]);
+          where += ` AND l.assigned_to = $${params.length}`;
+        } else if (assignedIds.length > 1) {
+          params.push(assignedIds);
+          where += ` AND l.assigned_to = ANY($${params.length}::uuid[])`;
+        }
       }
       if (req.query.hot === true) {
         where += ` AND l.hot = true`;
@@ -212,6 +218,23 @@ router.get('/users', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── GET /api/crm/leads/groups ─────────────────────────────────────
+// Zwraca aktywne grupy wraz z listą przypisanych userów (user_ids[]).
+// Używane do filtra handlowiec/grupa na liście leadów — tylko dla managerów.
+router.get('/groups', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(`
+      SELECT gp.id, gp.name, array_agg(ugr.user_id::text ORDER BY ugr.user_id) AS user_ids
+      FROM group_profiles gp
+      JOIN user_group_roles ugr ON ugr.group_id = gp.id
+      WHERE gp.is_active = TRUE
+      GROUP BY gp.id, gp.name
+      ORDER BY gp.name
+    `);
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
 // ── GET /api/crm/leads/sources — słownik źródeł z app_settings ──
 router.get('/sources', async (req, res, next) => {
   try {
@@ -304,13 +327,17 @@ router.get('/calendar', async (req, res, next) => {
     if (date_from) { params.push(date_from); conds.push(`a.activity_at >= $${params.length}::date`); }
     if (date_to)   { params.push(date_to);   conds.push(`a.activity_at <  ($${params.length}::date + interval '1 day')`); }
 
-    // Scope: handlowiec widzi tylko swoje
-    if (!req.isCrmManager) {
-      params.push(req.user.id);
-      conds.push(`l.assigned_to = $${params.length}`);
-    } else if (assigned_to) {
-      params.push(assigned_to);
-      conds.push(`l.assigned_to = $${params.length}`);
+    // Scope dla leadów
+    if (req.user.is_admin) {
+      if (assigned_to) { params.push(assigned_to); conds.push(`l.assigned_to = $${params.length}`); }
+    } else if (req.user.crm_role === 'sales_manager') {
+      if (assigned_to) {
+        params.push(assigned_to); conds.push(`l.assigned_to = $${params.length}`);
+      } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
+        params.push(req.crmScopeUserIds); conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`);
+      } else { conds.push('1=0'); }
+    } else {
+      params.push(req.user.id); conds.push(`l.assigned_to = $${params.length}`);
     }
 
     const where = conds.length ? "WHERE a.type = 'meeting' AND " + conds.join(' AND ') : "WHERE a.type = 'meeting'";
@@ -341,12 +368,16 @@ router.get('/calendar', async (req, res, next) => {
     if (date_from) { paramsPart.push(date_from); condsPart.push(`a.activity_at >= $${paramsPart.length}::date`); }
     if (date_to)   { paramsPart.push(date_to);   condsPart.push(`a.activity_at <  ($${paramsPart.length}::date + interval '1 day')`); }
 
-    if (!req.isCrmManager) {
-      paramsPart.push(req.user.id);
-      condsPart.push(`p.manager_id = $${paramsPart.length}`);
-    } else if (assigned_to) {
-      paramsPart.push(assigned_to);
-      condsPart.push(`p.manager_id = $${paramsPart.length}`);
+    if (req.user.is_admin) {
+      if (assigned_to) { paramsPart.push(assigned_to); condsPart.push(`p.manager_id = $${paramsPart.length}`); }
+    } else if (req.user.crm_role === 'sales_manager') {
+      if (assigned_to) {
+        paramsPart.push(assigned_to); condsPart.push(`p.manager_id = $${paramsPart.length}`);
+      } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
+        paramsPart.push(req.crmScopeUserIds); condsPart.push(`p.manager_id = ANY($${paramsPart.length}::uuid[])`);
+      } else { condsPart.push('1=0'); }
+    } else {
+      paramsPart.push(req.user.id); condsPart.push(`p.manager_id = $${paramsPart.length}`);
     }
 
     const wherePart = condsPart.length
@@ -414,8 +445,18 @@ router.get('/report',
       const conditions = [];
       const params     = [];
 
-      // Scope: salesperson widzi tylko swoje
-      if (!req.isCrmManager) {
+      // Scope
+      if (req.user.is_admin) {
+        // admin — bez ograniczeń
+      } else if (req.user.crm_role === 'sales_manager') {
+        // ekspansja gdy jawny filtr assigned_to; inaczej — scope grupy
+        if (!req.query.assigned_to) {
+          if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
+            params.push(req.crmScopeUserIds);
+            conditions.push(`l.assigned_to = ANY($${params.length}::uuid[])`);
+          } else { conditions.push('1=0'); }
+        }
+      } else {
         params.push(req.user.id);
         conditions.push(`l.assigned_to = $${params.length}`);
       }
@@ -720,12 +761,12 @@ router.post('/enrich',
 );
 
 router.get('/:id',
-  crmScope,
+  // Bez crmScope — widok szczegółów jest zawsze dostępny (bez blokady 403/404).
+  // Uprawnienie do edycji zwracane jest jako pole can_edit w odpowiedzi.
   [param('id').isInt()], validate,
   async (req, res, next) => {
     try {
       const params = [parseInt(req.params.id)];
-      const scopeWhere = req.scopeFilter('l', 'assigned_to', params);
 
       const { rows } = await db.query(`
         SELECT l.*,
@@ -748,18 +789,29 @@ router.get('/:id',
         LEFT JOIN crm_lead_activities a ON a.lead_id = l.id
         LEFT JOIN users au ON au.id = a.created_by
         LEFT JOIN crm_lead_documents ld ON ld.lead_id = l.id
-        WHERE l.id = $1 ${scopeWhere}
+        WHERE l.id = $1
         GROUP BY l.id, u.display_name, u.email
       `, params);
 
       if (!rows.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
+
+      // Wyznacz can_edit — admin może zawsze, manager tylko w swojej grupie, handlowiec tylko własne
+      const lead = rows[0];
+      let can_edit = true;
+      if (!req.user.is_admin) {
+        if (req.user.crm_role === 'sales_manager') {
+          can_edit = !req.crmScopeUserIds || req.crmScopeUserIds.includes(lead.assigned_to);
+        } else {
+          can_edit = lead.assigned_to === req.user.id;
+        }
+      }
 
       // Dodatkowe kontakty
       const { rows: extraContacts } = await db.query(
         `SELECT * FROM crm_lead_contacts WHERE lead_id=$1 ORDER BY created_at`,
         [parseInt(req.params.id)]
       );
-      res.json({ ...rows[0], extra_contacts: extraContacts });
+      res.json({ ...lead, extra_contacts: extraContacts, can_edit });
     } catch (err) { next(err); }
   }
 );
