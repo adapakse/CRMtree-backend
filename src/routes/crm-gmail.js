@@ -42,6 +42,8 @@ async function autoSaveLeadContacts(leadId, emailHeaders) {
   for (const header of emailHeaders) {
     const { name, email } = parseEmailHeader(header);
     if (!email || !email.includes("@")) continue;
+    // Nie zapisuj adresów @worktrips.com (wewnętrznych)
+    if (email.toLowerCase().endsWith("@worktrips.com")) continue;
     try {
       // Sprawdź czy już istnieje (email główny leada lub w extra_contacts)
       const [mainQ, extraQ] = await Promise.all([
@@ -56,6 +58,29 @@ async function autoSaveLeadContacts(leadId, emailHeaders) {
       );
     } catch (e) {
       console.warn("[Gmail] autoSaveLeadContacts error:", e.message);
+    }
+  }
+}
+
+async function autoSavePartnerContacts(partnerId, emailHeaders) {
+  for (const header of emailHeaders) {
+    const { name, email } = parseEmailHeader(header);
+    if (!email || !email.includes("@")) continue;
+    // Nie zapisuj adresów @worktrips.com (wewnętrznych)
+    if (email.toLowerCase().endsWith("@worktrips.com")) continue;
+    try {
+      const [mainQ, extraQ] = await Promise.all([
+        pool.query("SELECT id FROM crm_partners WHERE id = $1 AND LOWER(email) = $2", [partnerId, email]),
+        pool.query("SELECT id FROM crm_partner_contacts WHERE partner_id = $1 AND LOWER(email) = $2", [partnerId, email]),
+      ]);
+      if (mainQ.rows.length || extraQ.rows.length) continue;
+      await pool.query(
+        `INSERT INTO crm_partner_contacts (partner_id, contact_name, email) VALUES ($1, $2, $3)
+         ON CONFLICT DO NOTHING`,
+        [partnerId, name || email, email],
+      );
+    } catch (e) {
+      console.warn("[Gmail] autoSavePartnerContacts error:", e.message);
     }
   }
 }
@@ -111,24 +136,36 @@ router.get("/oauth/url", requireAuth, (req, res) => {
   if (!config.google.clientId || !config.google.clientSecret) {
     return res.status(503).json({ error: "Gmail OAuth nie jest skonfigurowany (brak GOOGLE_CLIENT_ID/SECRET)" });
   }
-  const url = gmailService.getAuthUrl();
+  // userId zakodowany w state — callback nie potrzebuje JWT
+  const url = gmailService.getAuthUrl(req.user.id);
   res.json({ url });
 });
 
-router.get("/oauth/callback", requireAuth, async (req, res) => {
+// Brak requireAuth — Google redirectuje przeglądarkę bez headera Authorization.
+// userId jest bezpiecznie zakodowany w parametrze `state` wygenerowanym przez /oauth/url.
+router.get("/oauth/callback", async (req, res) => {
   try {
-    const { code, error } = req.query;
+    const { code, error, state } = req.query;
     if (error) return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=${encodeURIComponent(error)}`);
     if (!code)  return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=no_code`);
+    if (!state) return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=missing_state`);
 
-    await gmailService.exchangeCodeAndSave(code, req.user.id);
+    const userId = gmailService.parseOAuthState(state);
+    if (!userId) {
+      console.error("[Gmail] OAuth callback: invalid_state, raw state=", state);
+      return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=invalid_state`);
+    }
+
+    console.log("[Gmail] OAuth callback: state OK, userId=", userId);
+    await gmailService.exchangeCodeAndSave(code, userId);
+    console.log("[Gmail] OAuth callback: tokens saved for userId=", userId);
 
     // Zarejestruj Pub/Sub watch (ignoruj błąd jeśli brak konfiguracji)
-    try { await gmailService.registerWatch(req.user.id); } catch (_) {}
+    try { await gmailService.registerWatch(userId); } catch (_) {}
 
     res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=connected`);
   } catch (err) {
-    console.error("[Gmail] OAuth callback error:", err.message);
+    console.error("[Gmail] OAuth callback error:", err.message, err.stack);
     res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=callback_failed`);
   }
 });
@@ -158,7 +195,7 @@ router.delete("/oauth/disconnect", requireAuth, async (req, res) => {
 async function sendLeadHandler(req, res) {
   try {
     const leadId = parseInt(req.params.leadId);
-    const { to, subject, body, threadId } = req.body;
+    const { to, cc, subject, body, threadId, inReplyTo, references } = req.body;
 
     if (!to || !subject) {
       return res.status(400).json({ error: "Pola 'to' i 'subject' są wymagane" });
@@ -176,9 +213,11 @@ async function sendLeadHandler(req, res) {
 
     const { messageId, threadId: sentThreadId } = await gmailService.sendEmail({
       userId:      req.user.id,
-      to, subject,
+      to, cc: cc || null, subject,
       body:        body || "",
-      threadId:    threadId || null,
+      threadId:    threadId   || null,
+      inReplyTo:   inReplyTo  || null,
+      references:  references || null,
       attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
     });
 
@@ -204,9 +243,12 @@ async function sendLeadHandler(req, res) {
       }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
     }
 
-    // Auto-zapis odbiorców do extra_contacts leada
-    const recipients = String(to).split(",").map((s) => s.trim()).filter(Boolean);
-    autoSaveLeadContacts(leadId, recipients).catch(() => {});
+    // Auto-zapis odbiorców (To + CC) do extra_contacts leada
+    const allRecipients = [
+      ...String(to).split(",").map((s) => s.trim()).filter(Boolean),
+      ...(cc ? String(cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
+    ];
+    autoSaveLeadContacts(leadId, allRecipients).catch(() => {});
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
@@ -231,7 +273,7 @@ if (upload) {
 async function sendPartnerHandler(req, res) {
   try {
     const partnerId = parseInt(req.params.partnerId);
-    const { to, subject, body, threadId } = req.body;
+    const { to, cc, subject, body, threadId, inReplyTo, references } = req.body;
 
     if (!to || !subject) {
       return res.status(400).json({ error: "Pola 'to' i 'subject' są wymagane" });
@@ -249,9 +291,11 @@ async function sendPartnerHandler(req, res) {
 
     const { messageId, threadId: sentThreadId } = await gmailService.sendEmail({
       userId:      req.user.id,
-      to, subject,
+      to, cc: cc || null, subject,
       body:        body || "",
-      threadId:    threadId || null,
+      threadId:    threadId   || null,
+      inReplyTo:   inReplyTo  || null,
+      references:  references || null,
       attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
     });
 
@@ -274,6 +318,13 @@ async function sendPartnerHandler(req, res) {
         direction:    "sent",
       }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
     }
+
+    // Auto-zapis odbiorców (To + CC) do kontaktów partnera
+    const allRecipients = [
+      ...String(to).split(",").map((s) => s.trim()).filter(Boolean),
+      ...(cc ? String(cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
+    ];
+    autoSavePartnerContacts(partnerId, allRecipients).catch(() => {});
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
@@ -300,10 +351,25 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
     const leadId  = parseInt(req.params.leadId);
     const messages = await gmailService.getThread(req.user.id, req.params.threadId);
 
-    // Zapisz referencje do załączników w DB (bez pobierania treści)
     for (const msg of messages) {
       if (msg.attachments?.length) {
         registerAttachmentRefs({ leadId, messageId: msg.id, attachments: msg.attachments }).catch(() => {});
+      }
+    }
+
+    // Dołącz wysłane załączniki z bazy (direction='sent')
+    const msgIds = messages.map(m => m.id);
+    if (msgIds.length) {
+      const { rows: sentAtts } = await pool.query(
+        `SELECT gmail_message_id, filename, mime_type, blob_path, gmail_attachment_id
+         FROM crm_email_attachments
+         WHERE lead_id = $1 AND gmail_message_id = ANY($2) AND direction = 'sent'`,
+        [leadId, msgIds],
+      );
+      for (const msg of messages) {
+        msg.sentAttachments = sentAtts
+          .filter(a => a.gmail_message_id === msg.id)
+          .map(a => ({ filename: a.filename, mimeType: a.mime_type, blobPath: a.blob_path }));
       }
     }
 
@@ -325,6 +391,22 @@ router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (
       }
     }
 
+    // Dołącz wysłane załączniki z bazy (direction='sent')
+    const msgIds = messages.map(m => m.id);
+    if (msgIds.length) {
+      const { rows: sentAtts } = await pool.query(
+        `SELECT gmail_message_id, filename, mime_type, blob_path
+         FROM crm_email_attachments
+         WHERE partner_id = $1 AND gmail_message_id = ANY($2) AND direction = 'sent'`,
+        [partnerId, msgIds],
+      );
+      for (const msg of messages) {
+        msg.sentAttachments = sentAtts
+          .filter(a => a.gmail_message_id === msg.id)
+          .map(a => ({ filename: a.filename, mimeType: a.mime_type, blobPath: a.blob_path }));
+      }
+    }
+
     res.json(messages);
   } catch (err) {
     console.error("[Gmail] getThread/partner error:", err.message);
@@ -337,6 +419,28 @@ router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (
 // Serwuje z Azure Blob (trwałe), lub pobiera z Gmail API i zapisuje do Blob.
 // Działa nawet po rozłączeniu konta Gmail — o ile blob_path jest wypełniony.
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// Serwuje wysłany załącznik z Azure Blob (direction='sent', identified by messageId + filename)
+router.get("/sent-attachment/:messageId", requireAuth, crmAuth, async (req, res) => {
+  const { messageId } = req.params;
+  const filename = String(req.query.filename || "attachment").replace(/[^a-zA-Z0-9._\- ]/g, "_");
+  const mimeType = String(req.query.mime    || "application/octet-stream");
+  try {
+    const { rows } = await pool.query(
+      `SELECT blob_path FROM crm_email_attachments
+       WHERE gmail_message_id = $1 AND direction = 'sent' AND filename = $2
+       LIMIT 1`,
+      [messageId, filename],
+    );
+    if (!rows.length || !rows[0].blob_path) {
+      return res.status(404).json({ error: "Załącznik niedostępny." });
+    }
+    const sasUrl = await storageService.generateSasUrl(rows[0].blob_path, 10);
+    return res.redirect(302, sasUrl);
+  } catch (err) {
+    res.status(500).json({ error: "Błąd pobierania załącznika: " + err.message });
+  }
+});
 
 router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (req, res) => {
   const { messageId, attachmentId } = req.params;

@@ -12,6 +12,7 @@ const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
 const { crmAuth, loadCrmScope, crmScope, requireCrmManager, assertOwnership } = require('../middleware/crm-rbac');
 const testAccountSvc = require('../services/testAccountService');
+const email          = require('../utils/email');
 
 router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope);
 
@@ -99,7 +100,8 @@ router.get('/',
             cp.id          AS converted_partner_id,
             cp.company     AS converted_partner_company,
             (SELECT COUNT(*) FROM crm_lead_activities a WHERE a.lead_id = l.id) AS activity_count,
-            (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id) AS document_count
+            (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id) AS document_count,
+            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email')::int AS email_count
           FROM crm_leads l
           LEFT JOIN users u ON u.id = l.assigned_to
           LEFT JOIN crm_partners cp ON cp.lead_id = l.id
@@ -317,13 +319,15 @@ router.get('/contact-suggestions', async (req, res, next) => {
 // query: assigned_to (UUID), type (string), include_closed (bool)
 router.get('/tasks', async (req, res, next) => {
   try {
-    const { assigned_to, type, include_closed } = req.query;
-    const showClosed = include_closed === 'true';
+    const { assigned_to, type, include_closed, include_no_date } = req.query;
+    const showClosed  = include_closed  === 'true';
+    const includeNoDate = include_no_date === 'true';
 
     const conds  = ["a.type != 'email'"];
     const params = [];
 
-    if (!showClosed) conds.push("a.status != 'closed'");
+    if (!showClosed)    conds.push("a.status != 'closed'");
+    if (!includeNoDate) conds.push("a.activity_at IS NOT NULL");
     if (type) { params.push(type); conds.push(`a.type = $${params.length}`); }
 
     // Scope — kto widzi które aktywności
@@ -1066,6 +1070,34 @@ router.post('/:id/activities',
         metadata:   { lead_id: id, activity_id: rows[0].id, source: 'lead' },
         ipAddress:  req.auditContext?.ipAddress,
       });
+
+      // Powiadomienie email — tylko gdy przypisano do innego usera niż twórca
+      if (assigned_to && assigned_to !== req.user.id) {
+        try {
+          const { rows: assigneeRows } = await db.query(
+            'SELECT email, display_name FROM users WHERE id=$1', [assigned_to]
+          );
+          const { rows: leadRows } = await db.query(
+            'SELECT company FROM crm_leads WHERE id=$1', [id]
+          );
+          if (assigneeRows.length && assigneeRows[0].email) {
+            await email.sendCrmActivityAssigned({
+              to:            assigneeRows[0].email,
+              assigneeName:  assigneeRows[0].display_name || assigneeRows[0].email,
+              assignerName:  req.user.display_name || req.user.email,
+              activityType:  type,
+              activityTitle: title,
+              activityAt:    activity_at || null,
+              sourceName:    leadRows[0]?.company || `Lead #${id}`,
+              sourceType:    'lead',
+              sourceId:      id,
+            });
+          }
+        } catch (emailErr) {
+          logger.warn('Błąd wysyłki emaila o przypisaniu aktywności', { error: emailErr.message });
+        }
+      }
+
       res.status(201).json(rows[0]);
     } catch (err) { next(err); }
   }
@@ -1098,7 +1130,8 @@ router.patch('/:id/activities/:actId',
       );
       if (!existing.length) return res.status(404).json({ error: 'Aktywność nie znaleziona' });
       const act = existing[0];
-      if (act.created_by !== req.user.id && !req.isCrmManager) {
+      const isAssigned = act.assigned_to === req.user.id;
+      if (act.created_by !== req.user.id && !req.isCrmManager && !isAssigned) {
         return res.status(403).json({ error: 'Brak uprawnień do edycji tej aktywności' });
       }
 

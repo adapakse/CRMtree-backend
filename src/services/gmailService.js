@@ -3,6 +3,7 @@
 // Gmail API — OAuth2 per-user (access_token + refresh_token w DB)
 
 const { google } = require("googleapis");
+const crypto     = require("crypto");
 const { pool }   = require("../config/database");
 const config     = require("../config");
 
@@ -43,12 +44,53 @@ async function getAuthForUser(userId) {
   return oauth2;
 }
 
+// ── State OAuth2: HMAC-podpisany token z userId + timestamp ──────────────────
+// Format: "<userId>.<timestamp>.<hmac12>" — tylko cyfry, kropki i hex, bezpieczny w URL
+function makeOAuthState(userId) {
+  const id  = String(userId);
+  const ts  = Date.now();
+  const sig = crypto
+    .createHmac("sha256", config.jwtSecret || "fallback-secret")
+    .update(`${id}:${ts}`)
+    .digest("hex")
+    .slice(0, 16);
+  return `${id}.${ts}.${sig}`;
+}
+
+function parseOAuthState(state) {
+  if (!state || typeof state !== "string") return null;
+  // Format: "<userId>.<timestamp>.<hmac16>"
+  // userId może być UUID lub liczbą — szukamy ostatnich dwóch kropek
+  const lastDot       = state.lastIndexOf(".");
+  const secondLastDot = state.lastIndexOf(".", lastDot - 1);
+  if (lastDot < 0 || secondLastDot < 0) return null;
+
+  const userIdStr = state.slice(0, secondLastDot);
+  const tsStr     = state.slice(secondLastDot + 1, lastDot);
+  const sig       = state.slice(lastDot + 1);
+
+  if (!userIdStr || !tsStr || !sig) return null;
+  const ts = parseInt(tsStr, 10);
+  if (!ts || isNaN(ts)) return null;
+  // Token ważny 30 minut
+  if (Date.now() - ts > 30 * 60 * 1000) return null;
+  const expected = crypto
+    .createHmac("sha256", config.jwtSecret || "fallback-secret")
+    .update(`${userIdStr}:${ts}`)
+    .digest("hex")
+    .slice(0, 16);
+  if (sig !== expected) return null;
+  return userIdStr;  // zwraca string (UUID lub liczba jako string)
+}
+
 // ── URL autoryzacji OAuth2 ────────────────────────────────────────────────────
-function getAuthUrl() {
+// userId zakodowany w `state` — callback nie wymaga headera Authorization
+function getAuthUrl(userId) {
   const oauth2 = makeOAuth2Client();
   return oauth2.generateAuthUrl({
     access_type: "offline",
     prompt:      "consent",
+    state:       makeOAuthState(userId),
     scope: [
       "https://www.googleapis.com/auth/gmail.send",
       "https://www.googleapis.com/auth/gmail.readonly",
@@ -105,7 +147,7 @@ async function disconnect(userId) {
 }
 
 // ── Wyślij email ──────────────────────────────────────────────────────────────
-async function sendEmail({ userId, to, subject, body, threadId, attachments = [] }) {
+async function sendEmail({ userId, to, cc, subject, body, threadId, attachments = [], inReplyTo = null, references = null }) {
   const oauth2 = await getAuthForUser(userId);
   const gmail  = google.gmail({ version: "v1", auth: oauth2 });
 
@@ -115,7 +157,10 @@ async function sendEmail({ userId, to, subject, body, threadId, attachments = []
 
   let rawParts = [
     `To: ${to}`,
+    ...(cc         ? [`Cc: ${cc}`]                 : []),
     `Subject: =?UTF-8?B?${Buffer.from(subject).toString("base64")}?=`,
+    ...(inReplyTo  ? [`In-Reply-To: ${inReplyTo}`] : []),
+    ...(references ? [`References: ${references}`] : []),
     `MIME-Version: 1.0`,
   ];
 
@@ -202,15 +247,18 @@ function parseMessage(msg) {
   extractParts(msg.payload?.parts);
 
   return {
-    id:          msg.id,
-    threadId:    msg.threadId,
-    subject:     headers["subject"] || "",
-    from:        headers["from"]    || "",
-    to:          headers["to"]      || "",
-    date:        headers["date"]    ? new Date(headers["date"]).toISOString() : new Date().toISOString(),
-    snippet:     msg.snippet        || "",
+    id:               msg.id,
+    threadId:         msg.threadId,
+    subject:          headers["subject"]    || "",
+    from:             headers["from"]       || "",
+    to:               headers["to"]         || "",
+    cc:               headers["cc"]         || "",
+    date:             headers["date"]       ? new Date(headers["date"]).toISOString() : new Date().toISOString(),
+    snippet:          msg.snippet           || "",
     body,
     attachments,
+    messageIdHeader:  headers["message-id"] || "",
+    referencesHeader: headers["references"] || "",
   };
 }
 
@@ -313,6 +361,7 @@ async function registerWatch(userId) {
 
 module.exports = {
   getAuthUrl,
+  parseOAuthState,
   exchangeCodeAndSave,
   getStatus,
   disconnect,

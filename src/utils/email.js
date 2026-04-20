@@ -476,6 +476,65 @@ async function sendUserInvitation({
   });
 }
 
+/**
+ * Powiadomienie o przypisaniu aktywności CRM (lead lub partner)
+ */
+async function sendCrmActivityAssigned({
+  to,
+  assigneeName,
+  assignerName,
+  activityType,
+  activityTitle,
+  activityAt,
+  sourceName,
+  sourceType,  // 'lead' | 'partner'
+  sourceId,
+}) {
+  const typeLabels = {
+    call: 'Połączenie', email: 'Email', meeting: 'Spotkanie',
+    note: 'Notatka', doc_sent: 'Dokument', training: 'Szkolenie',
+    qbr: 'QBR', opportunity: 'Szansa',
+  };
+  const typeLabel = typeLabels[activityType] || activityType;
+  const url = `${BASE_URL}/crm/${sourceType === 'partner' ? 'partners' : 'leads'}/${sourceId}`;
+
+  await sendMail({
+    to,
+    subject: `[worktrips.doc] Nowe zadanie CRM: ${activityTitle}`,
+    html: template(`
+      <h2>Przypisano Ci nowe zadanie CRM</h2>
+      <p>Cześć ${assigneeName},</p>
+      <p>Użytkownik <strong>${assignerName}</strong> przypisał Ci aktywność:</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">${sourceType === 'partner' ? 'Partner' : 'Lead'}</span>
+          <span class="info-val">${sourceName}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Typ</span>
+          <span class="info-val"><span class="badge badge-orange">${typeLabel}</span></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Tytuł</span>
+          <span class="info-val">${activityTitle}</span>
+        </div>
+        ${activityAt ? `<div class="info-row">
+          <span class="info-label">Termin</span>
+          <span class="info-val">${new Date(activityAt).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+        </div>` : ''}
+        <div class="info-row">
+          <span class="info-label">Zlecający</span>
+          <span class="info-val">${assignerName}</span>
+        </div>
+      </div>
+      <a href="${url}" class="btn">Otwórz ${sourceType === 'partner' ? 'partnera' : 'leada'} →</a>
+      <p style="color:#71717A;font-size:12px;margin-top:12px">
+        Swoje zadania możesz zobaczyć w widoku <strong>Kalendarz → Zadania</strong>.
+      </p>
+    `),
+  });
+}
+
 // ─── Eksport ──────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -486,4 +545,5 @@ module.exports = {
   sendTaskRejected,
   sendDocumentSigned,
   sendUserInvitation,
+  sendCrmActivityAssigned,
 };

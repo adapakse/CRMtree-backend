@@ -10,6 +10,8 @@ const { crmAuth, loadCrmScope } = require("../middleware/crm-rbac");
 const calendarService = require("../services/calendarService");
 const audit    = require("../services/auditService");
 const config   = require("../config");
+const email    = require("../utils/email");
+const logger   = require("../utils/logger");
 
 // Wspólne middleware dla wszystkich tras (requireAuth + crmAuth są też per-route dla jasności)
 router.use(requireAuth, crmAuth, loadCrmScope);
@@ -200,7 +202,8 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     const rows = await pool.query(
       `SELECT p.*,
               u.display_name AS manager_name,
-              g.name AS group_name
+              g.name AS group_name,
+              (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email')::int AS email_count
        FROM crm_partners p
        LEFT JOIN users u ON u.id = p.manager_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
@@ -224,13 +227,15 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
 // query: assigned_to (UUID), type (string), include_closed (bool)
 router.get("/tasks", requireAuth, crmAuth, async (req, res) => {
   try {
-    const { assigned_to, type, include_closed } = req.query;
-    const showClosed = include_closed === 'true';
+    const { assigned_to, type, include_closed, include_no_date } = req.query;
+    const showClosed  = include_closed  === 'true';
+    const includeNoDate = include_no_date === 'true';
 
     const conds  = ["a.type != 'email'"];
     const params = [];
 
-    if (!showClosed) conds.push("a.status != 'closed'");
+    if (!showClosed)    conds.push("a.status != 'closed'");
+    if (!includeNoDate) conds.push("a.activity_at IS NOT NULL");
     if (type) { params.push(type); conds.push(`a.type = $${params.length}`); }
 
     // Scope — kto widzi które aktywności
@@ -616,6 +621,32 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
       metadata:   { partner_id: partnerId, activity_id: newAct.id, source: 'partner' },
     });
 
+    // ── Powiadomienie email — tylko gdy przypisano do innego usera ────────────
+    if (assigned_to && assigned_to !== req.user.id) {
+      setImmediate(async () => {
+        try {
+          const { rows: assigneeRows } = await pool.query(
+            'SELECT email, display_name FROM users WHERE id=$1', [assigned_to]
+          );
+          if (assigneeRows.length && assigneeRows[0].email) {
+            await email.sendCrmActivityAssigned({
+              to:            assigneeRows[0].email,
+              assigneeName:  assigneeRows[0].display_name || assigneeRows[0].email,
+              assignerName:  req.user.display_name || req.user.email,
+              activityType:  type,
+              activityTitle: title,
+              activityAt:    activity_at || null,
+              sourceName:    partner.company || `Partner #${partnerId}`,
+              sourceType:    'partner',
+              sourceId:      partnerId,
+            });
+          }
+        } catch (emailErr) {
+          logger.warn('Błąd wysyłki emaila o przypisaniu aktywności', { error: emailErr.message });
+        }
+      });
+    }
+
     // ── Integracja Google Calendar (tylko dla spotkań) ─────────────────────────
     if (type === "meeting" && activity_at) {
       setImmediate(async () => {
@@ -667,8 +698,9 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
     if (!existing.length) return res.status(404).json({ error: 'Aktywność nie znaleziona' });
     const act = existing[0];
 
-    const isManager = req.user.is_admin || req.user.crm_role === 'sales_manager';
-    if (act.created_by !== req.user.id && !isManager) {
+    const isManager  = req.user.is_admin || req.user.crm_role === 'sales_manager';
+    const isAssigned = act.assigned_to === req.user.id;
+    if (act.created_by !== req.user.id && !isManager && !isAssigned) {
       return res.status(403).json({ error: 'Brak uprawnień do edycji tej aktywności' });
     }
 
