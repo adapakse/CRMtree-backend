@@ -248,7 +248,7 @@ async function sendLeadHandler(req, res) {
       ...String(to).split(",").map((s) => s.trim()).filter(Boolean),
       ...(cc ? String(cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
     ];
-    autoSaveLeadContacts(leadId, allRecipients).catch(() => {});
+    await autoSaveLeadContacts(leadId, allRecipients);
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
@@ -324,7 +324,7 @@ async function sendPartnerHandler(req, res) {
       ...String(to).split(",").map((s) => s.trim()).filter(Boolean),
       ...(cc ? String(cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
     ];
-    autoSavePartnerContacts(partnerId, allRecipients).catch(() => {});
+    await autoSavePartnerContacts(partnerId, allRecipients);
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
@@ -603,9 +603,24 @@ router.post("/webhook/pubsub", async (req, res) => {
           }
         }
 
-        // Auto-zapis nadawcy do extra_contacts leada
-        if (leadId && msg.from) {
-          autoSaveLeadContacts(leadId, [msg.from]).catch(() => {});
+        // Auto-zapis nadawcy + CC przychodzących do extra_contacts leada/partnera
+        if (leadId) {
+          const inboundAddresses = [
+            ...(msg.from ? [msg.from] : []),
+            ...(msg.cc   ? String(msg.cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
+          ];
+          if (inboundAddresses.length) {
+            await autoSaveLeadContacts(leadId, inboundAddresses);
+          }
+        }
+        if (partnerId) {
+          const inboundAddresses = [
+            ...(msg.from ? [msg.from] : []),
+            ...(msg.cc   ? String(msg.cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
+          ];
+          if (inboundAddresses.length) {
+            await autoSavePartnerContacts(partnerId, inboundAddresses);
+          }
         }
 
       } catch (msgErr) {

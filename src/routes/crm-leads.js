@@ -101,7 +101,8 @@ router.get('/',
             cp.company     AS converted_partner_company,
             (SELECT COUNT(*) FROM crm_lead_activities a WHERE a.lead_id = l.id) AS activity_count,
             (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id) AS document_count,
-            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email')::int AS email_count
+            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email' AND created_by IS NULL)::int AS new_email_count,
+            (SELECT MAX(activity_at) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email' AND created_by IS NULL) AS last_reply_at
           FROM crm_leads l
           LEFT JOIN users u ON u.id = l.assigned_to
           LEFT JOIN crm_partners cp ON cp.lead_id = l.id
@@ -965,14 +966,45 @@ router.patch('/:id',
         params
       );
 
-      await audit.log({
-        user:        req.user,
-        action:      'crm_lead_update',
-        beforeState: Object.fromEntries(allowed.filter(f => req.body[f] !== undefined).map(f => [f, existing[0][f]])),
-        afterState:  req.body,
-        metadata:    { lead_id: id },
-        ipAddress:   req.auditContext?.ipAddress,
-      });
+      // Audit log — tylko faktycznie zmienione pola (porównanie DB before vs DB after)
+      try {
+        const afterSnap   = rows[0];
+        const beforeState = {};
+        const afterState  = {};
+        // Normalizuje daty (Date object lub ISO timestamp) do YYYY-MM-DD string.
+        const normDate = v => {
+          if (v === null || v === undefined) return null;
+          if (v instanceof Date) {
+            const pad = n => String(n).padStart(2, '0');
+            return `${v.getFullYear()}-${pad(v.getMonth()+1)}-${pad(v.getDate())}`;
+          }
+          if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v)) {
+            const d = new Date(v);
+            const pad = n => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+          }
+          return v;
+        };
+        const requestedKeys = Object.keys(req.body).filter(k => allowed.includes(k));
+        for (const k of requestedKeys) {
+          const bv = normDate(existing[0][k]);
+          const av = normDate(afterSnap[k]);
+          if (JSON.stringify(bv ?? null) !== JSON.stringify(av ?? null)) {
+            beforeState[k] = bv ?? null;
+            afterState[k]  = av ?? null;
+          }
+        }
+        if (Object.keys(afterState).length > 0) {
+          await audit.log({
+            user:        req.user,
+            action:      'crm_lead_update',
+            beforeState,
+            afterState,
+            metadata:    { lead_id: id },
+            ipAddress:   req.auditContext?.ipAddress,
+          });
+        }
+      } catch (auditErr) { /* nie blokuj odpowiedzi */ }
 
       res.json(rows[0]);
     } catch (err) { next(err); }
