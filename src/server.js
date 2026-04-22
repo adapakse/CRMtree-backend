@@ -1,9 +1,10 @@
 "use strict";
 
-const app = require("./app");
-const config = require("./config");
-const logger = require("./utils/logger");
-const db = require("./config/database");
+const app          = require("./app");
+const config       = require("./config");
+const logger       = require("./utils/logger");
+const db           = require("./config/database");
+const pubsubPoller = require("./services/pubsubPoller");
 
 const server = app.listen(config.port, () => {
   logger.info(`worktrips.doc backend running`, {
@@ -11,11 +12,15 @@ const server = app.listen(config.port, () => {
     env: config.env,
     appUrl: config.appUrl,
   });
+
+  // Uruchom pull-based Pub/Sub poller (zastępuje push webhook)
+  pubsubPoller.start();
 });
 
 // ─── Graceful shutdown ────────────────────────────────────
 async function shutdown(signal) {
   logger.info(`Received ${signal}, shutting down gracefully…`);
+  pubsubPoller.stop();
   server.close(async () => {
     try {
       await db.pool.end();

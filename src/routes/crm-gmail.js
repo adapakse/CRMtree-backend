@@ -10,6 +10,11 @@ const gmailService    = require("../services/gmailService");
 const storageService  = require("../services/storageService");
 const config          = require("../config");
 const { v4: uuidv4 }  = require("uuid");
+const {
+  autoSaveLeadContacts,
+  autoSavePartnerContacts,
+  storeAttachment,
+} = require("../services/gmailProcessor");
 
 // multer — do załączników w wysyłce
 let upload = null;
@@ -20,93 +25,7 @@ try {
   console.warn("[Gmail] multer niedostępny — wysyłka bez załączników. Uruchom: npm install multer");
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-/**
- * Parsuje nagłówek "Name <email>" lub "email" i zwraca { name, email }.
- */
-function parseEmailHeader(header) {
-  const str = String(header || "").trim();
-  const m   = str.match(/^(.*?)\s*<([^>]+)>$/);
-  if (m) {
-    return { name: m[1].trim().replace(/^["']|["']$/g, ""), email: m[2].trim().toLowerCase() };
-  }
-  return { name: "", email: str.toLowerCase() };
-}
-
-/**
- * Zapisuje adresy email z nagłówków do crm_lead_contacts (jeśli jeszcze nie istnieją).
- * Nie rzuca — błędy są logowane i ignorowane.
- */
-async function autoSaveLeadContacts(leadId, emailHeaders) {
-  for (const header of emailHeaders) {
-    const { name, email } = parseEmailHeader(header);
-    if (!email || !email.includes("@")) continue;
-    // Nie zapisuj adresów @worktrips.com (wewnętrznych)
-    if (email.toLowerCase().endsWith("@worktrips.com")) continue;
-    try {
-      // Sprawdź czy już istnieje (email główny leada lub w extra_contacts)
-      const [mainQ, extraQ] = await Promise.all([
-        pool.query("SELECT id FROM crm_leads WHERE id = $1 AND LOWER(email) = $2", [leadId, email]),
-        pool.query("SELECT id FROM crm_lead_contacts WHERE lead_id = $1 AND LOWER(email) = $2", [leadId, email]),
-      ]);
-      if (mainQ.rows.length || extraQ.rows.length) continue;
-
-      await pool.query(
-        "INSERT INTO crm_lead_contacts (lead_id, contact_name, email) VALUES ($1, $2, $3)",
-        [leadId, name || email, email],
-      );
-    } catch (e) {
-      console.warn("[Gmail] autoSaveLeadContacts error:", e.message);
-    }
-  }
-}
-
-async function autoSavePartnerContacts(partnerId, emailHeaders) {
-  for (const header of emailHeaders) {
-    const { name, email } = parseEmailHeader(header);
-    if (!email || !email.includes("@")) continue;
-    // Nie zapisuj adresów @worktrips.com (wewnętrznych)
-    if (email.toLowerCase().endsWith("@worktrips.com")) continue;
-    try {
-      const [mainQ, extraQ] = await Promise.all([
-        pool.query("SELECT id FROM crm_partners WHERE id = $1 AND LOWER(email) = $2", [partnerId, email]),
-        pool.query("SELECT id FROM crm_partner_contacts WHERE partner_id = $1 AND LOWER(email) = $2", [partnerId, email]),
-      ]);
-      if (mainQ.rows.length || extraQ.rows.length) continue;
-      await pool.query(
-        `INSERT INTO crm_partner_contacts (partner_id, contact_name, email) VALUES ($1, $2, $3)
-         ON CONFLICT DO NOTHING`,
-        [partnerId, name || email, email],
-      );
-    } catch (e) {
-      console.warn("[Gmail] autoSavePartnerContacts error:", e.message);
-    }
-  }
-}
-
-/**
- * Zapisuje załącznik do Azure Blob i aktualizuje/wstawia rekord w crm_email_attachments.
- */
-async function storeAttachment({ leadId, partnerId, messageId, attachmentId, filename, mimeType, buffer, direction }) {
-  const safeFilename = String(filename).replace(/[^a-zA-Z0-9._-]/g, "_");
-  const blobPath     = `crm-attachments/${new Date().toISOString().slice(0, 10)}-${uuidv4().slice(0, 8)}-${safeFilename}`;
-
-  await storageService.uploadBuffer(blobPath, buffer, mimeType || "application/octet-stream");
-
-  const idCol = leadId ? "lead_id" : "partner_id";
-  const idVal = leadId || partnerId;
-
-  // Upsert — jeśli rekord z tym message_id + attachment_id już istnieje, zaktualizuj blob_path
-  await pool.query(
-    `INSERT INTO crm_email_attachments
-       (${idCol}, gmail_message_id, gmail_attachment_id, filename, mime_type, blob_path, file_size, direction)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     ON CONFLICT DO NOTHING`,
-    [idVal, messageId, attachmentId || null, filename, mimeType || "application/octet-stream", blobPath, buffer.length, direction || "received"],
-  );
-  return blobPath;
-}
+// ── Helpers (lokalnie — rejestracja ref. załączników bez pobierania treści) ────
 
 /**
  * Zapisuje metadane załączników do crm_email_attachments bez pobierania treści (blob_path = NULL).
@@ -496,143 +415,10 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PUB/SUB WEBHOOK — auto-import przychodzących emaili
+// WATCH — rejestracja/odświeżenie powiadomień Gmail (topic Pub/Sub)
+// Auto-import emaili obsługuje pubsubPoller (pull), nie webhook.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.post("/webhook/pubsub", async (req, res) => {
-  // Zawsze odpowiadaj 200 natychmiast — inaczej Pub/Sub będzie ponawiał
-  res.sendStatus(200);
-
-  try {
-    const message = req.body?.message;
-    if (!message?.data) return;
-
-    const decoded = JSON.parse(Buffer.from(message.data, "base64").toString("utf8"));
-    const { emailAddress, historyId: newHistoryId } = decoded;
-    if (!emailAddress || !newHistoryId) return;
-
-    // Znajdź usera po adresie Gmail
-    const { rows: userRows } = await pool.query(
-      "SELECT user_id, history_id FROM user_gmail_tokens WHERE LOWER(email) = LOWER($1)",
-      [emailAddress],
-    );
-    if (!userRows.length) return;
-
-    const { user_id: userId, history_id: lastHistoryId } = userRows[0];
-    if (!lastHistoryId) {
-      // Brak punktu odniesienia — zapisz nowy historyId i zakończ
-      await pool.query(
-        "UPDATE user_gmail_tokens SET history_id = $1 WHERE user_id = $2",
-        [String(newHistoryId), userId],
-      );
-      return;
-    }
-
-    // Pobierz nowe wiadomości od ostatniego historyId
-    const { messageIds, historyId: fetchedHistoryId } = await gmailService.getNewMessages(userId, lastHistoryId);
-
-    // Zaktualizuj historyId
-    await pool.query(
-      "UPDATE user_gmail_tokens SET history_id = $1 WHERE user_id = $2",
-      [String(fetchedHistoryId || newHistoryId), userId],
-    );
-
-    for (const msgId of messageIds) {
-      try {
-        const msg = await gmailService.getMessage(userId, msgId);
-
-        // Dopasuj wątek do leada lub partnera
-        const [leadQ, partnerQ] = await Promise.all([
-          pool.query(
-            "SELECT lead_id FROM crm_lead_activities WHERE gmail_thread_id = $1 LIMIT 1",
-            [msg.threadId],
-          ),
-          pool.query(
-            "SELECT partner_id FROM crm_partner_activities WHERE gmail_thread_id = $1 LIMIT 1",
-            [msg.threadId],
-          ),
-        ]);
-
-        const leadId    = leadQ.rows[0]?.lead_id    || null;
-        const partnerId = partnerQ.rows[0]?.partner_id || null;
-        if (!leadId && !partnerId) continue; // Nieznany wątek — pomiń
-
-        const actTable = leadId ? "crm_lead_activities"   : "crm_partner_activities";
-        const idCol    = leadId ? "lead_id"               : "partner_id";
-        const recordId = leadId || partnerId;
-
-        // Sprawdź czy wiadomość już zaimportowana
-        const existing = await pool.query(
-          `SELECT id FROM ${actTable} WHERE gmail_message_id = $1 LIMIT 1`,
-          [msg.id],
-        );
-        if (existing.rows.length) continue;
-
-        // Utwórz aktywność dla przychodzącego emaila
-        const actR = await pool.query(
-          `INSERT INTO ${actTable}
-             (${idCol}, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by)
-           VALUES ($1, 'email', $2, $3, $4, $5, $6, NULL)
-           RETURNING id`,
-          [
-            recordId,
-            `↩ ${msg.subject || "(bez tematu)"}`,
-            msg.body || msg.snippet || null,
-            msg.date,
-            msg.threadId,
-            msg.id,
-          ],
-        );
-
-        // Pobierz i zapisz załączniki do Blob
-        for (const att of msg.attachments || []) {
-          try {
-            const buffer = await gmailService.getAttachmentBuffer(userId, msg.id, att.attachmentId);
-            await storeAttachment({
-              leadId:       leadId    || undefined,
-              partnerId:    partnerId || undefined,
-              messageId:    msg.id,
-              attachmentId: att.attachmentId,
-              filename:     att.filename,
-              mimeType:     att.mimeType,
-              buffer,
-              direction:    "received",
-            });
-          } catch (attErr) {
-            console.warn("[Gmail] Pub/Sub attachment download failed:", attErr.message);
-          }
-        }
-
-        // Auto-zapis nadawcy + CC przychodzących do extra_contacts leada/partnera
-        if (leadId) {
-          const inboundAddresses = [
-            ...(msg.from ? [msg.from] : []),
-            ...(msg.cc   ? String(msg.cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
-          ];
-          if (inboundAddresses.length) {
-            await autoSaveLeadContacts(leadId, inboundAddresses);
-          }
-        }
-        if (partnerId) {
-          const inboundAddresses = [
-            ...(msg.from ? [msg.from] : []),
-            ...(msg.cc   ? String(msg.cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
-          ];
-          if (inboundAddresses.length) {
-            await autoSavePartnerContacts(partnerId, inboundAddresses);
-          }
-        }
-
-      } catch (msgErr) {
-        console.error("[Gmail] Pub/Sub message processing error:", msgErr.message);
-      }
-    }
-  } catch (err) {
-    console.error("[Gmail] Pub/Sub processing error:", err.message);
-  }
-});
-
-// Ręczna rejestracja/odświeżenie watch
 router.post("/webhook/register", requireAuth, async (req, res) => {
   try {
     const result = await gmailService.registerWatch(req.user.id);

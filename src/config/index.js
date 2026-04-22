@@ -92,8 +92,12 @@ module.exports = {
       "GOOGLE_REDIRECT_URI",
       "http://localhost:3000/api/crm/gmail/oauth/callback",
     ),
-    // Pub/Sub topic do push-notyfikacji (format: projects/<project>/topics/<topic>)
+    // Pub/Sub topic (format: projects/<project>/topics/<topic>)
+    // Wymagany do rejestracji Gmail watch (gmail.users.watch).
     pubsubTopic: optional("GOOGLE_PUBSUB_TOPIC"),
+    // Pub/Sub subskrypcja pull (format: projects/<project>/subscriptions/<name>)
+    // Zastępuje push webhook — aplikacja sama odpytuje kolejkę.
+    pubsubSubscription: optional("GOOGLE_PUBSUB_SUBSCRIPTION"),
   },
 
   signus: {
