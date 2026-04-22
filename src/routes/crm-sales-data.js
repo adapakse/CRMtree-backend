@@ -33,7 +33,8 @@ const DWH_FIN_SELECT = `
 // JOIN partnerów CRM przez klucz DWH
 const DWH_JOIN_PARTNERS = `
   LEFT JOIN crm_partners p ON p.dwh_partner_id = s.partner_id
-  LEFT JOIN users u ON u.id = p.manager_id`;
+  LEFT JOIN users u ON u.id = p.manager_id
+  LEFT JOIN crm_partner_groups g ON g.id = p.group_id`;
 
 // Filtr okresu z daty (pole sale_date → format YYYY-MM)
 function addPeriodFilters(where, params, pfrom, pto, alias = 's') {
@@ -233,7 +234,7 @@ router.get('/', requireAuth, crmAuth, async (req, res, next) => {
 // Kompleksowy raport partnerów: KPI, trend, per partner, per produkt, per handlowiec
 router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
   try {
-    const { service_category, rep_id, partner_id } = req.query;
+    const { service_category, rep_id, partner_id, group_name } = req.query;
     const pfrom = req.query.period_from || '';
     const pto   = req.query.period_to   || '';
 
@@ -247,6 +248,7 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
         p.push(rep_id); w.push(`p.manager_id = $${p.length}`);
       }
       if (partner_id) { p.push(parseInt(partner_id)); w.push(`s.partner_id = $${p.length}`); }
+      if (group_name) { p.push(group_name); w.push(`COALESCE(dm.partner_group, g.name) = $${p.length}`); }
       return { where: w.length ? 'WHERE ' + w.join(' AND ') : '', params: p };
     }
 
@@ -340,6 +342,7 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
       if (!req.isCrmManager) { prevP.push(req.user.id);  prevW.push(`p.manager_id = $${prevP.length}`); }
       else if (rep_id)       { prevP.push(rep_id);        prevW.push(`p.manager_id = $${prevP.length}`); }
       if (partner_id)        { prevP.push(parseInt(partner_id)); prevW.push(`s.partner_id = $${prevP.length}`); }
+      if (group_name)        { prevP.push(group_name); prevW.push(`COALESCE(dm.partner_group, g.name) = $${prevP.length}`); }
 
       const prevWhere = prevW.length ? 'WHERE ' + prevW.join(' AND ') : '';
       const prevRes = await db.query(`

@@ -148,7 +148,7 @@ router.get("/onboarding/tasks", requireAuth, crmAuth, async (req, res) => {
 router.get("/", requireAuth, crmAuth, async (req, res) => {
   try {
     const {
-      search = "", status = "", group_id = "",
+      search = "", status = "", group_name = "",
       manager_id = "", industry = "",
       page = "1", limit = "50",
       sort = "company", dir = "asc",
@@ -173,9 +173,9 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
       params.push(status);
       where.push(`p.status = $${params.length}`);
     }
-    if (group_id) {
-      params.push(parseInt(group_id));
-      where.push(`p.group_id = $${params.length}`);
+    if (group_name) {
+      params.push(group_name);
+      where.push(`COALESCE(dm.partner_group, g.name) = $${params.length}`);
     }
     if (industry) {
       params.push(industry);
@@ -200,6 +200,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
       `SELECT COUNT(*)
        FROM crm_partners p
        LEFT JOIN dwh.dm_partner dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        ${whereSql}`,
       params
     );
@@ -214,8 +215,8 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               dm.partner_currency,
               dm.country,
               dm.nip              AS dwh_nip,
-              u.display_name      AS manager_name,
-              g.name              AS group_name,
+              u.display_name                        AS manager_name,
+              COALESCE(dm.partner_group, g.name)    AS group_name,
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND created_by IS NULL)::int AS new_email_count,
               (SELECT MAX(activity_at) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND created_by IS NULL) AS last_reply_at
        FROM crm_partners p
@@ -309,6 +310,27 @@ router.get("/tasks", requireAuth, crmAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// LISTA NAZW GRUP (do filtrów) — źródło: COALESCE(dwh.partner_group, local group)
+// ═══════════════════════════════════════════════════════════════════════════════
+router.get("/group-names", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT COALESCE(dm.partner_group, g.name) AS group_name
+       FROM crm_partners p
+       LEFT JOIN dwh.dm_partner dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN crm_partner_groups g ON g.id = p.group_id
+       WHERE COALESCE(dm.partner_group, g.name) IS NOT NULL
+         AND p.status != 'onboarding'
+       ORDER BY group_name`
+    );
+    res.json(rows.map(r => r.group_name));
+  } catch (err) {
+    console.error("GET /crm/partners/group-names error:", err);
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SZCZEGÓŁY PARTNERA
 // ═══════════════════════════════════════════════════════════════════════════════
 router.get("/:id", requireAuth, crmAuth, async (req, res) => {
@@ -358,8 +380,8 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               COALESCE(p.admin_email, dm.admin_email)                     AS admin_email,
               (p.admin_email IS NULL AND dm.admin_email IS NOT NULL)      AS admin_email_from_dwh,
               -- Relacje
-              u.display_name AS manager_name,
-              g.name         AS group_name
+              u.display_name                     AS manager_name,
+              COALESCE(dm.partner_group, g.name) AS group_name
        FROM crm_partners p
        LEFT JOIN dwh.dm_partner dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN users u ON u.id = p.manager_id
