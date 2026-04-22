@@ -100,6 +100,7 @@ router.get('/',
             cp.id          AS converted_partner_id,
             cp.company     AS converted_partner_company,
             (SELECT COUNT(*) FROM crm_lead_activities a WHERE a.lead_id = l.id) AS activity_count,
+            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type != 'email')::int AS non_email_activity_count,
             (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id) AS document_count,
             (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email' AND created_by IS NULL)::int AS new_email_count,
             (SELECT MAX(activity_at) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email' AND created_by IS NULL) AS last_reply_at

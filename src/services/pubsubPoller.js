@@ -2,7 +2,8 @@
 // src/services/pubsubPoller.js
 //
 // Pull-based Pub/Sub poller — zastępuje push webhook.
-// Aplikacja sama odpytuje subskrypcję Pub/Sub co POLL_INTERVAL ms.
+// Używa niskopoziomowego v1.SubscriberClient (synchronous pull REST API).
+// Aplikacja sama odpytuje subskrypcję co POLL_INTERVAL_MS.
 // Nie wymaga publicznego endpointu.
 //
 // Wymagane env:
@@ -14,19 +15,19 @@
 //   GOOGLE_SERVICE_ACCOUNT_FILE  — ścieżka do pliku JSON service account
 //   GOOGLE_APPLICATION_CREDENTIALS — standardowa zmienna ADC (jeśli żadne z powyższych)
 
-const { PubSub }         = require("@google-cloud/pubsub");
-const config             = require("../config");
+const { v1 }                  = require("@google-cloud/pubsub");
+const config                  = require("../config");
 const { processNotification } = require("./gmailProcessor");
 
 const POLL_INTERVAL_MS = parseInt(process.env.PUBSUB_POLL_INTERVAL_MS || "30000", 10);
 const MAX_MESSAGES     = parseInt(process.env.PUBSUB_MAX_MESSAGES     || "10",    10);
 
-let pollerTimer = null;
-let pubsubClient = null;
+let pollerTimer      = null;
+let subscriberClient = null;
 
-// ── Buduj klienta PubSub z dostępnych credentials ─────────────────────────────
+// ── Buduj klienta v1.SubscriberClient z dostępnych credentials ───────────────
 
-function buildPubSubClient() {
+function buildSubscriberClient() {
   const opts = {};
 
   if (config.google.serviceAccountJson) {
@@ -40,33 +41,59 @@ function buildPubSubClient() {
   } else if (config.google.serviceAccountFile) {
     opts.keyFilename = config.google.serviceAccountFile;
   }
-  // Bez opts — PubSub użyje GOOGLE_APPLICATION_CREDENTIALS (ADC)
+  // Bez opts — użyje GOOGLE_APPLICATION_CREDENTIALS (ADC)
 
-  return new PubSub(opts);
+  return new v1.SubscriberClient(opts);
 }
 
 // ── Jeden cykl pull ────────────────────────────────────────────────────────────
 
-async function pollOnce(subscription) {
-  const [messages] = await subscription.pull({ maxMessages: MAX_MESSAGES });
+async function pollOnce(subscriptionName) {
+  const [response] = await subscriberClient.pull({
+    subscription: subscriptionName,
+    maxMessages:  MAX_MESSAGES,
+  });
+
+  const messages = response.receivedMessages || [];
   if (!messages.length) return;
 
   console.log(`[PubSubPoller] Pobrano ${messages.length} wiadomość(i)`);
 
-  for (const message of messages) {
+  const ackIds   = [];
+  const nackIds  = [];
+
+  for (const received of messages) {
     try {
-      const data = JSON.parse(message.data.toString("utf8"));
+      const raw  = received.message.data;
+      const data = JSON.parse(Buffer.from(raw, "base64").toString("utf8"));
       const { emailAddress, historyId } = data;
 
       if (emailAddress && historyId) {
         await processNotification(emailAddress, historyId);
       }
 
-      message.ack();
+      ackIds.push(received.ackId);
     } catch (err) {
       console.error("[PubSubPoller] Błąd przetwarzania wiadomości:", err.message);
-      message.nack(); // wróci do kolejki — zostanie ponowiona
+      nackIds.push(received.ackId); // wróci do kolejki — zostanie ponowiona
     }
+  }
+
+  // Potwierdź przetworzone wiadomości
+  if (ackIds.length) {
+    await subscriberClient.acknowledge({
+      subscription: subscriptionName,
+      ackIds,
+    });
+  }
+
+  // Nack — skróć deadline do 0, żeby GCP natychmiast re-dostarczył
+  if (nackIds.length) {
+    await subscriberClient.modifyAckDeadline({
+      subscription:        subscriptionName,
+      ackIds:              nackIds,
+      ackDeadlineSeconds:  0,
+    });
   }
 }
 
@@ -80,13 +107,12 @@ function start() {
     return;
   }
 
-  pubsubClient = buildPubSubClient();
-  const subscription = pubsubClient.subscription(subscriptionName);
+  subscriberClient = buildSubscriberClient();
 
   // Pierwsze odpytanie natychmiast, potem co POLL_INTERVAL_MS
   const runPoll = async () => {
     try {
-      await pollOnce(subscription);
+      await pollOnce(subscriptionName);
     } catch (err) {
       console.error("[PubSubPoller] Błąd cyklu pull:", err.message);
     }
@@ -103,6 +129,10 @@ function stop() {
     clearInterval(pollerTimer);
     pollerTimer = null;
     console.log("[PubSubPoller] Zatrzymany");
+  }
+  if (subscriberClient) {
+    subscriberClient.close().catch(() => {});
+    subscriberClient = null;
   }
 }
 
