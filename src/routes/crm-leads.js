@@ -100,10 +100,10 @@ router.get('/',
             cp.id          AS converted_partner_id,
             cp.company     AS converted_partner_company,
             (SELECT COUNT(*) FROM crm_lead_activities a WHERE a.lead_id = l.id) AS activity_count,
-            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type != 'email')::int AS non_email_activity_count,
+            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
             (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id) AS document_count,
-            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email' AND created_by IS NULL)::int AS new_email_count,
-            (SELECT MAX(activity_at) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email' AND created_by IS NULL) AS last_reply_at
+            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email' AND is_read = false)::int AS new_email_count,
+            (SELECT MAX(updated_at) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email' AND is_read = false) AS last_reply_at
           FROM crm_leads l
           LEFT JOIN users u ON u.id = l.assigned_to
           LEFT JOIN crm_partners cp ON cp.lead_id = l.id
@@ -856,7 +856,8 @@ router.get('/:id',
                  'created_by',a.created_by,'created_by_name',au.display_name,
                  'assigned_to',a.assigned_to,'assigned_to_name',au2.display_name,
                  'status',a.status,'close_comment',a.close_comment,
-                 'gmail_thread_id',a.gmail_thread_id,'gmail_message_id',a.gmail_message_id
+                 'gmail_thread_id',a.gmail_thread_id,'gmail_message_id',a.gmail_message_id,
+                 'is_read',a.is_read
                ) AS act
                FROM crm_lead_activities a
                LEFT JOIN users au  ON au.id  = a.created_by
@@ -1236,6 +1237,24 @@ router.delete('/:id/activities/:actId',
         ipAddress:   req.auditContext?.ipAddress,
       });
       res.status(204).end();
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PATCH /api/crm/leads/:id/activities/:actId/read ─────────────────
+router.patch('/:id/activities/:actId/read',
+  [param('id').isInt(), param('actId').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const leadId = parseInt(req.params.id);
+      const actId  = parseInt(req.params.actId);
+      const isRead = req.body.is_read !== undefined ? !!req.body.is_read : true;
+      const { rows } = await db.query(
+        'UPDATE crm_lead_activities SET is_read=$1, updated_at=NOW() WHERE id=$2 AND lead_id=$3 RETURNING id',
+        [isRead, actId, leadId]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Aktywność nie znaleziona' });
+      res.json({ ok: true });
     } catch (err) { next(err); }
   }
 );

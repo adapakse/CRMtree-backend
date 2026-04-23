@@ -311,8 +311,9 @@ async function getNewMessages(userId, startHistoryId) {
       historyId:  res.data.historyId || startHistoryId,
     };
   } catch (e) {
-    // 404 = historyId zbyt stary (historia wyczyszczona przez Google)
+    // 404 = historyId zbyt stary (historia wyczyszczona przez Google, max ~7 dni)
     if (e.code === 404 || e.status === 404) {
+      console.warn(`[GmailService] history.list 404 — historyId ${startHistoryId} zbyt stary. Brak wiadomości do pobrania.`);
       return { messageIds: [], historyId: startHistoryId };
     }
     throw e;
@@ -359,6 +360,13 @@ async function registerWatch(userId) {
   return res.data;
 }
 
+async function getCurrentHistoryId(userId) {
+  const oauth2 = await getAuthForUser(userId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  const res    = await gmail.users.getProfile({ userId: "me" });
+  return String(res.data.historyId);
+}
+
 module.exports = {
   getAuthUrl,
   parseOAuthState,
@@ -373,4 +381,5 @@ module.exports = {
   getMessage,
   getNewMessages,
   renewAllWatches,
+  getCurrentHistoryId,
 };

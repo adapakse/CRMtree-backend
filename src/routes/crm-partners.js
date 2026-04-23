@@ -217,8 +217,9 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               dm.nip              AS dwh_nip,
               u.display_name                        AS manager_name,
               COALESCE(dm.partner_group, g.name)    AS group_name,
-              (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND created_by IS NULL)::int AS new_email_count,
-              (SELECT MAX(activity_at) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND created_by IS NULL) AS last_reply_at
+              (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
+              (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false)::int AS new_email_count,
+              (SELECT MAX(updated_at) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false) AS last_reply_at
        FROM crm_partners p
        LEFT JOIN dwh.dm_partner dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN users u ON u.id = p.manager_id
@@ -926,6 +927,23 @@ router.delete("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =
       "DELETE FROM crm_partner_activities WHERE id = $1 AND partner_id = $2",
       [req.params.actId, req.params.id]
     );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+// ── PATCH /:id/activities/:actId/read ───────────────────────────────
+router.patch("/:id/activities/:actId/read", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const partnerId = parseInt(req.params.id);
+    const actId     = parseInt(req.params.actId);
+    const isRead    = req.body.is_read !== undefined ? !!req.body.is_read : true;
+    const { rows } = await pool.query(
+      "UPDATE crm_partner_activities SET is_read=$1, updated_at=NOW() WHERE id=$2 AND partner_id=$3 RETURNING id",
+      [isRead, actId, partnerId]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Nie znaleziono" });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Błąd serwera" });

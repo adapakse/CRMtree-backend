@@ -143,8 +143,8 @@ async function sendLeadHandler(req, res) {
     // Zapisz aktywność
     const actR = await pool.query(
       `INSERT INTO crm_lead_activities
-         (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by)
-       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6)
+         (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, is_read)
+       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, true)
        RETURNING id`,
       [leadId, subject, body || null, sentThreadId, messageId, req.user.id],
     );
@@ -220,8 +220,8 @@ async function sendPartnerHandler(req, res) {
 
     const actR = await pool.query(
       `INSERT INTO crm_partner_activities
-         (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by)
-       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6)
+         (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, is_read)
+       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, true)
        RETURNING id`,
       [partnerId, subject, body || null, sentThreadId, messageId, req.user.id],
     );
@@ -276,9 +276,39 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
       }
     }
 
-    // Dołącz wysłane załączniki z bazy (direction='sent')
     const msgIds = messages.map(m => m.id);
     if (msgIds.length) {
+      // Wiadomości wychodzące — mają wiersz w crm_lead_activities (created_by != NULL)
+      const { rows: outRows } = await pool.query(
+        `SELECT id AS activity_id, gmail_message_id FROM crm_lead_activities
+         WHERE lead_id = $1 AND gmail_message_id = ANY($2)`,
+        [leadId, msgIds],
+      );
+      const outIds = new Set(outRows.map(r => r.gmail_message_id));
+
+      // Stan przeczytania dla wiadomości przychodzących z dedykowanej tabeli
+      const { rows: readRows } = await pool.query(
+        `SELECT gmail_message_id, is_read FROM crm_email_message_reads
+         WHERE gmail_message_id = ANY($1)`,
+        [msgIds],
+      );
+      const readMap = Object.fromEntries(readRows.map(r => [r.gmail_message_id, r.is_read]));
+
+      for (const msg of messages) {
+        if (outIds.has(msg.id)) {
+          // Wiadomość wychodząca — zawsze przeczytana
+          msg.is_read    = true;
+          msg.created_by = 'outgoing';   // sygnał dla frontendu
+          msg.activity_id = outRows.find(r => r.gmail_message_id === msg.id)?.activity_id ?? null;
+        } else {
+          // Wiadomość przychodząca — stan z crm_email_message_reads (brak = nieprzeczytana)
+          msg.is_read    = readMap[msg.id] ?? false;
+          msg.created_by = null;
+          msg.activity_id = null;
+        }
+      }
+
+      // Dołącz wysłane załączniki z bazy (direction='sent')
       const { rows: sentAtts } = await pool.query(
         `SELECT gmail_message_id, filename, mime_type, blob_path, gmail_attachment_id
          FROM crm_email_attachments
@@ -310,9 +340,34 @@ router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (
       }
     }
 
-    // Dołącz wysłane załączniki z bazy (direction='sent')
     const msgIds = messages.map(m => m.id);
     if (msgIds.length) {
+      const { rows: outRows } = await pool.query(
+        `SELECT id AS activity_id, gmail_message_id FROM crm_partner_activities
+         WHERE partner_id = $1 AND gmail_message_id = ANY($2)`,
+        [partnerId, msgIds],
+      );
+      const outIds = new Set(outRows.map(r => r.gmail_message_id));
+
+      const { rows: readRows } = await pool.query(
+        `SELECT gmail_message_id, is_read FROM crm_email_message_reads
+         WHERE gmail_message_id = ANY($1)`,
+        [msgIds],
+      );
+      const readMap = Object.fromEntries(readRows.map(r => [r.gmail_message_id, r.is_read]));
+
+      for (const msg of messages) {
+        if (outIds.has(msg.id)) {
+          msg.is_read    = true;
+          msg.created_by = 'outgoing';
+          msg.activity_id = outRows.find(r => r.gmail_message_id === msg.id)?.activity_id ?? null;
+        } else {
+          msg.is_read    = readMap[msg.id] ?? false;
+          msg.created_by = null;
+          msg.activity_id = null;
+        }
+      }
+
       const { rows: sentAtts } = await pool.query(
         `SELECT gmail_message_id, filename, mime_type, blob_path
          FROM crm_email_attachments
@@ -330,6 +385,27 @@ router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (
   } catch (err) {
     console.error("[Gmail] getThread/partner error:", err.message);
     res.status(500).json({ error: "Błąd pobierania wątku: " + err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STAN PRZECZYTANIA — poziom pojedynczej wiadomości Gmail
+// ═══════════════════════════════════════════════════════════════════════════════
+
+router.patch('/messages/:msgId/read', requireAuth, crmAuth, async (req, res) => {
+  try {
+    const { msgId } = req.params;
+    const isRead = req.body.is_read !== undefined ? !!req.body.is_read : true;
+    await pool.query(
+      `INSERT INTO crm_email_message_reads (gmail_message_id, is_read, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (gmail_message_id) DO UPDATE SET is_read = $2, updated_at = NOW()`,
+      [msgId, isRead],
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Gmail] patch message read error:', err.message);
+    res.status(500).json({ error: 'Błąd aktualizacji stanu przeczytania' });
   }
 });
 
@@ -426,6 +502,72 @@ router.post("/webhook/register", requireAuth, async (req, res) => {
     res.json({ ok: true, historyId: result.historyId, expiration: result.expiration });
   } catch (err) {
     console.error("[Gmail] registerWatch error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEBUG — ręczne wyzwolenie przetwarzania historii Gmail (tylko admin/dev)
+// POST /api/crm/gmail/debug/process
+// Pozwala przetestować processNotification bez Pub/Sub.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+router.post("/debug/process", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const { processNotification } = require("../services/gmailProcessor");
+
+    // Pobierz token zalogowanego użytkownika
+    const { rows } = await pool.query(
+      "SELECT email, history_id FROM user_gmail_tokens WHERE user_id = $1",
+      [req.user.id],
+    );
+    if (!rows.length) return res.status(404).json({ error: "Brak połączonego konta Gmail" });
+
+    let { email, history_id } = rows[0];
+
+    // Jeśli history_id nie ustawiony — pobierz bieżący historyId z Gmail API i zapisz
+    if (!history_id) {
+      history_id = await gmailService.getCurrentHistoryId(req.user.id);
+      await pool.query(
+        "UPDATE user_gmail_tokens SET history_id = $1 WHERE user_id = $2",
+        [history_id, req.user.id],
+      );
+      const { rows: readRows } = await pool.query("SELECT * FROM crm_email_message_reads ORDER BY updated_at DESC LIMIT 10");
+      return res.json({
+        ok: true,
+        email,
+        note: "history_id był pusty — ustawiono bieżący historyId. Wyślij odpowiedź na email i kliknij ponownie.",
+        historyId_after: history_id,
+        messageIds_found: [],
+        recent_message_reads: readRows,
+      });
+    }
+
+    // Pobierz nowe wiadomości od obecnego historyId
+    const { messageIds, historyId: fetched } = await gmailService.getNewMessages(req.user.id, history_id);
+
+    // Uruchom processNotification używając aktualnego historyId jako "powiadomienie"
+    await processNotification(email, fetched || history_id);
+
+    // Stan po przetworzeniu
+    const { rows: after } = await pool.query(
+      "SELECT history_id FROM user_gmail_tokens WHERE user_id = $1",
+      [req.user.id],
+    );
+    const { rows: readRows } = await pool.query(
+      "SELECT * FROM crm_email_message_reads ORDER BY updated_at DESC LIMIT 10",
+    );
+
+    res.json({
+      ok:              true,
+      email,
+      historyId_before: history_id,
+      historyId_after:  after[0]?.history_id,
+      messageIds_found: messageIds,
+      recent_message_reads: readRows,
+    });
+  } catch (err) {
+    console.error("[Gmail] debug/process error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });

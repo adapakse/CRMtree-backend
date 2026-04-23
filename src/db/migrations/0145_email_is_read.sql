@@ -1,0 +1,2 @@
+ALTER TABLE crm_lead_activities    ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE crm_partner_activities ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT false;

@@ -106,15 +106,20 @@ async function processNotification(emailAddress, historyId) {
   // Pobierz nowe wiadomości od ostatniego historyId
   const { messageIds, historyId: fetchedHistoryId } = await gmailService.getNewMessages(userId, lastHistoryId);
 
-  // Zaktualizuj historyId
+  // Zaktualizuj historyId — zawsze bierz MAX(fetchedHistoryId, historyId z powiadomienia)
+  // Gdy history.list zwróci 404 (zbyt stary historyId), fetchedHistoryId === lastHistoryId;
+  // wtedy resetujemy do historyId z powiadomienia żeby nie utknąć w pętli.
+  const newHistoryId = String(Math.max(Number(fetchedHistoryId || 0), Number(historyId || 0)));
   await pool.query(
     "UPDATE user_gmail_tokens SET history_id = $1 WHERE user_id = $2",
-    [String(fetchedHistoryId || historyId), userId],
+    [newHistoryId, userId],
   );
+  console.log(`[GmailProcessor] historyId: lastDB=${lastHistoryId} fetched=${fetchedHistoryId} notification=${historyId} → saved=${newHistoryId} messages=${messageIds.length}`);
 
   for (const msgId of messageIds) {
     try {
       const msg = await gmailService.getMessage(userId, msgId);
+      console.log(`[GmailProcessor] Przetwarzanie msg=${msg.id} threadId=${msg.threadId} from="${msg.from}" subject="${msg.subject}"`);
 
       // Dopasuj wątek do leada lub partnera
       const [leadQ, partnerQ] = await Promise.all([
@@ -124,26 +129,55 @@ async function processNotification(emailAddress, historyId) {
 
       const leadId    = leadQ.rows[0]?.lead_id    || null;
       const partnerId = partnerQ.rows[0]?.partner_id || null;
-      if (!leadId && !partnerId) continue; // Nieznany wątek — pomiń
+      console.log(`[GmailProcessor] Dopasowanie: leadId=${leadId} partnerId=${partnerId}`);
+
+      if (!leadId && !partnerId) {
+        console.log(`[GmailProcessor] Nieznany wątek ${msg.threadId} — pominięto`);
+        continue;
+      }
 
       const actTable = leadId ? "crm_lead_activities"   : "crm_partner_activities";
       const idCol    = leadId ? "lead_id"               : "partner_id";
       const recordId = leadId || partnerId;
 
-      // Sprawdź czy wiadomość już zaimportowana
-      const existing = await pool.query(
-        `SELECT id FROM ${actTable} WHERE gmail_message_id = $1 LIMIT 1`,
-        [msg.id],
-      );
-      if (existing.rows.length) continue;
+      // Sprawdź czy wiadomość już przetworzona (w tabeli message_reads)
+      // Jeśli tabela nie istnieje (migracja nie uruchomiona), zakładamy nie-przetworzoną
+      let alreadyProcessed = false;
+      try {
+        const existing = await pool.query(
+          `SELECT 1 FROM crm_email_message_reads WHERE gmail_message_id = $1`,
+          [msg.id],
+        );
+        alreadyProcessed = existing.rows.length > 0;
+      } catch (dupCheckErr) {
+        console.warn(`[GmailProcessor] crm_email_message_reads niedostępna (brak migracji?): ${dupCheckErr.message}`);
+      }
+      if (alreadyProcessed) {
+        console.log(`[GmailProcessor] Wiadomość ${msg.id} już przetworzona — pominięto`);
+        continue;
+      }
 
-      // Utwórz aktywność dla przychodzącego emaila (created_by = NULL = przychodzący)
-      await pool.query(
-        `INSERT INTO ${actTable}
-           (${idCol}, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by)
-         VALUES ($1, 'email', $2, $3, $4, $5, $6, NULL)`,
-        [recordId, `↩ ${msg.subject || "(bez tematu)"}`, msg.body || msg.snippet || null, msg.date, msg.threadId, msg.id],
+      // Oznacz wątek (aktywność) jako nieprzeczytany — jest nowa odpowiedź
+      const updateRes = await pool.query(
+        `UPDATE ${actTable} SET is_read = false, updated_at = NOW()
+         WHERE ${idCol} = $1 AND gmail_thread_id = $2
+         RETURNING id`,
+        [recordId, msg.threadId],
       );
+      console.log(`[GmailProcessor] UPDATE aktywności wątku: ${updateRes.rowCount} wierszy (recordId=${recordId})`);
+
+      // Zarejestruj wiadomość jako nieprzeczytaną
+      try {
+        await pool.query(
+          `INSERT INTO crm_email_message_reads (gmail_message_id, is_read)
+           VALUES ($1, false)
+           ON CONFLICT (gmail_message_id) DO NOTHING`,
+          [msg.id],
+        );
+        console.log(`[GmailProcessor] INSERT crm_email_message_reads: msgId=${msg.id}`);
+      } catch (insertErr) {
+        console.error(`[GmailProcessor] INSERT crm_email_message_reads FAILED (msgId=${msg.id}): ${insertErr.message}`);
+      }
 
       // Pobierz i zapisz załączniki do Blob
       for (const att of msg.attachments || []) {
