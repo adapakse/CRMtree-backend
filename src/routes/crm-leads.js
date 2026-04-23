@@ -1436,13 +1436,55 @@ router.post('/:id/test-account',
         req.user.id,
       ]);
 
-      // Wywołanie zewnętrznego API
+      // Pobierz indywidualne ustawienia HTCD z app_settings
+      const TA_KEYS = [
+        'ta_wh_header_color', 'ta_wh_accent_color', 'ta_wh_enable_meal_selection',
+        'ta_wh_communicator_notifications', 'ta_wh_gds_locator', 'ta_wh_gds_locator_manual',
+        'ta_billing_issuer', 'ta_partner_type', 'ta_services_process_type',
+        'ta_traveler_search_by', 'ta_traveler_max_limit', 'ta_traveler_country_nationality',
+        'ta_traveler_meals_only', 'ta_traveler_refundable_only', 'ta_traveler_parking_only',
+        'ta_traveler_meal_types', 'ta_form_configs',
+      ];
+      const { rows: settingsRows } = await db.query(
+        `SELECT key, value FROM app_settings WHERE key = ANY($1)`, [TA_KEYS]
+      );
+      const s = Object.fromEntries(settingsRows.map(r => [r.key, r.value]));
+
+      let formConfigs;
+      try { formConfigs = JSON.parse(s['ta_form_configs'] || '[]'); } catch { formConfigs = []; }
+      if (!formConfigs.length) {
+        return res.status(500).json({ error: 'Brak konfiguracji ta_form_configs w App Settings.' });
+      }
+
+      const partnerConfig = {
+        whitelabelHeader:                  s['ta_wh_header_color']              || '#1D2951',
+        whitelabelColor:                   s['ta_wh_accent_color']              || '#1D2951',
+        enableMealSelection:               s['ta_wh_enable_meal_selection']     !== 'false',
+        internalCommunicatorNotifications: s['ta_wh_communicator_notifications'] !== 'false',
+        gdsProfileLocator:                 s['ta_wh_gds_locator']               ?? '',
+        gdsProfileLocatorManual:           s['ta_wh_gds_locator_manual']        ?? '',
+        issuer:                            s['ta_billing_issuer']               || 'WT',
+        selectedPartnerType:               s['ta_partner_type']                 || 'PARTNER_BASIC',
+        defaultServicesProcessType:        s['ta_services_process_type']        || 'ONLINE',
+        travelerConfig: {
+          searchTravelerBy:                   s['ta_traveler_search_by']            || 'byPhrasesNameSurnameEmail',
+          travelersMaxLimit:                  parseInt(s['ta_traveler_max_limit']   || '9', 10),
+          partnerCountryAsDefaultNationality: s['ta_traveler_country_nationality']  === 'true',
+          hotelOffersWithMealsOnly:           s['ta_traveler_meals_only']           === 'true',
+          refundableHotelOffersOnly:          s['ta_traveler_refundable_only']      === 'true',
+          accommodationsWithParkingOnly:      s['ta_traveler_parking_only']         === 'true',
+          allowedMealTypes:                   (s['ta_traveler_meal_types'] || 'BF,HB,FB,AI').split(',').map(x => x.trim()).filter(Boolean),
+        },
+      };
+
+      // Wywołanie zewnętrznego API HTCD
       let apiResult;
       try {
         apiResult = await testAccountSvc.createTestAccount({
           companyName:     lead.company,
           nip:             lead.nip,
-          subdomain,       language,
+          subdomain,
+          language,
           partnerCurrency: partner_currency,
           country,
           billingAddress:  billing_address,
@@ -1453,10 +1495,13 @@ router.post('/:id/test-account',
           adminFirstName:  admin_first_name,
           adminLastName:   admin_last_name,
           adminEmail:      admin_email,
+          creatorEmail:    req.user.email,
+          formConfigs,
+          partnerConfig,
         });
       } catch (apiErr) {
         logger.error('testAccountSvc.createTestAccount threw', { error: apiErr.message });
-        apiResult = { success: false, error: `Błąd połączenia z zewnętrznym API: ${apiErr.message}` };
+        apiResult = { success: false, error: `Błąd połączenia z HTCD API: ${apiErr.message}` };
       }
 
       // Aktualizacja statusu po odpowiedzi API
@@ -1464,13 +1509,17 @@ router.post('/:id/test-account',
         UPDATE crm_lead_test_accounts
         SET status              = $1,
             test_account_number = $2,
-            last_error          = $3,
+            htcd_partner_id     = $3,
+            price_list_url      = $4,
+            last_error          = $5,
             updated_at          = now()
-        WHERE lead_id = $4
+        WHERE lead_id = $6
         RETURNING *
       `, [
         apiResult.success ? 'created' : 'error',
-        apiResult.success ? apiResult.accountNumber : null,
+        apiResult.success ? String(apiResult.htcdPartnerId || '') : null,
+        apiResult.success ? (apiResult.htcdPartnerId || null) : null,
+        apiResult.success ? (apiResult.priceListUrl  || null) : null,
         apiResult.success ? null : apiResult.error,
         id,
       ]);

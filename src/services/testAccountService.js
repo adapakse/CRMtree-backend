@@ -1,176 +1,195 @@
 'use strict';
-// ─────────────────────────────────────────────────────────────────────────────
 // src/services/testAccountService.js
 //
-// Serwis integracji z zewnętrznym API CreateTestAccount.
-//
-// ─── PRZEŁĄCZENIE NA DZIAŁAJĄCE API ─────────────────────────────────────────
-// 1. Ustaw zmienną środowiskową:
-//      TEST_ACCOUNT_API_URL=https://api.zewnetrzny-system.pl/v1
-//      TEST_ACCOUNT_API_KEY=<klucz_api>
-// 2. Zmień stałą USE_STUB na: false
-//      const USE_STUB = false;
-// 3. Upewnij się, że konfiguracja w src/config/index.js zawiera:
-//      testAccountApi: {
-//        url: process.env.TEST_ACCOUNT_API_URL,
-//        key: process.env.TEST_ACCOUNT_API_KEY,
-//      }
-// 4. Usuń blok "STUB" poniżej (lub zostaw — USE_STUB będzie false, więc nie wejdzie).
-// ─────────────────────────────────────────────────────────────────────────────
+// Integracja z HTCD API — zakładanie konta testowego dla Partnera.
+// Endpoint: POST https://api-htcd.worktrips.com/v3/hooks/crm/partners
+// Auth: ApiKey w nagłówku Authorization
 
 const https  = require('https');
 const http   = require('http');
+const config = require('../config');
 const logger = require('../utils/logger');
 
-// ── STUB: zmień na false gdy zewnętrzne API jest gotowe ──────────────────────
-const USE_STUB = true;
-// ────────────────────────────────────────────────────────────────────────────
-
 /**
- * Wywołuje zewnętrzne API CreateTestAccount.
+ * Zakłada konto testowe w systemie HTCD.
  *
- * @param {Object} payload
- * @param {string} payload.companyName       - Nazwa firmy (z Leada)
- * @param {string} payload.nip               - NIP (z Leada)
- * @param {string} payload.subdomain         - Subdomena w systemie zewnętrznym
- * @param {string} payload.language          - Język interfejsu
- * @param {string} payload.partnerCurrency   - Waluta
- * @param {string} payload.country           - Kraj
- * @param {string} payload.billingAddress    - Adres rozliczeniowy
- * @param {string} payload.billingZip        - Kod pocztowy
- * @param {string} payload.billingCity       - Miasto
- * @param {string} payload.billingCountry    - Kraj rozliczeniowy
- * @param {string} payload.billingEmail      - Email rozliczeniowy
- * @param {string} payload.adminFirstName    - Imię administratora
- * @param {string} payload.adminLastName     - Nazwisko administratora
- * @param {string} payload.adminEmail        - Email administratora
+ * @param {Object} p
+ * @param {string} p.companyName
+ * @param {string} p.nip
+ * @param {string} p.subdomain
+ * @param {string} p.language          - np. "PL"
+ * @param {string} p.partnerCurrency   - np. "PLN"
+ * @param {string} p.country           - np. "PL"
+ * @param {string} p.billingAddress
+ * @param {string} p.billingZip
+ * @param {string} p.billingCity
+ * @param {string} p.billingCountry
+ * @param {string} p.billingEmail
+ * @param {string} p.adminFirstName
+ * @param {string} p.adminLastName
+ * @param {string} p.adminEmail
+ * @param {string} p.creatorEmail      - email zalogowanego usera (Google IDP)
+ * @param {Array}  p.formConfigs       - z app_settings.ta_form_configs
+ * @param {Object} p.partnerConfig     - z app_settings.ta_partner_config
  *
- * @returns {Promise<{ success: boolean, accountNumber?: string, error?: string }>}
+ * @returns {Promise<{ success: boolean, htcdPartnerId?: number, priceListUrl?: string, error?: string }>}
  */
-async function createTestAccount(payload) {
-  if (USE_STUB) {
-    return _stub(payload);
-  }
-  return _callRealApi(payload);
-}
+async function createTestAccount(p) {
+  const apiUrl = config.htcd?.apiUrl;
+  const apiKey = config.htcd?.apiKey;
 
-// ── STUB ─────────────────────────────────────────────────────────────────────
-// Symuluje działanie zewnętrznego API.
-// Zwraca sukces z losowym numerem konta lub losowy błąd (dla testów).
-// Usuń lub zignoruj tę funkcję po przełączeniu na USE_STUB = false.
-async function _stub(payload) {
-  logger.info('[STUB] testAccountService.createTestAccount called', {
-    company: payload.companyName,
-    subdomain: payload.subdomain,
-  });
-
-  // Symulacja opóźnienia sieci
-  await new Promise(r => setTimeout(r, 600));
-
-  // Symulacja błędu walidacji (co 5. wywołanie — do testów frontendu)
-  if (payload.subdomain && payload.subdomain.includes('error')) {
-    return {
-      success: false,
-      error: '[STUB] Subdomena jest już zajęta. Wybierz inną subdomenę.',
-    };
+  if (!apiKey) {
+    logger.warn('[testAccountService] HTCD_API_KEY nie skonfigurowany — używam STUB (tryb lokalny)');
+    return _stub(p);
   }
 
-  // Wygeneruj losowy numer konta testowego
-  const accountNumber = 'TEST-' + Date.now().toString(36).toUpperCase();
-
-  logger.info('[STUB] testAccountService — returning success', { accountNumber });
-
-  return {
-    success: true,
-    accountNumber,
-  };
-}
-// ── / STUB ────────────────────────────────────────────────────────────────────
-
-// ── PRAWDZIWE API ────────────────────────────────────────────────────────────
-// Odkomentuj i skonfiguruj po otrzymaniu specyfikacji od zewnętrznego systemu.
-async function _callRealApi(payload) {
-  const config = require('../config');
-  const apiUrl = config.testAccountApi?.url;
-  const apiKey = config.testAccountApi?.key;
-
-  if (!apiUrl || !apiKey) {
-    throw new Error('testAccountApi.url lub testAccountApi.key nie skonfigurowane w config/index.js');
-  }
+  const pc = p.partnerConfig || {};
 
   const body = JSON.stringify({
-    // ── Mapowanie pól zgodnie ze specyfikacją zewnętrznego API ──────
-    // Dostosuj nazwy pól gdy otrzymasz finalną spec od zewnętrznego zespołu.
-    company_name:      payload.companyName,
-    nip:               payload.nip,
-    subdomain:         payload.subdomain,
-    language:          payload.language,
-    currency:          payload.partnerCurrency,
-    country:           payload.country,
-    billing: {
-      address:         payload.billingAddress,
-      zip:             payload.billingZip,
-      city:            payload.billingCity,
-      country:         payload.billingCountry,
-      email:           payload.billingEmail,
-    },
-    admin: {
-      first_name:      payload.adminFirstName,
-      last_name:       payload.adminLastName,
-      email:           payload.adminEmail,
-    },
-  });
-
-  const url    = new URL('/api/CreateTestAccount', apiUrl);
-  const isHttps = url.protocol === 'https:';
-  const mod    = isHttps ? https : http;
-
-  const response = await new Promise((resolve, reject) => {
-    const req = mod.request(url.toString(), {
-      method:  'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Length': Buffer.byteLength(body),
+    wh: {
+      whitelabelHeader:                   pc.whitelabelHeader || '#1D2951',
+      whitelabelColor:                    pc.whitelabelColor  || '#1D2951',
+      currency:                           p.partnerCurrency,
+      lang:                               p.language,
+      enableMealSelection:                pc.enableMealSelection !== false,
+      internalCommunicatorNotifications:  pc.internalCommunicatorNotifications !== false,
+      whitelabelName:                     p.subdomain,
+      whitelabelSubdomain:                p.subdomain,
+      gdsProfileLocator:                  pc.gdsProfileLocator     || '',
+      gdsProfileLocatorManual:            pc.gdsProfileLocatorManual || '',
+      whitelabelCountry:                  p.country,
+      defaultBillingAddress: {
+        companyName:    p.companyName,
+        address:        p.billingAddress,
+        zipCode:        p.billingZip,
+        town:           p.billingCity,
+        country:        p.billingCountry,
+        taxNumber:      p.nip || '',
+        emailAddress:   [p.billingEmail],
+        currency:       p.partnerCurrency,
+        issuer:         pc.issuer || 'WT',
+        language:       p.language,
       },
-      timeout: 15000,
-    }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => {
-        try {
-          const text = Buffer.concat(chunks).toString('utf8');
-          resolve({ status: res.statusCode, body: JSON.parse(text) });
-        } catch (e) {
-          resolve({ status: res.statusCode, body: {} });
-        }
+    },
+    selectedPartnerType:        pc.selectedPartnerType        || 'PARTNER_BASIC',
+    testAccount:                true,
+    defaultServicesProcessType: pc.defaultServicesProcessType || 'ONLINE',
+    isContractSigned:           false,
+    formConfigs:                p.formConfigs,
+    admin: {
+      email:   p.adminEmail,
+      name:    p.adminFirstName,
+      surname: p.adminLastName,
+    },
+    travelerConfig: pc.travelerConfig || {
+      searchTravelerBy:                    'byPhrasesNameSurnameEmail',
+      travelersMaxLimit:                   9,
+      partnerCountryAsDefaultNationality:  false,
+      hotelOffersWithMealsOnly:            false,
+      refundableHotelOffersOnly:           false,
+      accommodationsWithParkingOnly:       false,
+      allowedMealTypes:                    ['BF', 'HB', 'FB', 'AI'],
+    },
+    creatorEmail: p.creatorEmail,
+  });
+
+  const url     = new URL('/v3/hooks/crm/partners', apiUrl);
+  const isHttps = url.protocol === 'https:';
+  const mod     = isHttps ? https : http;
+
+  logger.info('[testAccountService] Wywołanie HTCD API', {
+    url:      url.toString(),
+    subdomain: p.subdomain,
+    company:   p.companyName,
+    creator:   p.creatorEmail,
+  });
+
+  let response;
+  try {
+    response = await new Promise((resolve, reject) => {
+      const req = mod.request(url.toString(), {
+        method:  'POST',
+        headers: {
+          'Content-Type':   'application/json',
+          'Authorization':  `ApiKey ${apiKey}`,
+          'Content-Length': Buffer.byteLength(body),
+        },
+        timeout: 20000,
+      }, res => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          try {
+            const text = Buffer.concat(chunks).toString('utf8');
+            resolve({ status: res.statusCode, body: JSON.parse(text) });
+          } catch {
+            resolve({ status: res.statusCode, body: {} });
+          }
+        });
       });
+      req.on('timeout', () => { req.destroy(); reject(new Error('Timeout połączenia z HTCD API (20s)')); });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
     });
-    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout połączenia z zewnętrznym API')); });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
+  } catch (networkErr) {
+    logger.error('[testAccountService] Błąd sieciowy HTCD', { error: networkErr.message });
+    throw networkErr;
+  }
+
+  logger.info('[testAccountService] Odpowiedź HTCD', {
+    status: response.status,
+    body:   JSON.stringify(response.body).slice(0, 300),
   });
 
-  logger.info('testAccountService._callRealApi response', {
-    status:  response.status,
-    body:    response.body,
-  });
-
-  // ── Interpretacja odpowiedzi ───────────────────────────────────────
-  // Dostosuj pola odpowiedzi do faktycznej specyfikacji zewnętrznego API.
-  if (response.status >= 200 && response.status < 300 && response.body.accountNumber) {
+  // 201 — sukces
+  if (response.status === 201 && response.body?.success) {
     return {
       success:       true,
-      accountNumber: String(response.body.accountNumber),
+      htcdPartnerId: response.body.data?.id        || null,
+      priceListUrl:  response.body.data?.priceListUrl || null,
     };
   }
 
+  // 400 P0007 — partner już istnieje
+  if (response.status === 400 && response.body?.reason?.errorCode === 'P0007') {
+    return {
+      success: false,
+      error:   'Konto testowe dla tej subdomeny już istnieje w systemie HTCD (P0007).',
+    };
+  }
+
+  // Inne błędy walidacji (CE0001 itp.)
+  if (response.status === 400 && response.body?.reason?.details?.length) {
+    const details = response.body.reason.details
+      .map(d => `${d.property}: ${d.errorMessage}`)
+      .join('; ');
+    return {
+      success: false,
+      error:   `Błąd walidacji HTCD: ${details}`,
+    };
+  }
+
+  // Ogólny błąd
+  const errorCode = response.body?.reason?.errorCode || '';
   return {
     success: false,
-    error:   response.body?.message || response.body?.error || `Błąd HTTP ${response.status}`,
+    error:   `Błąd HTCD (HTTP ${response.status}${errorCode ? ', ' + errorCode : ''}): ${JSON.stringify(response.body?.reason || response.body).slice(0, 200)}`,
   };
 }
-// ── / PRAWDZIWE API ──────────────────────────────────────────────────────────
+
+// ── STUB (lokalny) — aktywny gdy brak HTCD_API_KEY ───────────────────────────
+async function _stub(p) {
+  await new Promise(r => setTimeout(r, 600));
+  if (p.subdomain && p.subdomain.includes('error')) {
+    return { success: false, error: '[STUB] Subdomena jest już zajęta. Wybierz inną subdomenę.' };
+  }
+  const fakeId = Math.floor(Math.random() * 9000) + 1000;
+  return {
+    success:       true,
+    htcdPartnerId: fakeId,
+    priceListUrl:  `https://hotailor.htcd.pl/office/partners/${fakeId}/(partner:price-list)`,
+  };
+}
 
 module.exports = { createTestAccount };

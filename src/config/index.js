@@ -118,4 +118,9 @@ module.exports = {
       "application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword",
     ).split(","),
   },
+
+  htcd: {
+    apiUrl: optional("HTCD_API_URL", "https://api-htcd.worktrips.com"),
+    apiKey: optional("HTCD_API_KEY"),
+  },
 };

@@ -1,0 +1,32 @@
+-- 0151_test_account_settings_cleanup.sql
+-- Czyści stare rekordy HTCD (ta_partner_config) i ustawia poprawny stan
+-- 17 indywidualnych parametrów konfiguracyjnych konta testowego.
+
+-- 1. Usuń stary rekord zbiorczy (ta_partner_config) — zastąpiony przez 17 indywidualnych pól
+DELETE FROM app_settings WHERE key = 'ta_partner_config';
+
+-- 2. Wstaw brakujące indywidualne parametry (bezpieczne — DO UPDATE nadpisuje wartości domyślne)
+INSERT INTO app_settings (key, value, value_type, label, description, category) VALUES
+  ('ta_wh_header_color',               '#1D2951',                          'string', 'Konto testowe — kolor nagłówka (whitelabelHeader)',                          'Kolor hex nagłówka whitelabel w HTCD.',                                                           'crm'),
+  ('ta_wh_accent_color',               '#1D2951',                          'string', 'Konto testowe — kolor akcentu (whitelabelColor)',                            'Kolor hex akcentu whitelabel w HTCD.',                                                            'crm'),
+  ('ta_wh_enable_meal_selection',      'true',                             'string', 'Konto testowe — wybór posiłków (enableMealSelection)',                       'Czy włączyć wybór posiłków (true/false).',                                                        'crm'),
+  ('ta_wh_communicator_notifications', 'true',                             'string', 'Konto testowe — powiadomienia komunikatora (internalCommunicatorNotifications)', 'Czy włączyć powiadomienia komunikatora wewnętrznego (true/false).',              'crm'),
+  ('ta_wh_gds_locator',                '123',                              'string', 'Konto testowe — GDS Profile Locator',                                       'Identyfikator profilu GDS (gdsProfileLocator).',                                                  'crm'),
+  ('ta_wh_gds_locator_manual',         '123',                              'string', 'Konto testowe — GDS Profile Locator Manual',                                'Identyfikator profilu GDS (ręczny) (gdsProfileLocatorManual).',                                   'crm'),
+  ('ta_billing_issuer',                'WT',                               'string', 'Konto testowe — wystawca faktury (issuer)',                                  'Kod wystawcy faktury w adresie rozliczeniowym (np. WT).',                                         'crm'),
+  ('ta_partner_type',                  'PARTNER_BASIC',                    'string', 'Konto testowe — typ partnera (selectedPartnerType)',                         'Typ partnera w HTCD (np. PARTNER_BASIC).',                                                        'crm'),
+  ('ta_services_process_type',         'ONLINE',                           'string', 'Konto testowe — typ procesowania usług (defaultServicesProcessType)',        'Domyślny typ procesowania usług (np. ONLINE, MIDOFFICE).',                                        'crm'),
+  ('ta_traveler_search_by',            'byPhrasesNameSurnameEmail',        'string', 'Konto testowe — wyszukiwanie podróżnych (searchTravelerBy)',                 'Sposób wyszukiwania podróżnych w HTCD.',                                                          'crm'),
+  ('ta_traveler_max_limit',            '9',                                'string', 'Konto testowe — limit podróżnych (travelersMaxLimit)',                       'Maksymalna liczba podróżnych w zamówieniu.',                                                      'crm'),
+  ('ta_traveler_country_nationality',  'false',                            'string', 'Konto testowe — narodowość z kraju partnera (partnerCountryAsDefaultNationality)', 'Czy kraj partnera jest domyślną narodowością podróżnego (true/false).',  'crm'),
+  ('ta_traveler_meals_only',           'false',                            'string', 'Konto testowe — tylko oferty z posiłkami (hotelOffersWithMealsOnly)',        'Czy pokazywać tylko oferty hoteli z posiłkami (true/false).',                                     'crm'),
+  ('ta_traveler_refundable_only',      'false',                            'string', 'Konto testowe — tylko oferty zwrotne (refundableHotelOffersOnly)',           'Czy pokazywać tylko zwrotne oferty hoteli (true/false).',                                         'crm'),
+  ('ta_traveler_parking_only',         'false',                            'string', 'Konto testowe — tylko z parkingiem (accommodationsWithParkingOnly)',         'Czy pokazywać tylko hotele z parkingiem (true/false).',                                           'crm'),
+  ('ta_traveler_meal_types',           'BF,HB,FB,AI',                     'string', 'Konto testowe — dozwolone typy posiłków (allowedMealTypes)',                 'Lista typów posiłków oddzielona przecinkami (np. BF,HB,FB,AI).',                                  'crm'),
+  ('ta_form_configs',                  '[{"step":"START","multiline":0,"config":[{"type":"text","name":"EVENT_FORM.EVENT_NAME_LABEL","id":"event_name","uuid":"12ef0270-133b-460c-ac10-2684e93eb1fc","required":false,"requiredIf":{"enabled":false,"fieldId":"","value":""},"hidden":false,"base":true,"default":"","width":"100","specialRequest":false,"config":{"endpoint":"","options":null,"regexp":null,"customLabel":null,"optionsSource":null,"midOfficeFieldType":null}},{"type":"datepicker","name":"EVENT_FORM.DATE_FROM_LABEL","id":"date_from","uuid":"38661fcd-2302-47e6-8b47-c95cf1c55b11","required":true,"requiredIf":{"enabled":false,"fieldId":"","value":""},"hidden":false,"base":true,"default":"today","width":"50","config":{"endpoint":"","options":null,"regexp":null,"customLabel":null,"optionsSource":null,"midOfficeFieldType":null}},{"type":"datepicker","name":"EVENT_FORM.DATE_TO_LABEL","id":"date_to","uuid":"4faaf5a2-749b-4896-a289-d17f6780e3b8","required":true,"requiredIf":{"enabled":false,"fieldId":"","value":""},"hidden":false,"base":true,"default":"tomorrow","width":"100","config":{"endpoint":"","options":null,"regexp":null,"customLabel":null,"optionsSource":null,"midOfficeFieldType":null}}]}]',
+                                                                           'string', 'Konto testowe — konfiguracja formularzy (formConfigs)',                    'Tablica kroków formularza w formacie JSON. Musi zawierać co najmniej jeden element ze step="START".', 'crm')
+ON CONFLICT (key) DO UPDATE SET
+  value_type  = EXCLUDED.value_type,
+  label       = EXCLUDED.label,
+  description = EXCLUDED.description,
+  category    = EXCLUDED.category;
