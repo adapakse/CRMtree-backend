@@ -1605,114 +1605,20 @@ router.post('/:id/migrate',
       try { assertOwnership(lead, req, 'assigned_to'); }
       catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
 
-      if (lead.converted_at) return res.status(409).json({ error: 'Lead już zmigrowany do Partnera' });
+      if (lead.converted_at) return res.status(409).json({ error: 'Lead już onboardowany' });
 
-      const client = await db.pool.connect();
-      try {
-        await client.query('BEGIN');
+      await db.query(
+        `UPDATE crm_leads SET converted_at=now(), stage='onboarded', updated_at=now() WHERE id=$1`, [id]
+      );
 
-        // Pobierz numer konta testowego jeśli zostało założone
-        const { rows: testAccRows } = await client.query(
-          `SELECT test_account_number FROM crm_lead_test_accounts
-           WHERE lead_id = $1 AND status = 'created' AND test_account_number IS NOT NULL`,
-          [id]
-        );
-        const testAccountNumber = testAccRows[0]?.test_account_number || null;
+      await audit.log({
+        user:      req.user,
+        action:    'crm_lead_onboarded',
+        afterState: { lead_id: id, company: lead.company },
+        ipAddress: req.auditContext?.ipAddress,
+      });
 
-        const { rows: partner } = await client.query(`
-          INSERT INTO crm_partners
-            (company, contact_name, contact_title, email, phone, industry,
-             lead_id, group_id, manager_id, contract_doc_id, contract_signed,
-             contract_value, notes, created_by, status,
-             annual_turnover_currency, online_pct, tags,
-             agent_name, agent_email, agent_phone, logo_url,
-             partner_number)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'onboarding',$15,$16,$17,$18,$19,$20,$21,$22)
-          RETURNING *
-        `, [
-          lead.company, lead.contact_name, lead.contact_title, lead.email,
-          lead.phone, lead.industry, id,
-          req.body.group_id||null, lead.assigned_to,
-          req.body.contract_doc_id||null, req.body.contract_signed||null,
-          req.body.contract_value||null, lead.notes, req.user.id,
-          lead.annual_turnover_currency||'PLN',
-          lead.online_pct||null, lead.tags||[],
-          lead.agent_name||null, lead.agent_email||null, lead.agent_phone||null,
-          lead.logo_url||null,
-          testAccountNumber,   // ← numer konta testowego → partner_number
-        ]);
-
-        // ── Automatyczne zadania standardowe z AppSettings ──────────────────────
-        try {
-          const { rows: settingsRows } = await client.query(
-            `SELECT value FROM app_settings WHERE key = 'onboarding_task_templates'`
-          );
-          if (settingsRows.length && settingsRows[0].value) {
-            const templates = JSON.parse(settingsRows[0].value);
-            const partnerId  = partner[0].id;
-            const createdAt  = partner[0].created_at || new Date();
-            const handlowiec = lead.assigned_to; // Krok 0 zawsze idzie do handlowca
-
-            for (const tpl of templates) {
-              if (!tpl.standard) continue; // tylko zadania standardowe
-
-              // Wyznacz datę: created_at + tpl.days dni, godzina 09:00
-              let dueDate = null;
-              if (tpl.days != null && tpl.days >= 0) {
-                const d = new Date(createdAt);
-                d.setDate(d.getDate() + parseInt(tpl.days));
-                dueDate = d.toISOString().slice(0, 10);
-              }
-
-              // Assignee: krok 0 zawsze handlowiec, reszta wg szablonu
-              const assignedTo = tpl.step === 0
-                ? (handlowiec || null)
-                : (tpl.assignee || null);
-
-              await client.query(
-                `INSERT INTO crm_onboarding_tasks
-                   (partner_id, step, title, type, assigned_to, due_date, due_time, created_by)
-                 VALUES ($1,$2,$3,$4,$5,$6,'09:00',$7)`,
-                [
-                  partnerId,
-                  tpl.step,
-                  tpl.title,
-                  tpl.type || 'task',
-                  assignedTo,
-                  dueDate,
-                  req.user.id,
-                ]
-              );
-            }
-          }
-        } catch (tplErr) {
-          // Błąd szablonów nie blokuje migracji — logujemy ostrzeżenie
-          const logger = require('../utils/logger');
-          logger.warn('Błąd tworzenia zadań z szablonów onboarding', { error: tplErr.message });
-        }
-
-        // Lead pozostaje widoczny na liście w statusie closed_won.
-        // converted_at jest ustawiane tylko dla zapisu — NIE filtrujemy już po tym polu.
-        await client.query(
-          `UPDATE crm_leads SET converted_at=now(), stage='closed_won', updated_at=now() WHERE id=$1`, [id]
-        );
-
-        await client.query('COMMIT');
-
-        await audit.log({
-          user:      req.user,
-          action:    'crm_lead_migrated',
-          afterState: { lead_id: id, partner_id: partner[0].id, company: lead.company },
-          ipAddress: req.auditContext?.ipAddress,
-        });
-
-        res.status(201).json({ lead_id: id, partner: partner[0] });
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
-      }
+      res.status(200).json({ lead_id: id, stage: 'onboarded' });
     } catch (err) { next(err); }
   }
 );

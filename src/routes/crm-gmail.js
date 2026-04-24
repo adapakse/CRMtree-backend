@@ -198,8 +198,20 @@ async function sendPartnerHandler(req, res) {
       return res.status(400).json({ error: "Pola 'to' i 'subject' są wymagane" });
     }
 
-    const partnerQ = await pool.query("SELECT id, company FROM crm_partners WHERE id = $1", [partnerId]);
-    if (!partnerQ.rows.length) return res.status(404).json({ error: "Partner nie znaleziony" });
+    let partnerQ = await pool.query("SELECT id, company FROM crm_partners WHERE dwh_partner_id = $1", [partnerId]);
+    if (!partnerQ.rows.length) {
+      const dm = await pool.query(
+        `SELECT COALESCE(NULLIF(trim(company_name),''), NULLIF(trim(name),''), partner_id::text) AS company FROM dwh.partner WHERE partner_id = $1`, [partnerId]
+      );
+      if (!dm.rows.length) return res.status(404).json({ error: "Partner nie znaleziony" });
+      partnerQ = await pool.query(
+        `INSERT INTO crm_partners (company, dwh_partner_id, status, onboarding_step, created_at, updated_at)
+         VALUES ($1, $2, 'active', 3, now(), now())
+         ON CONFLICT (dwh_partner_id) DO UPDATE SET updated_at = now()
+         RETURNING id, company`,
+        [dm.rows[0].company, partnerId]
+      );
+    }
 
     const attachments = (req.files || []).map((f) => ({
       filename: f.originalname,
@@ -223,12 +235,13 @@ async function sendPartnerHandler(req, res) {
          (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, is_read)
        VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, true)
        RETURNING id`,
-      [partnerId, subject, body || null, sentThreadId, messageId, req.user.id],
+      [partnerQ.rows[0].id, subject, body || null, sentThreadId, messageId, req.user.id],
     );
 
+    const crmPartnerId = partnerQ.rows[0].id;
     for (const att of attachments) {
       storeAttachment({
-        partnerId,
+        partnerId: crmPartnerId,
         messageId,
         attachmentId: null,
         filename:     att.filename,
@@ -243,7 +256,7 @@ async function sendPartnerHandler(req, res) {
       ...String(to).split(",").map((s) => s.trim()).filter(Boolean),
       ...(cc ? String(cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
     ];
-    await autoSavePartnerContacts(partnerId, allRecipients);
+    await autoSavePartnerContacts(crmPartnerId, allRecipients);
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {

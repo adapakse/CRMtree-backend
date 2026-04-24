@@ -162,12 +162,9 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     const params = [];
     const where  = [];
 
-    // Rejestr partnerów wyklucza status 'onboarding' — trafiają do panelu Onboarding
-    where.push(`p.status != 'onboarding'`);
-
     if (search) {
       params.push(`%${search}%`);
-      where.push(`(p.company ILIKE $${params.length} OR COALESCE(dm.company_name,'') ILIKE $${params.length} OR p.email ILIKE $${params.length} OR p.nip ILIKE $${params.length} OR p.contact_name ILIKE $${params.length} OR p.phone ILIKE $${params.length})`);
+      where.push(`(COALESCE(p.company, dm.company_name, dm.name) ILIKE $${params.length} OR p.email ILIKE $${params.length} OR COALESCE(p.nip, dm.tax_numbers) ILIKE $${params.length} OR p.contact_name ILIKE $${params.length} OR p.phone ILIKE $${params.length})`);
     }
     if (status) {
       params.push(status);
@@ -195,11 +192,14 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     }
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const orderExpr = sortCol === 'company'
+      ? `COALESCE(p.company, dm.company_name, dm.name) ${sortDir}`
+      : `p.${sortCol} ${sortDir}`;
 
     const countQ = await pool.query(
       `SELECT COUNT(*)
-       FROM crm_partners p
-       LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
+       FROM dwh.partner dm
+       LEFT JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        ${whereSql}`,
       params
@@ -208,24 +208,32 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
 
     params.push(parseInt(limit), offset);
     const rows = await pool.query(
-      `SELECT p.*,
-              COALESCE(dm.company_name, dm.name) AS dwh_company_name,
+      `SELECT dm.partner_id                                                        AS id,
+              COALESCE(p.company, dm.company_name, dm.name)                        AS company,
+              dm.partner_id                                                         AS dwh_partner_id,
+              COALESCE(dm.company_name, dm.name)                                   AS dwh_company_name,
               dm.subdomain,
-              dm.billing_language AS language,
-              dm.billing_currency AS partner_currency,
+              dm.billing_language                                                   AS language,
+              dm.billing_currency                                                   AS partner_currency,
               dm.country,
-              dm.tax_numbers      AS dwh_nip,
-              u.display_name                        AS manager_name,
-              COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name)    AS group_name,
+              dm.tax_numbers                                                        AS dwh_nip,
+              COALESCE(p.status, 'active')                                         AS status,
+              p.manager_id,
+              u.display_name                                                        AS manager_name,
+              p.contract_value,
+              p.contract_signed,
+              p.onboarding_step,
+              p.tags,
+              COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name,
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false)::int AS new_email_count,
               (SELECT MAX(updated_at) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false) AS last_reply_at
-       FROM crm_partners p
-       LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
+       FROM dwh.partner dm
+       LEFT JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
        LEFT JOIN users u ON u.id = p.manager_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        ${whereSql}
-       ORDER BY p.${sortCol} ${sortDir}
+       ORDER BY ${orderExpr}
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
@@ -317,11 +325,10 @@ router.get("/group-names", requireAuth, crmAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT DISTINCT COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name
-       FROM crm_partners p
-       LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
+       FROM dwh.partner dm
+       LEFT JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        WHERE COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) IS NOT NULL
-         AND p.status != 'onboarding'
        ORDER BY group_name`
     );
     res.json(rows.map(r => r.group_name));
@@ -334,13 +341,42 @@ router.get("/group-names", requireAuth, crmAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // SZCZEGÓŁY PARTNERA
 // ═══════════════════════════════════════════════════════════════════════════════
+// Lazy-create crm_partner dla danego dwh_partner_id (zwraca crm_partners.id)
+async function ensureCrmPartner(dwhPartnerId, pool) {
+  const existing = await pool.query(
+    `SELECT id FROM crm_partners WHERE dwh_partner_id = $1`, [dwhPartnerId]
+  );
+  if (existing.rows.length) return existing.rows[0].id;
+  const dm = await pool.query(
+    `SELECT COALESCE(NULLIF(trim(company_name),''), NULLIF(trim(name),''), partner_id::text) AS company
+     FROM dwh.partner WHERE partner_id = $1`, [dwhPartnerId]
+  );
+  if (!dm.rows.length) return null;
+  const ins = await pool.query(
+    `INSERT INTO crm_partners (company, dwh_partner_id, status, onboarding_step, created_at, updated_at)
+     VALUES ($1, $2, 'active', 3, now(), now())
+     ON CONFLICT (dwh_partner_id) DO UPDATE SET updated_at = now()
+     RETURNING id`,
+    [dm.rows[0].company, dwhPartnerId]
+  );
+  return ins.rows[0].id;
+}
+
 router.get("/:id", requireAuth, crmAuth, async (req, res) => {
   try {
-    const { id } = req.params;
+    const dwhPartnerId = parseInt(req.params.id);
+    if (isNaN(dwhPartnerId)) return res.status(400).json({ error: 'Nieprawidłowe ID' });
+
+    const crmId = await ensureCrmPartner(dwhPartnerId, pool);
+    if (!crmId) return res.status(404).json({ error: 'Nie znaleziono' });
+
     const partnerQ = await pool.query(
       `SELECT
+              -- id = dwh_partner_id (używany w URL i przez frontend jako klucz)
+              dm.partner_id AS id,
+              p.id          AS crm_id,
               -- Pola wyłącznie CRM (nie mają odpowiednika w DWH)
-              p.id, p.company, p.nip, p.address,
+              p.company, p.nip, p.address,
               p.contact_name, p.contact_title, p.email, p.phone,
               p.billing_contact_name, p.billing_contact_title, p.billing_email, p.billing_phone,
               p.credit_limit_value, p.credit_limit_currency,
@@ -393,7 +429,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
        LEFT JOIN users u ON u.id = p.manager_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        WHERE p.id = $1`,
-      [id]
+      [crmId]
     );
     if (!partnerQ.rows.length) return res.status(404).json({ error: "Nie znaleziono" });
 
@@ -409,7 +445,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
        LEFT JOIN users au ON au.id = a.assigned_to
        WHERE a.partner_id = $1
        ORDER BY a.activity_at DESC NULLS LAST`,
-      [id]
+      [crmId]
     );
     partner.activities = actsQ.rows;
 
@@ -427,7 +463,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
     try {
       const ecQ = await pool.query(
         `SELECT * FROM crm_partner_contacts WHERE partner_id=$1 ORDER BY created_at`,
-        [id]
+        [crmId]
       );
       partner.extra_contacts = ecQ.rows;
     } catch (_) {
@@ -534,7 +570,12 @@ router.post("/", requireAuth, crmAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
   try {
-    const { id } = req.params;
+    const dwhPartnerId = parseInt(req.params.id);
+
+    // Znajdź crm_partner po dwh_partner_id (lazy-create jeśli nie istnieje)
+    const crmId = await ensureCrmPartner(dwhPartnerId, pool);
+    if (!crmId) return res.status(404).json({ error: 'Partner nie znaleziony' });
+    const id = crmId;
 
     // Scope check: manager może edytować tylko partnerów ze swojej grupy
     if (!req.user.is_admin && req.user.crm_role === 'sales_manager' && req.crmScopeUserIds) {
@@ -549,26 +590,7 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
       }
     }
 
-    // Blokuj zmianę statusu z 'onboarding' gdy są nieukończone zadania
-    if (req.body.status && req.body.status !== 'onboarding') {
-      const current = await pool.query(
-        `SELECT status FROM crm_partners WHERE id = $1`, [id]
-      );
-      if (current.rows[0]?.status === 'onboarding') {
-        const { rows: openTasks } = await pool.query(
-          `SELECT COUNT(*)::int AS cnt FROM crm_onboarding_tasks WHERE partner_id = $1 AND done = false`,
-          [parseInt(id)]
-        );
-        if (openTasks[0].cnt > 0) {
-          return res.status(409).json({
-            error: `Nie można zakończyć wdrożenia — pozostało ${openTasks[0].cnt} nieukończonych zadań.`
-          });
-        }
-      }
-    }
-
     // Sprawdź unikalność NIP przy aktualizacji (wyklucz własny rekord)
-    // NIP dla partnerów powiązanych z DWH jest tylko kopią — sprawdzamy tylko dla ręcznie ustawionych
     if (req.body.nip) {
       const partnerDwh = await pool.query('SELECT dwh_partner_id FROM crm_partners WHERE id = $1', [id]);
       const isDwhLinked = !!partnerDwh.rows[0]?.dwh_partner_id;
@@ -638,6 +660,8 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
       params
     );
     if (!r.rows.length) return res.status(404).json({ error: "Nie znaleziono" });
+    // Nadpisz id = dwh_partner_id żeby frontend mógł przeładować GET /:dwh_id
+    r.rows[0].id = dwhPartnerId;
 
     // Audit log — tylko zmienione pola
     try {
