@@ -15,21 +15,53 @@ router.use(requireAuth, injectAuditContext, crmAuth);
 
 router.get('/', async (req, res, next) => {
   try {
-    const { rows } = await db.query(`
-      SELECT g.*, u.display_name AS manager_name,
-        COUNT(p.id)::int           AS partner_count,
-        COALESCE(SUM(p.contract_value),0) AS total_arr,
-        COALESCE(json_agg(jsonb_build_object(
-          'id',p.id,'company',p.company,'status',p.status,'contract_value',p.contract_value,
-          'onboarding_step',p.onboarding_step
-        )) FILTER (WHERE p.id IS NOT NULL), '[]') AS partners
+    // Grupy zdefiniowane w CRM
+    const crmQ = await db.query(`
+      SELECT g.id, g.name, g.industry, g.description, g.manager_id,
+             'crm' AS source,
+             u.display_name AS manager_name,
+             COUNT(p.id)::int AS partner_count,
+             COALESCE(SUM(p.contract_value),0) AS total_arr,
+             COALESCE(json_agg(jsonb_build_object(
+               'id',p.id,'company',p.company,'status',p.status,'contract_value',p.contract_value,
+               'onboarding_step',p.onboarding_step
+             )) FILTER (WHERE p.id IS NOT NULL), '[]') AS partners
       FROM crm_partner_groups g
       LEFT JOIN users u ON u.id = g.manager_id
       LEFT JOIN crm_partners p ON p.group_id = g.id
       GROUP BY g.id, u.display_name
       ORDER BY g.name
     `);
-    res.json(rows);
+
+    // Grupy z DWH — distinct partner_group, pomijamy te które już istnieją w CRM
+    const dwhQ = await db.query(`
+      SELECT NULL::int AS id,
+             dm.partner_group AS name,
+             NULL AS industry,
+             NULL AS description,
+             NULL::uuid AS manager_id,
+             'dwh' AS source,
+             NULL AS manager_name,
+             COUNT(DISTINCT p.id)::int AS partner_count,
+             COALESCE(SUM(p.contract_value),0) AS total_arr,
+             COALESCE(json_agg(jsonb_build_object(
+               'id',p.id,
+               'company',COALESCE(COALESCE(dm.company_name, dm.name), p.company),
+               'status',p.status,'contract_value',p.contract_value,
+               'onboarding_step',p.onboarding_step
+             )) FILTER (WHERE p.id IS NOT NULL), '[]') AS partners
+      FROM dwh."Partner" dm
+      JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
+      WHERE dm.partner_group IS NOT NULL
+        AND dm.partner_group != 'Partner_basic'
+        AND NOT EXISTS (
+          SELECT 1 FROM crm_partner_groups cpg WHERE cpg.name = dm.partner_group
+        )
+      GROUP BY dm.partner_group
+      ORDER BY dm.partner_group
+    `);
+
+    res.json([...crmQ.rows, ...dwhQ.rows]);
   } catch (err) { next(err); }
 });
 

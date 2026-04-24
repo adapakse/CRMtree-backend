@@ -5,11 +5,11 @@
 -- Scenariusz:
 --   1. Partnerzy w statusie 'onboarding' to Leady które wygraliśmy.
 --      Podczas procesu Lead założono im konta TESTOWE w systemie transakcyjnym.
---      W momencie założenia konta testowego pojawili się w dwh.dm_partner
+--      W momencie założenia konta testowego pojawili się w dwh."Partner"
 --      z przydzielonym partner_id (DWH).
 --
 --   2. Skrypt DYNAMICZNIE czyta partnerów z crm_partners WHERE status = 'onboarding'
---      i tworzy dla każdego rekord w dwh.dm_partner.
+--      i tworzy dla każdego rekord w dwh."Partner".
 --      partner_id DWH przydzielany od 101 w górę (nie koliduje z danymi 0141).
 --
 --   3. Celowo mieszamy scenariusze CRM vs DWH żeby przetestować logikę COALESCE:
@@ -47,8 +47,8 @@ BEGIN
 
   -- ── Krok 1: wyczyść poprzednie dane testowe (IDs 101+) ─────────────────────
   -- Bezpieczne: usuwa tylko nasze testowe IDs (>=101), nie ruszamy danych 0141
-  DELETE FROM dwh.dm_sales  WHERE partner_id >= 101;
-  DELETE FROM dwh.dm_partner WHERE partner_id >= 101;
+  DELETE FROM dwh."Sales"  WHERE partner_id >= 101;
+  DELETE FROM dwh."Partner" WHERE partner_id >= 101;
 
   -- Odlinkuj CRM partnerów którzy mieli test-IDs (>=101)
   UPDATE crm_partners SET dwh_partner_id = NULL WHERE dwh_partner_id >= 101;
@@ -56,7 +56,7 @@ BEGIN
   -- ── Krok 2: znajdź następny wolny ID ───────────────────────────────────────
   SELECT COALESCE(MAX(partner_id), 100) + 1
     INTO next_id
-    FROM dwh.dm_partner;
+    FROM dwh."Partner";
 
   IF next_id < 101 THEN next_id := 101; END IF;
 
@@ -116,30 +116,26 @@ BEGIN
     --    DWH MA te same dane → COALESCE bierze CRM, _from_dwh = false
     --    Test: pola powinny być EDYTOWALNE po aktywacji
     IF variant = 1 THEN
-      INSERT INTO dwh.dm_partner (
-        partner_id, company_name, nip,
-        subdomain, language, partner_currency, country,
-        billing_address, billing_zip, billing_city, billing_country, billing_email_address,
-        admin_first_name, admin_last_name, admin_email
+      INSERT INTO dwh."Partner" (
+        partner_id, company_name, tax_numbers,
+        subdomain, billing_language, billing_currency, country,
+        address, zip_code, town, billing_country, emails
       ) VALUES (
         dwh_id,
         r.company,                              -- DWH = to samo co CRM
         r.nip,
         subdomain,                              -- DWH ma subdomene
-        COALESCE(r.language, 'pl'),             -- DWH ma język
+        COALESCE(r.language, 'PL'),             -- DWH ma język
         COALESCE(r.partner_currency, 'PLN'),    -- DWH ma walutę
-        COALESCE(r.country, 'Polska'),          -- DWH ma kraj
+        COALESCE(r.country, 'PL'),              -- DWH ma kraj
         -- Billing — DWH ma dane, ale CRM też wypełnił (oba nie-null)
         -- W tym wariancie CRM RÓWNIEŻ ma te dane (wpisane przez usera)
         -- → więc COALESCE(crm, dwh) = crm value → _from_dwh = false
         r.billing_address,
         r.billing_zip,
         r.billing_city,
-        COALESCE(r.billing_country, 'Polska'),
-        COALESCE(r.billing_email_address, r.billing_email),
-        admin_first,
-        admin_last,
-        COALESCE(r.admin_email, r.email)
+        COALESCE(r.billing_country, 'PL'),
+        COALESCE(r.billing_email_address, r.billing_email)
       );
 
       -- W tym wariancie CRM ma wartości w tych polach — nie czyścimy
@@ -149,27 +145,23 @@ BEGIN
     --    DWH MA dane → COALESCE bierze DWH, _from_dwh = true
     --    Test: pola powinny być READ-ONLY po aktywacji
     ELSIF variant = 2 THEN
-      INSERT INTO dwh.dm_partner (
-        partner_id, company_name, nip,
-        subdomain, language, partner_currency, country,
-        billing_address, billing_zip, billing_city, billing_country, billing_email_address,
-        admin_first_name, admin_last_name, admin_email
+      INSERT INTO dwh."Partner" (
+        partner_id, company_name, tax_numbers,
+        subdomain, billing_language, billing_currency, country,
+        address, zip_code, town, billing_country, emails
       ) VALUES (
         dwh_id,
         r.company,
         r.nip,
         subdomain,
-        'pl',
+        'PL',
         'PLN',
-        'Polska',
+        'PL',
         'ul. ' || split_part(r.company, ' ', 1) || ' 1',  -- DWH ma billing address
         '00-001',
         'Warszawa',
-        'Polska',
-        'billing@' || subdomain || '.pl',
-        admin_first,
-        admin_last,
-        'admin@' || subdomain || '.pl'
+        'PL',
+        'billing@' || subdomain || '.pl'
       );
 
       -- Symuluj że CRM NIE MA tych pól (operator ich nie wpisał podczas onboardingu)
@@ -192,27 +184,23 @@ BEGIN
     -- ── WARIANT C: MIESZANY — część pól w CRM, część pusta (DWH uzupełni wybrane)
     --    Test: niektóre pola edytowalne, inne READ-ONLY po aktywacji
     ELSE
-      INSERT INTO dwh.dm_partner (
-        partner_id, company_name, nip,
-        subdomain, language, partner_currency, country,
-        billing_address, billing_zip, billing_city, billing_country, billing_email_address,
-        admin_first_name, admin_last_name, admin_email
+      INSERT INTO dwh."Partner" (
+        partner_id, company_name, tax_numbers,
+        subdomain, billing_language, billing_currency, country,
+        address, zip_code, town, billing_country, emails
       ) VALUES (
         dwh_id,
         r.company,
         r.nip,
         subdomain,                              -- DWH ma subdomenę (CRM puste → READ-ONLY)
-        'pl',                                   -- DWH ma język (CRM puste → READ-ONLY)
+        'PL',                                   -- DWH ma język (CRM puste → READ-ONLY)
         COALESCE(r.partner_currency, 'PLN'),    -- DWH ma walutę
-        'Polska',                               -- DWH ma kraj
-        NULL,                                   -- DWH NIE MA billing_address (CRM może edytować)
-        NULL,                                   -- DWH NIE MA billing_zip
+        'PL',                                   -- DWH ma kraj
+        NULL,                                   -- DWH NIE MA address (CRM może edytować)
+        NULL,                                   -- DWH NIE MA zip_code
         'Kraków',                               -- DWH ma miasto (CRM puste → READ-ONLY)
-        'Polska',
-        'billing@' || subdomain || '.pl',       -- DWH ma email (CRM puste → READ-ONLY)
-        admin_first,                            -- DWH ma admina
-        admin_last,
-        'admin@' || subdomain || '.pl'
+        'PL',
+        'billing@' || subdomain || '.pl'        -- DWH ma email (CRM puste → READ-ONLY)
       );
 
       -- CRM: subdomain, language, admin* — puste (DWH przejmie → READ-ONLY)
@@ -242,7 +230,7 @@ BEGIN
   END LOOP;
 
   -- ── Krok 5: dane sprzedażowe (3 miesiące — konto testowe w akcji) ───────────
-  INSERT INTO dwh.dm_sales (
+  INSERT INTO dwh."Sales" (
     partner_id, sale_date, service_category,
     gross_sales_value_pln, net_sales_value_pln,
     gross_fee_value_pln, gross_margin_value_pln,
@@ -258,7 +246,7 @@ BEGIN
     ROUND((base_val + dm.partner_id::numeric * 3000 + RANDOM()::numeric * 15000) * 0.12, 2),
     nprod + (dm.partner_id % 5),
     npax  + (dm.partner_id % 8)
-  FROM dwh.dm_partner dm
+  FROM dwh."Partner" dm
   JOIN (SELECT generate_series(1, 3) AS mon) months ON true
   JOIN (
     SELECT * FROM UNNEST(
@@ -293,15 +281,15 @@ SELECT
   -- COALESCE — jak zobaczy to GET /:id
   COALESCE(p.subdomain, dm.subdomain)                          AS subdomain,
   (p.subdomain IS NULL AND dm.subdomain IS NOT NULL)           AS subdomain_from_dwh,
-  COALESCE(p.language, dm.language)                            AS language,
-  (p.language IS NULL AND dm.language IS NOT NULL)             AS language_from_dwh,
-  COALESCE(p.billing_city, dm.billing_city)                    AS billing_city,
-  (p.billing_city IS NULL AND dm.billing_city IS NOT NULL)     AS billing_city_from_dwh,
-  COALESCE(p.admin_first_name, dm.admin_first_name)            AS admin_first_name,
-  (p.admin_first_name IS NULL AND dm.admin_first_name IS NOT NULL) AS admin_first_name_from_dwh,
-  COALESCE(p.billing_address, dm.billing_address)              AS billing_address,
-  (p.billing_address IS NULL AND dm.billing_address IS NOT NULL)   AS billing_address_from_dwh
+  COALESCE(p.language, dm.billing_language)                    AS language,
+  (p.language IS NULL AND dm.billing_language IS NOT NULL)     AS language_from_dwh,
+  COALESCE(p.billing_city, dm.town)                            AS billing_city,
+  (p.billing_city IS NULL AND dm.town IS NOT NULL)             AS billing_city_from_dwh,
+  p.admin_first_name,
+  false                                                        AS admin_first_name_from_dwh,
+  COALESCE(p.billing_address, dm.address)                      AS billing_address,
+  (p.billing_address IS NULL AND dm.address IS NOT NULL)       AS billing_address_from_dwh
 FROM crm_partners p
-JOIN dwh.dm_partner dm ON dm.partner_id = p.dwh_partner_id
+JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
 WHERE p.status = 'onboarding'
 ORDER BY p.created_at;

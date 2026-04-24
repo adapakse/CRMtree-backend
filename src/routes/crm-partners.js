@@ -69,8 +69,8 @@ router.get("/onboarding", requireAuth, crmAuth, async (req, res) => {
 
     const { rows: partners } = await pool.query(`
       SELECT p.id,
-             COALESCE(dm.company_name, p.company) AS company,
-             COALESCE(dm.nip, p.nip) AS nip,
+             COALESCE(COALESCE(dm.company_name, dm.name), p.company) AS company,
+             COALESCE(dm.tax_numbers, p.nip) AS nip,
              p.onboarding_step, p.status,
              p.created_at, p.manager_id,
              p.dwh_partner_id,
@@ -78,7 +78,7 @@ router.get("/onboarding", requireAuth, crmAuth, async (req, res) => {
              (SELECT COUNT(*) FROM crm_onboarding_tasks t WHERE t.partner_id = p.id)::int AS task_count,
              (SELECT COUNT(*) FROM crm_onboarding_tasks t WHERE t.partner_id = p.id AND t.done = true)::int AS done_count
       FROM crm_partners p
-      LEFT JOIN dwh.dm_partner dm ON dm.partner_id = p.dwh_partner_id
+      LEFT JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
       LEFT JOIN users u ON u.id = p.manager_id
       ${where}
       ORDER BY p.created_at DESC
@@ -175,7 +175,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     }
     if (group_name) {
       params.push(group_name);
-      where.push(`COALESCE(dm.partner_group, g.name) = $${params.length}`);
+      where.push(`COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) = $${params.length}`);
     }
     if (industry) {
       params.push(industry);
@@ -199,7 +199,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     const countQ = await pool.query(
       `SELECT COUNT(*)
        FROM crm_partners p
-       LEFT JOIN dwh.dm_partner dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        ${whereSql}`,
       params
@@ -209,19 +209,19 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     params.push(parseInt(limit), offset);
     const rows = await pool.query(
       `SELECT p.*,
-              dm.company_name     AS dwh_company_name,
+              COALESCE(dm.company_name, dm.name) AS dwh_company_name,
               dm.subdomain,
-              dm.language,
-              dm.partner_currency,
+              dm.billing_language AS language,
+              dm.billing_currency AS partner_currency,
               dm.country,
-              dm.nip              AS dwh_nip,
+              dm.tax_numbers      AS dwh_nip,
               u.display_name                        AS manager_name,
-              COALESCE(dm.partner_group, g.name)    AS group_name,
+              COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name)    AS group_name,
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false)::int AS new_email_count,
               (SELECT MAX(updated_at) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false) AS last_reply_at
        FROM crm_partners p
-       LEFT JOIN dwh.dm_partner dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN users u ON u.id = p.manager_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        ${whereSql}
@@ -316,11 +316,11 @@ router.get("/tasks", requireAuth, crmAuth, async (req, res) => {
 router.get("/group-names", requireAuth, crmAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT DISTINCT COALESCE(dm.partner_group, g.name) AS group_name
+      `SELECT DISTINCT COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name
        FROM crm_partners p
-       LEFT JOIN dwh.dm_partner dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
-       WHERE COALESCE(dm.partner_group, g.name) IS NOT NULL
+       WHERE COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) IS NOT NULL
          AND p.status != 'onboarding'
        ORDER BY group_name`
     );
@@ -352,39 +352,44 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               p.agent_name, p.agent_email, p.agent_phone,
               p.created_by, p.created_at, p.updated_at, p.dwh_partner_id,
               -- Dane DWH dla identyfikacji
-              dm.company_name AS dwh_company_name,
-              dm.nip          AS dwh_nip,
+              COALESCE(dm.company_name, dm.name) AS dwh_company_name,
+              dm.tax_numbers                     AS dwh_nip,
               -- Pola DWH-fillable: CRM ma pierwszeństwo, DWH uzupełnia puste (COALESCE)
               -- Dla każdego pola zwracamy wartość scaloną + flagę czy pochodzi z DWH
-              COALESCE(p.subdomain, dm.subdomain)                         AS subdomain,
-              (p.subdomain IS NULL AND dm.subdomain IS NOT NULL)          AS subdomain_from_dwh,
-              COALESCE(p.language, dm.language)                           AS language,
-              (p.language IS NULL AND dm.language IS NOT NULL)            AS language_from_dwh,
-              COALESCE(p.partner_currency, dm.partner_currency)           AS partner_currency,
-              (p.partner_currency IS NULL AND dm.partner_currency IS NOT NULL) AS partner_currency_from_dwh,
-              COALESCE(p.country, dm.country)                             AS country,
-              (p.country IS NULL AND dm.country IS NOT NULL)              AS country_from_dwh,
-              COALESCE(p.billing_address, dm.billing_address)             AS billing_address,
-              (p.billing_address IS NULL AND dm.billing_address IS NOT NULL) AS billing_address_from_dwh,
-              COALESCE(p.billing_zip, dm.billing_zip)                     AS billing_zip,
-              (p.billing_zip IS NULL AND dm.billing_zip IS NOT NULL)      AS billing_zip_from_dwh,
-              COALESCE(p.billing_city, dm.billing_city)                   AS billing_city,
-              (p.billing_city IS NULL AND dm.billing_city IS NOT NULL)    AS billing_city_from_dwh,
-              COALESCE(p.billing_country, dm.billing_country)             AS billing_country,
-              (p.billing_country IS NULL AND dm.billing_country IS NOT NULL) AS billing_country_from_dwh,
-              COALESCE(p.billing_email_address, dm.billing_email_address) AS billing_email_address,
-              (p.billing_email_address IS NULL AND dm.billing_email_address IS NOT NULL) AS billing_email_address_from_dwh,
-              COALESCE(p.admin_first_name, dm.admin_first_name)           AS admin_first_name,
-              (p.admin_first_name IS NULL AND dm.admin_first_name IS NOT NULL) AS admin_first_name_from_dwh,
-              COALESCE(p.admin_last_name, dm.admin_last_name)             AS admin_last_name,
-              (p.admin_last_name IS NULL AND dm.admin_last_name IS NOT NULL) AS admin_last_name_from_dwh,
-              COALESCE(p.admin_email, dm.admin_email)                     AS admin_email,
-              (p.admin_email IS NULL AND dm.admin_email IS NOT NULL)      AS admin_email_from_dwh,
+              COALESCE(p.subdomain, dm.subdomain)                                AS subdomain,
+              (p.subdomain IS NULL AND dm.subdomain IS NOT NULL)                 AS subdomain_from_dwh,
+              COALESCE(p.language, dm.billing_language)                          AS language,
+              (p.language IS NULL AND dm.billing_language IS NOT NULL)           AS language_from_dwh,
+              COALESCE(p.partner_currency, dm.billing_currency)                  AS partner_currency,
+              (p.partner_currency IS NULL AND dm.billing_currency IS NOT NULL)   AS partner_currency_from_dwh,
+              COALESCE(p.country, dm.country)                                    AS country,
+              (p.country IS NULL AND dm.country IS NOT NULL)                     AS country_from_dwh,
+              COALESCE(p.billing_address, dm.address)                            AS billing_address,
+              (p.billing_address IS NULL AND dm.address IS NOT NULL)             AS billing_address_from_dwh,
+              COALESCE(p.billing_zip, dm.zip_code)                               AS billing_zip,
+              (p.billing_zip IS NULL AND dm.zip_code IS NOT NULL)                AS billing_zip_from_dwh,
+              COALESCE(p.billing_city, dm.town)                                  AS billing_city,
+              (p.billing_city IS NULL AND dm.town IS NOT NULL)                   AS billing_city_from_dwh,
+              COALESCE(p.billing_country, dm.billing_country)                    AS billing_country,
+              (p.billing_country IS NULL AND dm.billing_country IS NOT NULL)     AS billing_country_from_dwh,
+              COALESCE(p.billing_email_address, dm.emails)                       AS billing_email_address,
+              (p.billing_email_address IS NULL AND dm.emails IS NOT NULL)        AS billing_email_address_from_dwh,
+              p.admin_first_name,
+              false AS admin_first_name_from_dwh,
+              p.admin_last_name,
+              false AS admin_last_name_from_dwh,
+              p.admin_email,
+              false AS admin_email_from_dwh,
+              -- Nowe pola z DWH Partner
+              dm.max_debit,
+              dm.currency             AS dwh_currency,
+              dm.customer_service_note,
+              dm.switched_to_prod_at,
               -- Relacje
-              u.display_name                     AS manager_name,
-              COALESCE(dm.partner_group, g.name) AS group_name
+              u.display_name AS manager_name,
+              COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name
        FROM crm_partners p
-       LEFT JOIN dwh.dm_partner dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN users u ON u.id = p.manager_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        WHERE p.id = $1`,
