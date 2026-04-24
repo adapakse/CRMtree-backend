@@ -5,11 +5,11 @@
 -- Scenariusz:
 --   1. Partnerzy w statusie 'onboarding' to Leady które wygraliśmy.
 --      Podczas procesu Lead założono im konta TESTOWE w systemie transakcyjnym.
---      W momencie założenia konta testowego pojawili się w dwh."Partner"
+--      W momencie założenia konta testowego pojawili się w dwh.partner
 --      z przydzielonym partner_id (DWH).
 --
 --   2. Skrypt DYNAMICZNIE czyta partnerów z crm_partners WHERE status = 'onboarding'
---      i tworzy dla każdego rekord w dwh."Partner".
+--      i tworzy dla każdego rekord w dwh.partner.
 --      partner_id DWH przydzielany od 101 w górę (nie koliduje z danymi 0141).
 --
 --   3. Celowo mieszamy scenariusze CRM vs DWH żeby przetestować logikę COALESCE:
@@ -47,8 +47,8 @@ BEGIN
 
   -- ── Krok 1: wyczyść poprzednie dane testowe (IDs 101+) ─────────────────────
   -- Bezpieczne: usuwa tylko nasze testowe IDs (>=101), nie ruszamy danych 0141
-  DELETE FROM dwh."Sales"  WHERE partner_id >= 101;
-  DELETE FROM dwh."Partner" WHERE partner_id >= 101;
+  DELETE FROM dwh.sales  WHERE partner_id >= 101;
+  DELETE FROM dwh.partner WHERE partner_id >= 101;
 
   -- Odlinkuj CRM partnerów którzy mieli test-IDs (>=101)
   UPDATE crm_partners SET dwh_partner_id = NULL WHERE dwh_partner_id >= 101;
@@ -56,7 +56,7 @@ BEGIN
   -- ── Krok 2: znajdź następny wolny ID ───────────────────────────────────────
   SELECT COALESCE(MAX(partner_id), 100) + 1
     INTO next_id
-    FROM dwh."Partner";
+    FROM dwh.partner;
 
   IF next_id < 101 THEN next_id := 101; END IF;
 
@@ -116,7 +116,7 @@ BEGIN
     --    DWH MA te same dane → COALESCE bierze CRM, _from_dwh = false
     --    Test: pola powinny być EDYTOWALNE po aktywacji
     IF variant = 1 THEN
-      INSERT INTO dwh."Partner" (
+      INSERT INTO dwh.partner (
         partner_id, company_name, tax_numbers,
         subdomain, billing_language, billing_currency, country,
         address, zip_code, town, billing_country, emails
@@ -145,7 +145,7 @@ BEGIN
     --    DWH MA dane → COALESCE bierze DWH, _from_dwh = true
     --    Test: pola powinny być READ-ONLY po aktywacji
     ELSIF variant = 2 THEN
-      INSERT INTO dwh."Partner" (
+      INSERT INTO dwh.partner (
         partner_id, company_name, tax_numbers,
         subdomain, billing_language, billing_currency, country,
         address, zip_code, town, billing_country, emails
@@ -184,7 +184,7 @@ BEGIN
     -- ── WARIANT C: MIESZANY — część pól w CRM, część pusta (DWH uzupełni wybrane)
     --    Test: niektóre pola edytowalne, inne READ-ONLY po aktywacji
     ELSE
-      INSERT INTO dwh."Partner" (
+      INSERT INTO dwh.partner (
         partner_id, company_name, tax_numbers,
         subdomain, billing_language, billing_currency, country,
         address, zip_code, town, billing_country, emails
@@ -230,7 +230,7 @@ BEGIN
   END LOOP;
 
   -- ── Krok 5: dane sprzedażowe (3 miesiące — konto testowe w akcji) ───────────
-  INSERT INTO dwh."Sales" (
+  INSERT INTO dwh.sales (
     partner_id, sale_date, service_category,
     gross_sales_value_pln, net_sales_value_pln,
     gross_fee_value_pln, gross_margin_value_pln,
@@ -246,7 +246,7 @@ BEGIN
     ROUND((base_val + dm.partner_id::numeric * 3000 + RANDOM()::numeric * 15000) * 0.12, 2),
     nprod + (dm.partner_id % 5),
     npax  + (dm.partner_id % 8)
-  FROM dwh."Partner" dm
+  FROM dwh.partner dm
   JOIN (SELECT generate_series(1, 3) AS mon) months ON true
   JOIN (
     SELECT * FROM UNNEST(
@@ -290,6 +290,6 @@ SELECT
   COALESCE(p.billing_address, dm.address)                      AS billing_address,
   (p.billing_address IS NULL AND dm.address IS NOT NULL)       AS billing_address_from_dwh
 FROM crm_partners p
-JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
+JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
 WHERE p.status = 'onboarding'
 ORDER BY p.created_at;

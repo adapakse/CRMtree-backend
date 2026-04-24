@@ -50,7 +50,7 @@ router.get('/', async (req, res, next) => {
                'status',p.status,'contract_value',p.contract_value,
                'onboarding_step',p.onboarding_step
              )) FILTER (WHERE p.id IS NOT NULL), '[]') AS partners
-      FROM dwh."Partner" dm
+      FROM dwh.partner dm
       JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
       WHERE dm.partner_group IS NOT NULL
         AND dm.partner_group != 'Partner_basic'

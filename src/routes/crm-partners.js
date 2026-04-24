@@ -78,7 +78,7 @@ router.get("/onboarding", requireAuth, crmAuth, async (req, res) => {
              (SELECT COUNT(*) FROM crm_onboarding_tasks t WHERE t.partner_id = p.id)::int AS task_count,
              (SELECT COUNT(*) FROM crm_onboarding_tasks t WHERE t.partner_id = p.id AND t.done = true)::int AS done_count
       FROM crm_partners p
-      LEFT JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
+      LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
       LEFT JOIN users u ON u.id = p.manager_id
       ${where}
       ORDER BY p.created_at DESC
@@ -199,7 +199,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     const countQ = await pool.query(
       `SELECT COUNT(*)
        FROM crm_partners p
-       LEFT JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        ${whereSql}`,
       params
@@ -221,7 +221,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false)::int AS new_email_count,
               (SELECT MAX(updated_at) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false) AS last_reply_at
        FROM crm_partners p
-       LEFT JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN users u ON u.id = p.manager_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        ${whereSql}
@@ -318,7 +318,7 @@ router.get("/group-names", requireAuth, crmAuth, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT DISTINCT COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name
        FROM crm_partners p
-       LEFT JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        WHERE COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) IS NOT NULL
          AND p.status != 'onboarding'
@@ -389,7 +389,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               u.display_name AS manager_name,
               COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name
        FROM crm_partners p
-       LEFT JOIN dwh."Partner" dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN users u ON u.id = p.manager_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        WHERE p.id = $1`,

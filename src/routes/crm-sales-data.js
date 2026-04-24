@@ -1,7 +1,7 @@
 'use strict';
 // src/routes/crm-sales-data.js
 //
-// Dane sprzedażowe czytane wyłącznie z dwh."Sales" (read-only, DWH → CRM).
+// Dane sprzedażowe czytane wyłącznie z dwh.sales (read-only, DWH → CRM).
 // Import CSV usunięty — dane zasilane tylko przez DWH.
 //
 // GET  /api/crm/sales-data                 – surowe wiersze
@@ -53,9 +53,9 @@ router.get('/partners', requireAuth, crmAuth, async (req, res, next) => {
          p.id                                 AS partner_id,
          s.partner_id                         AS dwh_partner_id,
          u.display_name                       AS salesperson_name
-       FROM dwh."Sales" s
+       FROM dwh.sales s
        LEFT JOIN crm_partners p ON p.dwh_partner_id = s.partner_id
-       LEFT JOIN dwh."Partner" dm ON dm.partner_id = s.partner_id
+       LEFT JOIN dwh.partner dm ON dm.partner_id = s.partner_id
        LEFT JOIN users u ON u.id = p.manager_id
        ORDER BY partner_name`
     );
@@ -78,7 +78,7 @@ router.get('/summary', requireAuth, crmAuth, async (req, res, next) => {
     const { rows } = await db.query(
       `SELECT TO_CHAR(s.sale_date, 'YYYY-MM') AS period,
               ${DWH_FIN_SELECT}
-       FROM dwh."Sales" s
+       FROM dwh.sales s
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        GROUP BY TO_CHAR(s.sale_date, 'YYYY-MM')
        ORDER BY period DESC
@@ -116,9 +116,9 @@ router.get('/by-partner', requireAuth, crmAuth, async (req, res, next) => {
          u.display_name AS salesperson_name,
          u.id           AS salesperson_id,
          ${DWH_FIN_SELECT}
-       FROM dwh."Sales" s
+       FROM dwh.sales s
        ${DWH_JOIN_PARTNERS}
-       LEFT JOIN dwh."Partner" dm ON dm.partner_id = s.partner_id
+       LEFT JOIN dwh.partner dm ON dm.partner_id = s.partner_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        GROUP BY p.company, COALESCE(dm.company_name, dm.name), p.id, s.partner_id, u.display_name, u.id
        ORDER BY SUM(s.gross_sales_value_pln) DESC`,
@@ -152,7 +152,7 @@ router.get('/by-salesperson', requireAuth, crmAuth, async (req, res, next) => {
          u.id AS salesperson_id,
          COUNT(DISTINCT s.partner_id)::int              AS partners_count,
          ${DWH_FIN_SELECT}
-       FROM dwh."Sales" s
+       FROM dwh.sales s
        ${DWH_JOIN_PARTNERS}
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        GROUP BY u.display_name, u.id
@@ -176,7 +176,7 @@ router.get('/by-product', requireAuth, crmAuth, async (req, res, next) => {
 
     const { rows } = await db.query(
       `SELECT s.service_category AS product_type, ${DWH_FIN_SELECT}
-       FROM dwh."Sales" s
+       FROM dwh.sales s
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        GROUP BY s.service_category
        ORDER BY SUM(s.gross_sales_value_pln) DESC`,
@@ -214,9 +214,9 @@ router.get('/', requireAuth, crmAuth, async (req, res, next) => {
          p.id           AS partner_id,
          u.display_name AS salesperson_name,
          u.id           AS salesperson_id
-       FROM dwh."Sales" s
+       FROM dwh.sales s
        ${DWH_JOIN_PARTNERS}
-       LEFT JOIN dwh."Partner" dm ON dm.partner_id = s.partner_id
+       LEFT JOIN dwh.partner dm ON dm.partner_id = s.partner_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY s.sale_date DESC, s.partner_id, s.service_category
        LIMIT $${params.length}`,
@@ -249,7 +249,7 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
     }
 
     const base = buildConditions();
-    const JOIN = `${DWH_JOIN_PARTNERS} LEFT JOIN dwh."Partner" dm ON dm.partner_id = s.partner_id`;
+    const JOIN = `${DWH_JOIN_PARTNERS} LEFT JOIN dwh.partner dm ON dm.partner_id = s.partner_id`;
 
     const FIN = `
       SUM(s.gross_sales_value_pln)::numeric(14,2)  AS gross_turnover_pln,
@@ -267,7 +267,7 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
           ROUND(100.0 * SUM(s.gross_margin_value_pln) / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS margin_pct,
           ROUND(100.0 * SUM(s.gross_fee_value_pln)    / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS fee_rate_pct,
           COUNT(DISTINCT s.partner_id)::int AS partners_count
-        FROM dwh."Sales" s ${JOIN}
+        FROM dwh.sales s ${JOIN}
         ${base.where}
       `, base.params),
 
@@ -278,7 +278,7 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
                SUM(s.net_sales_value_pln)::numeric(14,2)    AS net_turnover_pln,
                SUM(s.gross_margin_value_pln)::numeric(14,2) AS revenue_pln,
                SUM(s.number_of_products)::int               AS transactions_count
-        FROM dwh."Sales" s ${JOIN}
+        FROM dwh.sales s ${JOIN}
         ${base.where}
         GROUP BY TO_CHAR(s.sale_date, 'YYYY-MM')
         ORDER BY period ASC
@@ -291,7 +291,7 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
                s.partner_id AS dwh_partner_id,
                u.display_name AS salesperson_name, u.id AS salesperson_id,
                ${FIN}
-        FROM dwh."Sales" s ${JOIN}
+        FROM dwh.sales s ${JOIN}
         ${base.where}
         GROUP BY p.company, COALESCE(dm.company_name, dm.name), p.id, s.partner_id, u.display_name, u.id
         ORDER BY SUM(s.gross_sales_value_pln) DESC
@@ -300,7 +300,7 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
       // Per kategoria (product_type)
       db.query(`
         SELECT s.service_category AS product_type, ${FIN}
-        FROM dwh."Sales" s ${JOIN}
+        FROM dwh.sales s ${JOIN}
         ${base.where}
         GROUP BY s.service_category
         ORDER BY SUM(s.gross_sales_value_pln) DESC
@@ -313,7 +313,7 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
                    u.id AS salesperson_id,
                    COUNT(DISTINCT s.partner_id)::int AS partners_count,
                    ${FIN}
-            FROM dwh."Sales" s ${JOIN}
+            FROM dwh.sales s ${JOIN}
             ${base.where}
             GROUP BY u.display_name, u.id
             ORDER BY SUM(s.gross_sales_value_pln) DESC
@@ -344,7 +344,7 @@ router.get('/report', requireAuth, crmAuth, async (req, res, next) => {
       const prevRes = await db.query(`
         SELECT ${FIN},
           ROUND(100.0 * SUM(s.gross_margin_value_pln) / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS margin_pct
-        FROM dwh."Sales" s ${JOIN}
+        FROM dwh.sales s ${JOIN}
         ${prevWhere}
       `, prevP);
       prevKpi = prevRes.rows[0] || null;
