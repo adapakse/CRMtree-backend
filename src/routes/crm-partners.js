@@ -162,6 +162,9 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     const params = [];
     const where  = [];
 
+    // Pomijaj partnerów bez sensownej nazwy — wymagane co najmniej 2 litery
+    where.push(`LENGTH(REGEXP_REPLACE(COALESCE(p.company, dm.company_name, dm.name, ''), '[^a-zA-ZąćęłńóśźżĄĆĘŁŃÓŚŹŻ]', '', 'g')) >= 2`);
+
     if (search) {
       params.push(`%${search}%`);
       where.push(`(COALESCE(p.company, dm.company_name, dm.name) ILIKE $${params.length} OR p.email ILIKE $${params.length} OR COALESCE(p.nip, dm.tax_numbers::text) ILIKE $${params.length} OR p.contact_name ILIKE $${params.length} OR p.phone ILIKE $${params.length})`);
