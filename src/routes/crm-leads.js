@@ -1605,20 +1605,71 @@ router.post('/:id/migrate',
       try { assertOwnership(lead, req, 'assigned_to'); }
       catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
 
-      if (lead.converted_at) return res.status(409).json({ error: 'Lead już onboardowany' });
+      if (lead.converted_at) return res.status(409).json({ error: 'Lead już jest w onboardingu' });
 
+      const { contract_value, contract_signed } = req.body;
+
+      // Utwórz rekord partnera w statusie 'onboarding'
+      const partnerIns = await db.query(
+        `INSERT INTO crm_partners (company, nip, lead_id, status, onboarding_step, contract_value, contract_signed, created_at, updated_at)
+         VALUES ($1, $2, $3, 'onboarding', 0, $4, $5, now(), now())
+         ON CONFLICT DO NOTHING
+         RETURNING id, company`,
+        [lead.company, lead.nip || null, lead.id, contract_value || null, contract_signed || null]
+      );
+      if (!partnerIns.rows.length) return res.status(409).json({ error: 'Partner już istnieje dla tego leada' });
+      const partner = partnerIns.rows[0];
+
+      // ── Automatyczne zadania standardowe z AppSettings ────────────────────────
+      try {
+        const { rows: settingsRows } = await db.query(
+          `SELECT value FROM app_settings WHERE key = 'onboarding_task_templates'`
+        );
+        if (settingsRows.length && settingsRows[0].value) {
+          const templates  = JSON.parse(settingsRows[0].value);
+          const createdAt  = new Date();
+          const handlowiec = lead.assigned_to; // Krok 0 zawsze idzie do handlowca
+
+          for (const tpl of templates) {
+            if (!tpl.standard) continue;
+
+            let dueDate = null;
+            if (tpl.days != null && tpl.days >= 0) {
+              const d = new Date(createdAt);
+              d.setDate(d.getDate() + parseInt(tpl.days));
+              dueDate = d.toISOString().slice(0, 10);
+            }
+
+            const assignedTo = tpl.step === 0
+              ? (handlowiec || null)
+              : (tpl.assignee || null);
+
+            await db.query(
+              `INSERT INTO crm_onboarding_tasks
+                 (partner_id, step, title, type, assigned_to, due_date, due_time, created_by)
+               VALUES ($1,$2,$3,$4,$5,$6,'09:00',$7)`,
+              [partner.id, tpl.step, tpl.title, tpl.type || 'task', assignedTo, dueDate, req.user.id]
+            );
+          }
+        }
+      } catch (tplErr) {
+        const logger = require('../utils/logger');
+        logger.warn('Błąd tworzenia zadań z szablonów onboarding', { error: tplErr.message });
+      }
+
+      // Zaktualizuj leada: stage='onboarding', converted_at=now()
       await db.query(
-        `UPDATE crm_leads SET converted_at=now(), stage='onboarded', updated_at=now() WHERE id=$1`, [id]
+        `UPDATE crm_leads SET converted_at=now(), stage='onboarding', updated_at=now() WHERE id=$1`, [id]
       );
 
       await audit.log({
         user:      req.user,
-        action:    'crm_lead_onboarded',
-        afterState: { lead_id: id, company: lead.company },
+        action:    'crm_lead_converted',
+        afterState: { lead_id: id, company: lead.company, partner_id: partner.id },
         ipAddress: req.auditContext?.ipAddress,
       });
 
-      res.status(200).json({ lead_id: id, stage: 'onboarded' });
+      res.status(200).json({ lead_id: id, partner_id: partner.id, company: partner.company, stage: 'onboarding' });
     } catch (err) { next(err); }
   }
 );
