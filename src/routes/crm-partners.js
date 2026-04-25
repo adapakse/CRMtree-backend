@@ -70,7 +70,7 @@ router.get("/onboarding", requireAuth, crmAuth, async (req, res) => {
     const { rows: partners } = await pool.query(`
       SELECT p.id,
              COALESCE(COALESCE(dm.company_name, dm.name), p.company) AS company,
-             COALESCE(dm.tax_numbers, p.nip) AS nip,
+             COALESCE(dm.tax_numbers::text, p.nip) AS nip,
              p.onboarding_step, p.status,
              p.created_at, p.manager_id,
              p.dwh_partner_id,
@@ -164,7 +164,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
 
     if (search) {
       params.push(`%${search}%`);
-      where.push(`(COALESCE(p.company, dm.company_name, dm.name) ILIKE $${params.length} OR p.email ILIKE $${params.length} OR COALESCE(p.nip, dm.tax_numbers) ILIKE $${params.length} OR p.contact_name ILIKE $${params.length} OR p.phone ILIKE $${params.length})`);
+      where.push(`(COALESCE(p.company, dm.company_name, dm.name) ILIKE $${params.length} OR p.email ILIKE $${params.length} OR COALESCE(p.nip, dm.tax_numbers::text) ILIKE $${params.length} OR p.contact_name ILIKE $${params.length} OR p.phone ILIKE $${params.length})`);
     }
     if (status) {
       params.push(status);
@@ -350,10 +350,15 @@ async function ensureCrmPartner(dwhPartnerId, pool) {
   if (byDwh.rows.length) return byDwh.rows[0].id;
 
   // 2. Szukaj po bezpośrednim crm_partners.id (partnerzy onboardingowi bez DWH)
-  const direct = await pool.query(
-    `SELECT id FROM crm_partners WHERE id = $1`, [dwhPartnerId]
-  );
-  if (direct.rows.length) return direct.rows[0].id;
+  // Owinięte w try/catch bo na serwerze crm_partners.id jest UUID — porównanie z int rzuca błąd
+  try {
+    const direct = await pool.query(
+      `SELECT id FROM crm_partners WHERE id = $1`, [dwhPartnerId]
+    );
+    if (direct.rows.length) return direct.rows[0].id;
+  } catch (e) {
+    // Type mismatch (uuid = integer) — pomiń
+  }
 
   // 3. Spróbuj lazy-create z DWH
   const dm = await pool.query(
@@ -417,7 +422,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               (p.billing_city IS NULL AND dm.town IS NOT NULL)                   AS billing_city_from_dwh,
               COALESCE(p.billing_country, dm.billing_country)                    AS billing_country,
               (p.billing_country IS NULL AND dm.billing_country IS NOT NULL)     AS billing_country_from_dwh,
-              COALESCE(p.billing_email_address, dm.emails)                       AS billing_email_address,
+              COALESCE(p.billing_email_address, dm.emails::text)                  AS billing_email_address,
               (p.billing_email_address IS NULL AND dm.emails IS NOT NULL)        AS billing_email_address_from_dwh,
               p.admin_first_name,
               false AS admin_first_name_from_dwh,
