@@ -98,6 +98,100 @@ router.get("/status", requireAuth, async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// GOOGLE DRIVE PICKER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/crm/gmail/drive-config — zwraca API key + clientId dla Pickera (browser-side)
+router.get("/drive-config", requireAuth, (req, res) => {
+  const { clientId, apiKey } = config.google;
+  if (!apiKey || !clientId) {
+    return res.status(503).json({ error: "Drive Picker nie jest skonfigurowany (brak GOOGLE_API_KEY)" });
+  }
+  // appId = numeryczny prefix clientId (przed myślnikiem)
+  const appId = clientId.split("-")[0];
+  res.json({ apiKey, clientId, appId });
+});
+
+// GET /api/crm/gmail/drive-token — zwraca świeży access_token; wykrywa brak scope drive.readonly
+router.get("/drive-token", requireAuth, async (req, res) => {
+  try {
+    const oauth2 = await gmailService.getAuthForUser(req.user.id);
+    const { token } = await oauth2.getAccessToken();
+
+    // Sprawdź scope przez tokeninfo — nie wymaga włączonego Drive API
+    const infoRes  = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`);
+    const infoJson = await infoRes.json();
+    const scopes   = (infoJson.scope || '').split(' ');
+    const hasDrive = scopes.some(s => s.includes('drive'));
+
+    if (!hasDrive) return res.json({ needsReauth: true });
+
+    res.json({ access_token: token });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Mapowanie Google Workspace → format eksportu (PDF jako domyślny dla maili)
+const GAPPS_EXPORT = {
+  "application/vnd.google-apps.document":     { mime: "application/pdf", ext: ".pdf" },
+  "application/vnd.google-apps.spreadsheet":  { mime: "application/pdf", ext: ".pdf" },
+  "application/vnd.google-apps.presentation": { mime: "application/pdf", ext: ".pdf" },
+  "application/vnd.google-apps.drawing":      { mime: "application/pdf", ext: ".pdf" },
+};
+
+// GET /api/crm/gmail/drive/file/:fileId — proxy pobierania pliku z Drive
+router.get("/drive/file/:fileId", requireAuth, async (req, res) => {
+  try {
+    const { google: googleapis } = require("googleapis");
+    const oauth2 = await gmailService.getAuthForUser(req.user.id);
+    const drive  = googleapis.drive({ version: "v3", auth: oauth2 });
+
+    // Pobierz metadane
+    const meta = await drive.files.get({
+      fileId: req.params.fileId,
+      fields: "name,mimeType",
+      supportsAllDrives: true,
+    });
+
+    const srcMime  = meta.data.mimeType || "application/octet-stream";
+    const baseName = meta.data.name     || "plik";
+    const exportCfg = GAPPS_EXPORT[srcMime];
+
+    let fileStream, outMime, filename;
+
+    if (exportCfg) {
+      // Plik Google Workspace — eksportuj do PDF
+      const expRes = await drive.files.export(
+        { fileId: req.params.fileId, mimeType: exportCfg.mime },
+        { responseType: "stream" }
+      );
+      fileStream = expRes.data;
+      outMime    = exportCfg.mime;
+      filename   = baseName.endsWith(exportCfg.ext) ? baseName : baseName + exportCfg.ext;
+    } else {
+      // Zwykły plik — pobierz binarnie
+      const dlRes = await drive.files.get(
+        { fileId: req.params.fileId, alt: "media", supportsAllDrives: true },
+        { responseType: "stream" }
+      );
+      fileStream = dlRes.data;
+      outMime    = srcMime;
+      filename   = baseName;
+    }
+
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader("Content-Type", outMime);
+    fileStream.pipe(res);
+  } catch (err) {
+    const status = err.code || err.status;
+    const msg    = err.errors?.[0]?.message || err.message || "Nieznany błąd";
+    console.error(`[Drive] download error (${status}):`, msg);
+    res.status(500).json({ error: `Nie udało się pobrać pliku z Google Drive: ${msg}` });
+  }
+});
+
 router.delete("/oauth/disconnect", requireAuth, async (req, res) => {
   try {
     await gmailService.disconnect(req.user.id);
@@ -299,22 +393,40 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
       );
       const outIds = new Set(outRows.map(r => r.gmail_message_id));
 
-      // Stan przeczytania dla wiadomości przychodzących z dedykowanej tabeli
+      // Wiadomości przychodzące — oznacz istniejące rekordy jako przeczytane.
+      // Tylko UPDATE, nie INSERT — INSERT jest wyłącznie odpowiedzialnością processNotification.
+      // Gdybyśmy tu insertowali, processNotification uznałby wiadomość za "już przetworzoną" i nie
+      // ustawiłby is_read=false → badge nigdy by nie pokazał.
+      const incomingIds = msgIds.filter(id => !outIds.has(id));
+      if (incomingIds.length) {
+        pool.query(
+          `UPDATE crm_email_message_reads SET is_read = true, updated_at = NOW()
+           WHERE gmail_message_id = ANY($1)`,
+          [incomingIds],
+        ).catch(e => console.warn("[Gmail] auto-mark read failed:", e.message));
+        // Oznacz aktywność wątku jako przeczytaną (jeśli była nieprzeczytana)
+        pool.query(
+          `UPDATE crm_lead_activities SET is_read = true, updated_at = NOW()
+           WHERE lead_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false`,
+          [leadId, req.params.threadId],
+        ).catch(e => console.warn("[Gmail] mark thread activity read failed:", e.message));
+      }
+
+      // Pobierz aktualny stan is_read z bazy (po UPDATE powyżej)
       const { rows: readRows } = await pool.query(
-        `SELECT gmail_message_id, is_read FROM crm_email_message_reads
-         WHERE gmail_message_id = ANY($1)`,
+        `SELECT gmail_message_id, is_read FROM crm_email_message_reads WHERE gmail_message_id = ANY($1)`,
         [msgIds],
       );
       const readMap = Object.fromEntries(readRows.map(r => [r.gmail_message_id, r.is_read]));
 
       for (const msg of messages) {
         if (outIds.has(msg.id)) {
-          // Wiadomość wychodząca — zawsze przeczytana
           msg.is_read    = true;
-          msg.created_by = 'outgoing';   // sygnał dla frontendu
+          msg.created_by = 'outgoing';
           msg.activity_id = outRows.find(r => r.gmail_message_id === msg.id)?.activity_id ?? null;
         } else {
-          // Wiadomość przychodząca — stan z crm_email_message_reads (brak = nieprzeczytana)
+          // Jeśli nie ma wiersza w crm_email_message_reads — wiadomość nie była jeszcze
+          // przetworzona przez processNotification, traktujemy jako nieprzeczytaną wizualnie.
           msg.is_read    = readMap[msg.id] ?? false;
           msg.created_by = null;
           msg.activity_id = null;
@@ -362,9 +474,23 @@ router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (
       );
       const outIds = new Set(outRows.map(r => r.gmail_message_id));
 
+      // Wiadomości przychodzące — tylko UPDATE istniejących rekordów (nie INSERT).
+      const incomingIds = msgIds.filter(id => !outIds.has(id));
+      if (incomingIds.length) {
+        pool.query(
+          `UPDATE crm_email_message_reads SET is_read = true, updated_at = NOW()
+           WHERE gmail_message_id = ANY($1)`,
+          [incomingIds],
+        ).catch(e => console.warn("[Gmail] auto-mark read failed:", e.message));
+        pool.query(
+          `UPDATE crm_partner_activities SET is_read = true, updated_at = NOW()
+           WHERE partner_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false`,
+          [partnerId, req.params.threadId],
+        ).catch(e => console.warn("[Gmail] mark partner thread activity read failed:", e.message));
+      }
+
       const { rows: readRows } = await pool.query(
-        `SELECT gmail_message_id, is_read FROM crm_email_message_reads
-         WHERE gmail_message_id = ANY($1)`,
+        `SELECT gmail_message_id, is_read FROM crm_email_message_reads WHERE gmail_message_id = ANY($1)`,
         [msgIds],
       );
       const readMap = Object.fromEntries(readRows.map(r => [r.gmail_message_id, r.is_read]));

@@ -295,13 +295,13 @@ router.get('/contact-suggestions', async (req, res, next) => {
       lead.forEach(l => { if (l.email && !suggestions.find(s => s.email === l.email)) suggestions.push({ email: l.email, name: l.name || l.email }); });
     }
 
-    // Emaile kontaktów z partnera
+    // Emaile kontaktów z partnera — partner_id to dwh_partner_id (integer) lub UUID
     if (partner_id) {
-      const { rows: partner } = await db.query(
-        `SELECT contact_name, email, billing_contact_name, billing_email
-         FROM crm_partners WHERE id=$1`,
-        [parseInt(partner_id)]
-      );
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const partnerQ = UUID_RE.test(String(partner_id))
+        ? await db.query(`SELECT contact_name, email, billing_contact_name, billing_email FROM crm_partners WHERE id=$1`, [partner_id])
+        : await db.query(`SELECT contact_name, email, billing_contact_name, billing_email FROM crm_partners WHERE dwh_partner_id=$1`, [parseInt(partner_id)]);
+      const { rows: partner } = partnerQ;
       if (partner[0]) {
         const p = partner[0];
         if (p.email && !suggestions.find(s => s.email === p.email))
@@ -1609,13 +1609,55 @@ router.post('/:id/migrate',
 
       const { contract_value, contract_signed } = req.body;
 
-      // Utwórz rekord partnera w statusie 'onboarding'
+      // Dane z konta testowego (jeśli istnieje i zostało pomyślnie założone)
+      const { rows: taRows } = await db.query(
+        `SELECT * FROM crm_lead_test_accounts
+         WHERE lead_id = $1 AND status = 'created' AND htcd_partner_id IS NOT NULL
+         LIMIT 1`,
+        [id]
+      );
+      const ta = taRows[0] || null;
+
+      // Subdomena musi pasować do ^[a-z0-9]{3,30}$ — sanityzujemy (lowercase, tylko [a-z0-9])
+      const rawSubdomain = ta?.subdomain || null;
+      const safeSubdomain = rawSubdomain
+        ? (() => {
+            const s = rawSubdomain.toLowerCase().replace(/[^a-z0-9]/g, '');
+            return s.length >= 3 && s.length <= 30 ? s : null;
+          })()
+        : null;
+
+      // Utwórz rekord partnera w statusie 'onboarding' z pełnymi danymi
       const partnerIns = await db.query(
-        `INSERT INTO crm_partners (company, nip, lead_id, status, onboarding_step, contract_value, contract_signed, created_at, updated_at)
-         VALUES ($1, $2, $3, 'onboarding', 0, $4, $5, now(), now())
+        `INSERT INTO crm_partners (
+           company, nip, lead_id, status, onboarding_step,
+           contract_value, contract_signed,
+           dwh_partner_id,
+           subdomain, language, partner_currency, country,
+           billing_address, billing_zip, billing_city, billing_country, billing_email_address,
+           admin_first_name, admin_last_name, admin_email,
+           created_at, updated_at
+         )
+         VALUES ($1,$2,$3,'onboarding',0,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now(),now())
          ON CONFLICT DO NOTHING
          RETURNING id, company`,
-        [lead.company, lead.nip || null, lead.id, contract_value || null, contract_signed || null]
+        [
+          lead.company, lead.nip || null, lead.id,
+          contract_value || null, contract_signed || null,
+          ta?.htcd_partner_id || null,
+          safeSubdomain,
+          ta?.language         || null,
+          ta?.partner_currency || null,
+          ta?.country          || null,
+          ta?.billing_address  || null,
+          ta?.billing_zip      || null,
+          ta?.billing_city     || null,
+          ta?.billing_country  || null,
+          ta?.billing_email_address || null,
+          ta?.admin_first_name || null,
+          ta?.admin_last_name  || null,
+          ta?.admin_email      || null,
+        ]
       );
       if (!partnerIns.rows.length) return res.status(409).json({ error: 'Partner już istnieje dla tego leada' });
       const partner = partnerIns.rows[0];
@@ -1654,7 +1696,70 @@ router.post('/:id/migrate',
         }
       } catch (tplErr) {
         const logger = require('../utils/logger');
-        logger.warn('Błąd tworzenia zadań z szablonów onboarding', { error: tplErr.message });
+        logger.error('Błąd tworzenia zadań z szablonów onboarding', { error: tplErr.message });
+      }
+
+      // ── Przenieś kontakty z leada ─────────────────────────────────────────────
+      try {
+        await db.query(
+          `INSERT INTO crm_partner_contacts (partner_id, contact_name, contact_title, email, phone, created_at)
+           SELECT $1, contact_name, contact_title, email, phone, NOW()
+           FROM crm_lead_contacts
+           WHERE lead_id = $2`,
+          [partner.id, id]
+        );
+      } catch (e) {
+        const logger = require('../utils/logger');
+        logger.error('Błąd kopiowania kontaktów leada do partnera', { error: e.message });
+      }
+
+      // ── Przenieś dokumenty z leada ────────────────────────────────────────────
+      try {
+        await db.query(
+          `INSERT INTO crm_partner_documents (partner_id, document_id, doc_role, linked_by, linked_at)
+           SELECT $1, document_id, doc_role, linked_by, linked_at
+           FROM crm_lead_documents
+           WHERE lead_id = $2
+           ON CONFLICT (partner_id, document_id) DO NOTHING`,
+          [partner.id, id]
+        );
+      } catch (e) {
+        const logger = require('../utils/logger');
+        logger.error('Błąd kopiowania dokumentów leada do partnera', { error: e.message });
+      }
+
+      // ── Przenieś aktywności z leada ───────────────────────────────────────────
+      try {
+        await db.query(
+          `INSERT INTO crm_partner_activities
+             (partner_id, type, title, body, activity_at, duration_min, participants, doc_id,
+              created_by, created_at, updated_at, meeting_location,
+              gmail_thread_id, gmail_message_id, status, close_comment, assigned_to, is_read)
+           SELECT $1, type, title, body, activity_at, duration_min, participants, doc_id,
+                  created_by, created_at, updated_at, meeting_location,
+                  gmail_thread_id, gmail_message_id, status, close_comment, assigned_to, is_read
+           FROM crm_lead_activities
+           WHERE lead_id = $2`,
+          [partner.id, id]
+        );
+      } catch (e) {
+        const logger = require('../utils/logger');
+        logger.error('Błąd kopiowania aktywności leada do partnera', { error: e.message });
+      }
+
+      // ── Kontakt admina z konta testowego ──────────────────────────────────────
+      if (ta && (ta.admin_first_name || ta.admin_last_name || ta.admin_email)) {
+        try {
+          const adminName = [ta.admin_first_name, ta.admin_last_name].filter(Boolean).join(' ') || null;
+          await db.query(
+            `INSERT INTO crm_partner_contacts (partner_id, contact_name, contact_title, email, created_at)
+             VALUES ($1, $2, 'Administrator konta', $3, NOW())`,
+            [partner.id, adminName, ta.admin_email || null]
+          );
+        } catch (e) {
+          const logger = require('../utils/logger');
+          logger.error('Błąd dodawania kontaktu admina z konta testowego', { error: e.message });
+        }
       }
 
       // Zaktualizuj leada: stage='onboarding', converted_at=now()

@@ -95,6 +95,7 @@ function getAuthUrl(userId) {
       "https://www.googleapis.com/auth/gmail.send",
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://mail.google.com/",
+      "https://www.googleapis.com/auth/drive.readonly",
     ],
   });
 }
@@ -367,6 +368,13 @@ async function getCurrentHistoryId(userId) {
   return String(res.data.historyId);
 }
 
+// ── Zwraca świeży access_token dla Drive API ──────────────────────────────────
+async function getFreshAccessToken(userId) {
+  const oauth2 = await getAuthForUser(userId);
+  const { token } = await oauth2.getAccessToken();
+  return token;
+}
+
 module.exports = {
   getAuthUrl,
   parseOAuthState,
@@ -382,4 +390,5 @@ module.exports = {
   getNewMessages,
   renewAllWatches,
   getCurrentHistoryId,
+  getFreshAccessToken,
 };

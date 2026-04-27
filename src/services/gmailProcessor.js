@@ -141,19 +141,20 @@ async function processNotification(emailAddress, historyId) {
       const recordId = leadId || partnerId;
 
       // Sprawdź czy wiadomość już przetworzona (w tabeli message_reads)
-      // Jeśli tabela nie istnieje (migracja nie uruchomiona), zakładamy nie-przetworzoną
+      // Pominięcie tylko gdy wiersz istnieje i is_read=false (badge już ustawiony)
+      // Wiersz z is_read=true (stary błąd) traktujemy jak nieistniejący — przetwarzamy ponownie
       let alreadyProcessed = false;
       try {
         const existing = await pool.query(
-          `SELECT 1 FROM crm_email_message_reads WHERE gmail_message_id = $1`,
+          `SELECT is_read FROM crm_email_message_reads WHERE gmail_message_id = $1`,
           [msg.id],
         );
-        alreadyProcessed = existing.rows.length > 0;
+        alreadyProcessed = existing.rows.length > 0 && existing.rows[0].is_read === false;
       } catch (dupCheckErr) {
         console.warn(`[GmailProcessor] crm_email_message_reads niedostępna (brak migracji?): ${dupCheckErr.message}`);
       }
       if (alreadyProcessed) {
-        console.log(`[GmailProcessor] Wiadomość ${msg.id} już przetworzona — pominięto`);
+        console.log(`[GmailProcessor] Wiadomość ${msg.id} już przetworzona (is_read=false) — pominięto`);
         continue;
       }
 
@@ -166,15 +167,17 @@ async function processNotification(emailAddress, historyId) {
       );
       console.log(`[GmailProcessor] UPDATE aktywności wątku: ${updateRes.rowCount} wierszy (recordId=${recordId})`);
 
-      // Zarejestruj wiadomość jako nieprzeczytaną
+      // Zarejestruj wiadomość jako nieprzeczytaną (z gmail_thread_id dla zliczania na poziomie wiadomości)
       try {
         await pool.query(
-          `INSERT INTO crm_email_message_reads (gmail_message_id, is_read)
-           VALUES ($1, false)
-           ON CONFLICT (gmail_message_id) DO NOTHING`,
-          [msg.id],
+          `INSERT INTO crm_email_message_reads (gmail_message_id, gmail_thread_id, is_read)
+           VALUES ($1, $2, false)
+           ON CONFLICT (gmail_message_id) DO UPDATE
+             SET is_read = false, gmail_thread_id = EXCLUDED.gmail_thread_id
+             WHERE crm_email_message_reads.is_read = true`,
+          [msg.id, msg.threadId],
         );
-        console.log(`[GmailProcessor] INSERT crm_email_message_reads: msgId=${msg.id}`);
+        console.log(`[GmailProcessor] INSERT crm_email_message_reads: msgId=${msg.id} threadId=${msg.threadId}`);
       } catch (insertErr) {
         console.error(`[GmailProcessor] INSERT crm_email_message_reads FAILED (msgId=${msg.id}): ${insertErr.message}`);
       }

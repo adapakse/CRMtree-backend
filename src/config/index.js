@@ -85,6 +85,9 @@ module.exports = {
     ),
     sendInDev: optional("GOOGLE_SEND_IN_DEV", "false") === "true",
 
+    // API key (Drive Picker widget)
+    apiKey: optional("GOOGLE_API_KEY"),
+
     // [B] OAuth2 per-user
     clientId:    optional("GOOGLE_CLIENT_ID"),
     clientSecret: optional("GOOGLE_CLIENT_SECRET"),
