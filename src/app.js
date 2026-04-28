@@ -40,6 +40,13 @@ require('./middleware/auth');
 
 const app = express();
 
+// ─── Trust proxy ──────────────────────────────────────────
+// App stoi za reverse proxy (Azure App Service / App Gateway / nginx).
+// Bez tego req.ip zwraca IP proxy, przez co rate limiter widzi wszystkich
+// userow jako jednego klienta i blokuje cala aplikacje po dobiciu limitu.
+// '1' = ufamy jednemu hopowi proxy. Zwiekszyc, jesli warstw proxy jest wiecej.
+app.set('trust proxy', 2);
+
 // ─── Security headers ─────────────────────────────────────
 app.use(helmet({
   crossOriginEmbedderPolicy: false,
@@ -67,13 +74,20 @@ app.use(cors({
 }));
 
 // ─── Rate limiter ─────────────────────────────────────────
+// Uwaga: req.path jest wzgledem mountpointa ('/api/'), wiec '/auth/saml'
+// zamiast '/api/auth/saml'. Webhook signing tez wylaczamy, bo zewnetrzne
+// serwisy potrafia retry'owac w seriach i niepotrzebnie zjadaja limit.
 app.use('/api/', rateLimit({
   windowMs: config.rateLimit.windowMs,
   max:      config.rateLimit.max,
   standardHeaders: true,
   legacyHeaders:   false,
   message: { error: 'Too many requests, please try again later.' },
-  skip: (req) => config.isDev,
+  skip: (req) => (
+    config.isDev ||
+    req.path.startsWith('/auth/') ||
+    req.path === '/signing/webhook'
+  ),
 }));
 
 // ─── Request parsing ──────────────────────────────────────
