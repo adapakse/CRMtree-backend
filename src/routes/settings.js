@@ -122,6 +122,48 @@ router.put(
 );
 
 
+// ─── POST /api/admin/settings/tooltips ───────────────────────────────────────
+// Upsert tooltip (create or update). Admin only.
+// Body: { key, label, value }
+router.post("/tooltips", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { key, label, value } = req.body;
+    if (!key?.trim())   return res.status(400).json({ error: "'key' jest wymagany" });
+    if (!value?.trim()) return res.status(400).json({ error: "'value' (treść tooltip) jest wymagana" });
+
+    await db.query(
+      `INSERT INTO app_settings (key, value, label, description, value_type, category, updated_by, updated_at)
+       VALUES ($1, $2, $3, '', 'string', 'tooltip', $4, now())
+       ON CONFLICT (key) DO UPDATE
+         SET value = EXCLUDED.value, label = EXCLUDED.label,
+             updated_by = EXCLUDED.updated_by, updated_at = now()`,
+      [key.trim(), value.trim(), label?.trim() || key.trim(), req.user?.id || null]
+    );
+
+    const { rows } = await db.query(
+      `SELECT key, value, label, description, value_type, category,
+              s.updated_at, u.display_name AS updated_by_name
+       FROM app_settings s LEFT JOIN users u ON u.id = s.updated_by
+       WHERE s.key = $1`,
+      [key.trim()]
+    );
+    res.status(200).json(rows[0]);
+  } catch (err) { next(err); }
+});
+
+// ─── DELETE /api/admin/settings/tooltips/:key ─────────────────────────────────
+// Usuwa tooltip. Admin only.
+router.delete("/tooltips/:key", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { rowCount } = await db.query(
+      `DELETE FROM app_settings WHERE key = $1 AND category = 'tooltip'`,
+      [req.params.key]
+    );
+    if (!rowCount) return res.status(404).json({ error: "Tooltip nie znaleziony" });
+    res.status(204).end();
+  } catch (err) { next(err); }
+});
+
 // ─── GET /api/admin/settings/groups ──────────────────────────────────────────
 // Lista grup użytkowników (group_profiles). Tylko admin.
 router.get("/groups", requireAuth, requireAdmin, async (req, res, next) => {

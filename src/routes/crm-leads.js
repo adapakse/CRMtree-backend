@@ -561,13 +561,73 @@ router.get('/report',
       const where    = conditions.length ? 'WHERE '    + conditions.join(' AND ') : '';
       const andWhere = conditions.length ? ' AND '     + conditions.join(' AND ') : '';
 
+      // Trend aktywnych leadów — data filtrowana po dacie kwalifikacji (q.qualified_at)
+      const trendParams = [];
+      const trendConds  = [];
+      if (req.user.is_admin) {
+        // brak ograniczeń
+      } else if (req.user.crm_role === 'sales_manager') {
+        if (!req.query.assigned_to) {
+          if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
+            trendParams.push(req.crmScopeUserIds);
+            trendConds.push(`l.assigned_to = ANY($${trendParams.length}::uuid[])`);
+          } else { trendConds.push('1=0'); }
+        }
+      } else {
+        trendParams.push(req.user.id);
+        trendConds.push(`l.assigned_to = $${trendParams.length}`);
+      }
+      if (req.query.date_from) {
+        trendParams.push(req.query.date_from);
+        trendConds.push(`DATE(q.qualified_at) >= $${trendParams.length}`);
+      }
+      if (req.query.date_to) {
+        trendParams.push(req.query.date_to);
+        trendConds.push(`DATE(q.qualified_at) <= $${trendParams.length}`);
+      }
+      if (req.query.assigned_to && req.isCrmManager) {
+        trendParams.push(req.query.assigned_to);
+        trendConds.push(`l.assigned_to = $${trendParams.length}`);
+      }
+      const trendWhere = trendConds.length ? 'WHERE ' + trendConds.join(' AND ') : '';
+
+      // Trend wygranych — data filtrowana po dacie przejścia w closed_won (won_at lub updated_at)
+      const wonTrendParams = [];
+      const wonTrendConds  = ['l.stage = \'closed_won\''];
+      if (req.user.is_admin) {
+        // brak ograniczeń
+      } else if (req.user.crm_role === 'sales_manager') {
+        if (!req.query.assigned_to) {
+          if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
+            wonTrendParams.push(req.crmScopeUserIds);
+            wonTrendConds.push(`l.assigned_to = ANY($${wonTrendParams.length}::uuid[])`);
+          } else { wonTrendConds.push('1=0'); }
+        }
+      } else {
+        wonTrendParams.push(req.user.id);
+        wonTrendConds.push(`l.assigned_to = $${wonTrendParams.length}`);
+      }
+      if (req.query.date_from) {
+        wonTrendParams.push(req.query.date_from);
+        wonTrendConds.push(`DATE(COALESCE(w.won_at, l.updated_at)) >= $${wonTrendParams.length}`);
+      }
+      if (req.query.date_to) {
+        wonTrendParams.push(req.query.date_to);
+        wonTrendConds.push(`DATE(COALESCE(w.won_at, l.updated_at)) <= $${wonTrendParams.length}`);
+      }
+      if (req.query.assigned_to && req.isCrmManager) {
+        wonTrendParams.push(req.query.assigned_to);
+        wonTrendConds.push(`l.assigned_to = $${wonTrendParams.length}`);
+      }
+      const wonTrendWhere = 'WHERE ' + wonTrendConds.join(' AND ');
+
       // Daty zamknięcia dla pipeline_in_period (pkt 9)
       // period_end = pełny koniec okresu (np. 31.03 dla Q1), nie przycięty do dziś
       const closeDateFrom = req.query.date_from  ? `'${req.query.date_from}'`  : 'NULL';
       const closeDateTo   = req.query.period_end ? `'${req.query.period_end}'`
                           : req.query.date_to    ? `'${req.query.date_to}'`    : 'NULL';
 
-      const [kpiRes, funnelRes, monthlyRes, byRepRes, bySourceRes, lostRes, velocityRes] = await Promise.all([
+      const [kpiRes, funnelRes, monthlyActiveRes, monthlyWonRes, byRepRes, bySourceRes, lostRes, velocityRes] = await Promise.all([
 
         // KPI zbiorcze — wartości przeliczane na PLN wg kursów walut
         db.query(`
@@ -580,8 +640,16 @@ router.get('/report',
             COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)                            AS won_value,
             ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
               NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
-            ROUND(AVG(EXTRACT(DAY FROM (l.updated_at - COALESCE(l.first_contact_date::timestamp, l.created_at))))
-              FILTER (WHERE l.stage IN ('closed_won','closed_lost')))::int                    AS avg_cycle_days,
+            ROUND(AVG(
+              EXTRACT(DAY FROM (l.updated_at - COALESCE(
+                (SELECT MIN(al.created_at)
+                 FROM audit_logs al
+                 WHERE al.metadata->>'lead_id' = l.id::text
+                   AND al.after_state->>'stage' = 'qualification'),
+                l.first_contact_date::timestamp,
+                l.created_at
+              )))
+            ) FILTER (WHERE l.stage = 'closed_won'))::int AS avg_cycle_days,
             -- pipeline_in_period: leady aktywne (kwalifikacja+) z close_date w wybranym przedziale
             COALESCE(SUM(${valPln}) FILTER (
               WHERE l.stage NOT IN ('new','closed_won','closed_lost')
@@ -605,18 +673,42 @@ router.get('/report',
             WHEN 'closed_lost' THEN 7 ELSE 8 END
         `, params),
 
-        // Trend miesięczny (12 ostatnich miesięcy)
+        // Trend aktywnych — grupowanie po dacie wejścia w Kwalifikację, tylko etapy aktywne
         db.query(`
-          SELECT TO_CHAR(l.created_at,'YYYY-MM') AS month,
-                 COUNT(*)::int                                                              AS new_leads,
-                 COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                       AS won,
-                 COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                      AS lost,
-                 COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2) AS won_value
-          FROM crm_leads l ${where}
+          SELECT TO_CHAR(q.qualified_at,'YYYY-MM') AS month,
+                 COUNT(*) FILTER (WHERE l.stage IN ('qualification','presentation','offer','negotiation'))::int AS active_leads
+          FROM crm_leads l
+          JOIN (
+            SELECT (metadata->>'lead_id')::int AS lead_id,
+                   MIN(created_at)             AS qualified_at
+            FROM audit_logs
+            WHERE after_state->>'stage' = 'qualification'
+            GROUP BY metadata->>'lead_id'
+          ) q ON q.lead_id = l.id
+          ${trendWhere}
           GROUP BY month
           ORDER BY month ASC
-          LIMIT 13
-        `, params),
+          LIMIT 24
+        `, trendParams),
+
+        // Trend wygranych — grupowanie po dacie wygranej (won_at z audit_logs lub updated_at)
+        db.query(`
+          SELECT TO_CHAR(COALESCE(w.won_at, l.updated_at),'YYYY-MM') AS month,
+                 COUNT(*)::int AS won,
+                 COALESCE(SUM(${valPln}),0)::numeric(14,2) AS won_value
+          FROM crm_leads l
+          LEFT JOIN (
+            SELECT (metadata->>'lead_id')::int AS lead_id,
+                   MIN(created_at)             AS won_at
+            FROM audit_logs
+            WHERE after_state->>'stage' = 'closed_won'
+            GROUP BY metadata->>'lead_id'
+          ) w ON w.lead_id = l.id
+          ${wonTrendWhere}
+          GROUP BY month
+          ORDER BY month ASC
+          LIMIT 24
+        `, wonTrendParams),
 
         // Wyniki handlowców (tylko manager widzi wszystkich)
         req.isCrmManager
@@ -631,8 +723,16 @@ router.get('/report',
                      COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)  AS won_value,
                      ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
                        NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
-                     ROUND(AVG(EXTRACT(DAY FROM (l.updated_at - COALESCE(l.first_contact_date::timestamp, l.created_at))))
-                       FILTER (WHERE l.stage IN ('closed_won','closed_lost')))::int AS avg_cycle_days
+                     ROUND(AVG(
+                       EXTRACT(DAY FROM (l.updated_at - COALESCE(
+                         (SELECT MIN(al.created_at)
+                          FROM audit_logs al
+                          WHERE al.metadata->>'lead_id' = l.id::text
+                            AND al.after_state->>'stage' = 'qualification'),
+                         l.first_contact_date::timestamp,
+                         l.created_at
+                       )))
+                     ) FILTER (WHERE l.stage = 'closed_won'))::int AS avg_cycle_days
               FROM crm_leads l
               LEFT JOIN users u ON u.id = l.assigned_to
               ${where}
@@ -685,10 +785,24 @@ router.get('/report',
         `, params),
       ]);
 
+      // Scalenie trendu: aktywne po dacie kwalifikacji + wygrane po dacie wygranej
+      const monthlyMap = {};
+      monthlyActiveRes.rows.forEach(r => {
+        monthlyMap[r.month] = { month: r.month, active_leads: r.active_leads, won: 0, won_value: '0' };
+      });
+      monthlyWonRes.rows.forEach(r => {
+        if (!monthlyMap[r.month]) monthlyMap[r.month] = { month: r.month, active_leads: 0, won: 0, won_value: '0' };
+        monthlyMap[r.month].won       = r.won;
+        monthlyMap[r.month].won_value = r.won_value;
+      });
+      const monthly = Object.values(monthlyMap)
+        .sort((a, b) => a.month.localeCompare(b.month))
+        .slice(-12);
+
       res.json({
         kpi:           { ...(kpiRes.rows[0] || {}), pipeline_in_period: kpiRes.rows[0]?.pipeline_in_period ?? 0 },
         funnel:        funnelRes.rows,
-        monthly:       monthlyRes.rows,
+        monthly,
         by_rep:        byRepRes.rows,
         by_source:     bySourceRes.rows,
         lost_reasons:  lostRes.rows,
@@ -948,6 +1062,32 @@ router.patch('/:id',
         );
         if (nipCheck.length) {
           return res.status(409).json({ error: 'Ten Numer NIP jest już przypisany dla innego rekordu.' });
+        }
+      }
+
+      // ── Walidacja sekwencji etapów ──────────────────────────────────────────
+      if (req.body.stage && req.body.stage !== existing[0].stage) {
+        const STAGE_SEQ = ['new', 'qualification', 'presentation', 'offer', 'negotiation', 'closed_won'];
+        const STAGE_LABELS = {
+          new: 'Nowy', qualification: 'Kwalifikacja', presentation: 'Prezentacja',
+          offer: 'Oferta', negotiation: 'Negocjacje', closed_won: 'Wygrana', closed_lost: 'Przegrana',
+        };
+        function allowedNext(cur) {
+          if (cur === 'closed_lost') return ['new'];
+          if (cur === 'closed_won')  return ['negotiation'];
+          const idx = STAGE_SEQ.indexOf(cur);
+          if (idx === -1) return [];
+          const result = [];
+          if (idx > 0) result.push(STAGE_SEQ[idx - 1]);
+          if (idx < STAGE_SEQ.length - 1) result.push(STAGE_SEQ[idx + 1]);
+          result.push('closed_lost'); // wyjście awaryjne z każdego aktywnego etapu
+          return result;
+        }
+        const allowed = allowedNext(existing[0].stage);
+        if (!allowed.includes(req.body.stage)) {
+          return res.status(422).json({
+            error: `Niedozwolone przejście: "${STAGE_LABELS[existing[0].stage]}" → "${STAGE_LABELS[req.body.stage]}". Dozwolone: ${allowed.map(s => STAGE_LABELS[s]).join(', ')}.`,
+          });
         }
       }
 

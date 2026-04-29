@@ -171,7 +171,15 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
 
     if (search) {
       params.push(`%${search}%`);
-      where.push(`(COALESCE(p.company, dm.company_name, dm.name) ILIKE $${params.length} OR p.email ILIKE $${params.length} OR COALESCE(p.nip, dm.tax_numbers) ILIKE $${params.length} OR p.contact_name ILIKE $${params.length} OR p.phone ILIKE $${params.length})`);
+      where.push(`(
+        COALESCE(p.company, dm.company_name, dm.name) ILIKE $${params.length}
+        OR dm.company_name ILIKE $${params.length}
+        OR dm.name ILIKE $${params.length}
+        OR p.email ILIKE $${params.length}
+        OR COALESCE(p.nip, dm.tax_numbers) ILIKE $${params.length}
+        OR p.contact_name ILIKE $${params.length}
+        OR p.phone ILIKE $${params.length}
+      )`);
     }
     if (status) {
       params.push(status);
@@ -236,7 +244,8 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name,
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false)::int AS new_email_count,
-              (SELECT MAX(updated_at) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false) AS last_reply_at
+              (SELECT MAX(updated_at) FROM crm_partner_activities WHERE partner_id = p.id AND type = 'email' AND is_read = false) AS last_reply_at,
+              (SELECT COUNT(*) FROM crm_partner_documents WHERE partner_id = p.id)::int AS doc_count
        FROM dwh.partner dm
        FULL OUTER JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
        LEFT JOIN users u ON u.id = p.manager_id
