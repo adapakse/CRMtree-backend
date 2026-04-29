@@ -70,7 +70,7 @@ router.get("/onboarding", requireAuth, crmAuth, async (req, res) => {
     const { rows: partners } = await pool.query(`
       SELECT p.id,
              COALESCE(COALESCE(dm.company_name, dm.name), p.company) AS company,
-             COALESCE(dm.tax_numbers::text, p.nip) AS nip,
+             COALESCE(dm.tax_numbers, p.nip) AS nip,
              p.onboarding_step, p.status,
              p.created_at, p.manager_id,
              p.dwh_partner_id,
@@ -166,10 +166,12 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     where.push(`LENGTH(REGEXP_REPLACE(COALESCE(p.company, dm.company_name, dm.name, ''), '[^a-zA-ZąćęłńóśźżĄĆĘŁŃÓŚŹŻ]', '', 'g')) >= 2`);
     // Wyklucz partnerów w trakcie onboardingu — widoczni tylko w panelu Onboarding
     where.push(`(p.status IS NULL OR p.status != 'onboarding')`);
+    // Wyklucz konta testowe z DWH
+    where.push(`COALESCE(dm.is_test_account, false) = false`);
 
     if (search) {
       params.push(`%${search}%`);
-      where.push(`(COALESCE(p.company, dm.company_name, dm.name) ILIKE $${params.length} OR p.email ILIKE $${params.length} OR COALESCE(p.nip, dm.tax_numbers::text) ILIKE $${params.length} OR p.contact_name ILIKE $${params.length} OR p.phone ILIKE $${params.length})`);
+      where.push(`(COALESCE(p.company, dm.company_name, dm.name) ILIKE $${params.length} OR p.email ILIKE $${params.length} OR COALESCE(p.nip, dm.tax_numbers) ILIKE $${params.length} OR p.contact_name ILIKE $${params.length} OR p.phone ILIKE $${params.length})`);
     }
     if (status) {
       params.push(status);
@@ -184,7 +186,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
       where.push(`p.industry = $${params.length}`);
     }
     // Scope widoczności
-    if (req.user.is_admin) {
+    if (req.user.is_admin || req.crmGlobalRead) {
       if (manager_id) { params.push(manager_id); where.push(`p.manager_id = $${params.length}`); }
     } else if (req.user.crm_role === 'sales_manager') {
       if (manager_id) {
@@ -223,6 +225,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               dm.billing_currency                                                   AS partner_currency,
               dm.country,
               dm.tax_numbers                                                        AS dwh_nip,
+              dm.is_test_account,
               COALESCE(p.status, 'active')                                         AS status,
               p.manager_id,
               u.display_name                                                        AS manager_name,
@@ -414,6 +417,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               p.manager_id, p.contract_signed, p.contract_expires, p.contract_value,
               p.status, p.annual_turnover_currency, p.online_pct, p.license_count,
               p.active_users, p.onboarding_step, p.tags, p.notes,
+              p.website, p.source, p.first_contact_date, p.logo_url,
               p.agent_name, p.agent_email, p.agent_phone,
               p.created_by, p.created_at, p.updated_at, p.dwh_partner_id,
               -- Dane DWH dla identyfikacji
@@ -445,11 +449,21 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               false AS admin_last_name_from_dwh,
               p.admin_email,
               false AS admin_email_from_dwh,
-              -- Nowe pola z DWH Partner
+              -- Pola DWH (produkcja)
               dm.max_debit,
               dm.currency             AS dwh_currency,
               dm.customer_service_note,
               dm.switched_to_prod_at,
+              dm.domain,
+              dm.is_test_account,
+              dm.self_registered,
+              dm.super_partner,
+              dm.eknf_id,
+              dm.partner_id_eknf,
+              dm.is_contract_signed   AS dwh_is_contract_signed,
+              dm.custom_contact_email AS dwh_custom_contact_email,
+              dm.created_at           AS dwh_created_at,
+              dm.updated_at           AS dwh_updated_at,
               -- Relacje
               u.display_name AS manager_name,
               COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name
@@ -638,7 +652,7 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
           `SELECT 'lead' AS src FROM crm_leads WHERE nip = $1
            UNION ALL SELECT 'partner' AS src FROM crm_partners WHERE nip = $1 AND id != $2
            LIMIT 1`,
-          [req.body.nip, parseInt(id)]
+          [req.body.nip, id]
         );
         if (nipCheck.rows.length) {
           return res.status(409).json({ error: 'Ten Numer NIP jest już przypisany dla innego rekordu.' });
@@ -654,6 +668,7 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
     const allowed = [
       "company", "status",
       "nip", "address", "industry",
+      "website", "source", "first_contact_date", "logo_url",
       "contact_name", "contact_title", "email", "phone",
       "billing_contact_name", "billing_contact_title", "billing_email", "billing_phone",
       "credit_limit_value", "credit_limit_currency",
@@ -688,6 +703,13 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
         sets.push(`${key} = $${params.length}`);
       }
     }
+
+    // Przy uruchomieniu partnera (status → 'active') wymuś onboarding_step = 4
+    if (req.body.status === 'active' && beforeSnap.status === 'onboarding' && !('onboarding_step' in req.body)) {
+      params.push(4);
+      sets.push(`onboarding_step = $${params.length}`);
+    }
+
     if (!sets.length) return res.status(400).json({ error: "Brak pól do aktualizacji" });
 
     params.push(id);
@@ -699,6 +721,21 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
     );
     if (!r.rows.length) return res.status(404).json({ error: "Nie znaleziono" });
     r.rows[0].id = r.rows[0].dwh_partner_id;
+
+    // Synchronizuj lead: stage → 'onboarded' gdy partner aktywowany
+    if (req.body.status === 'active' && r.rows[0].lead_id) {
+      try {
+        await pool.query(
+          `UPDATE crm_leads SET stage = 'onboarded', updated_at = NOW()
+           WHERE id = $1 AND stage != 'onboarded'`,
+          [r.rows[0].lead_id]
+        );
+      } catch (leadSyncErr) {
+        logger.warn('Błąd synchronizacji stage leada przy aktywacji partnera', {
+          error: leadSyncErr.message, lead_id: r.rows[0].lead_id,
+        });
+      }
+    }
 
     // Audit log — tylko zmienione pola
     try {
@@ -1033,15 +1070,21 @@ router.get("/:id/history", requireAuth, crmAuth, async (req, res) => {
     const crmId = await resolveCrmPartnerId(req.params.id, pool);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
 
+    const { rows: pRows } = await pool.query(
+      'SELECT dwh_partner_id FROM crm_partners WHERE id = $1', [crmId]
+    );
+    const dwhPartnerId = pRows[0]?.dwh_partner_id ?? null;
+
     const { rows } = await pool.query(`
       SELECT id, user_name, user_email, action,
              before_state, after_state, metadata, created_at
       FROM audit_logs
-      WHERE (metadata->>'partner_id' = $1::text OR metadata->>'partner_id' = $2::text)
+      WHERE (metadata->>'partner_id' = $1::text
+          OR ($2::text IS NOT NULL AND metadata->>'partner_id' = $2::text))
         AND document_id IS NULL
       ORDER BY created_at DESC
       LIMIT 100
-    `, [String(crmId), String(dwhPartnerId)]);
+    `, [String(crmId), dwhPartnerId ? String(dwhPartnerId) : null]);
 
     res.json(rows);
   } catch (err) {

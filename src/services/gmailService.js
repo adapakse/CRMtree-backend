@@ -147,10 +147,43 @@ async function disconnect(userId) {
   await pool.query("DELETE FROM user_gmail_tokens WHERE user_id = $1", [userId]);
 }
 
+// ── Pobierz stopkę (HTML usera + banner + klauzula admina) ───────────────────
+async function buildSignatureHtml(userId) {
+  const [sigRes, settingsRes] = await Promise.all([
+    pool.query('SELECT html FROM user_email_signatures WHERE user_id = $1', [userId]),
+    pool.query("SELECT key, value FROM app_settings WHERE key IN ('email_signature_banner_url','email_signature_disclaimer')"),
+  ]);
+
+  const userHtml   = sigRes.rows[0]?.html || '';
+  const settings   = Object.fromEntries(settingsRes.rows.map(r => [r.key, r.value]));
+  const bannerUrl  = settings['email_signature_banner_url'] || '';
+  const disclaimer = settings['email_signature_disclaimer'] || '';
+
+  if (!userHtml && !bannerUrl && !disclaimer) return '';
+
+  let html = `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e7eb;font-family:Arial,sans-serif">`;
+
+  if (userHtml) html += userHtml;
+
+  if (bannerUrl) {
+    html += `<div style="margin-top:16px"><img src="${bannerUrl}" alt="" style="max-width:600px;width:100%;display:block;border:0"></div>`;
+  }
+
+  if (disclaimer) {
+    html += `<div style="margin-top:12px;color:#9ca3af;font-size:8pt;line-height:1.5">${disclaimer}</div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
 // ── Wyślij email ──────────────────────────────────────────────────────────────
 async function sendEmail({ userId, to, cc, subject, body, threadId, attachments = [], inReplyTo = null, references = null }) {
   const oauth2 = await getAuthForUser(userId);
   const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+
+  const signatureHtml = await buildSignatureHtml(userId);
+  const fullBody = signatureHtml ? (body || '') + signatureHtml : (body || '');
 
   // Buduj MIME
   const boundary = `boundary_${Date.now()}`;
@@ -171,7 +204,7 @@ async function sendEmail({ userId, to, cc, subject, body, threadId, attachments 
     rawParts.push(`--${boundary}`);
     rawParts.push(`Content-Type: text/html; charset="UTF-8"`);
     rawParts.push("");
-    rawParts.push(body || "");
+    rawParts.push(fullBody);
     for (const att of attachments) {
       rawParts.push(`--${boundary}`);
       rawParts.push(`Content-Type: ${att.mimeType}; name="${att.filename}"`);
@@ -184,7 +217,7 @@ async function sendEmail({ userId, to, cc, subject, body, threadId, attachments 
   } else {
     rawParts.push(`Content-Type: text/html; charset="UTF-8"`);
     rawParts.push("");
-    rawParts.push(body || "");
+    rawParts.push(fullBody);
   }
 
   const raw = Buffer.from(rawParts.join("\r\n"))

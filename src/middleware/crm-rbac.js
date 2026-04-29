@@ -49,8 +49,26 @@ async function loadCrmScope(req, res, next) {
   try {
     if (!req.user) return next();
 
+    // Czytaj ustawienie crm_global_read z bazy (raz per request)
+    let globalRead = false;
+    try {
+      const { rows: settingRows } = await db.query(
+        `SELECT value FROM app_settings WHERE key = 'crm_global_read'`,
+      );
+      globalRead = settingRows[0]?.value === 'true';
+    } catch { /* brak ustawienia = false */ }
+
+    req.crmGlobalRead = globalRead;
+
     if (req.user.is_admin) {
       req.crmScopeUserIds = null; // brak ograniczeń
+      req.crmGroupIds     = null;
+      return next();
+    }
+
+    // Global read: przy żądaniach GET traktuj jak admina (tylko odczyt)
+    if (globalRead && req.method === 'GET') {
+      req.crmScopeUserIds = null;
       req.crmGroupIds     = null;
       return next();
     }
@@ -110,7 +128,7 @@ async function loadCrmScope(req, res, next) {
  */
 function crmScope(req, res, next) {
   req.scopeFilter = (alias, ownerCol, params) => {
-    if (req.user.is_admin) return '';
+    if (req.user.is_admin || req.crmGlobalRead) return '';
 
     const col = alias ? `${alias}.${ownerCol}` : ownerCol;
 

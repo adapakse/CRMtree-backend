@@ -23,13 +23,14 @@ router.get('/',
     query('stage').optional().isString(),
     query('source').optional().isString().trim(),
     query('assigned_to').optional().isString().trim(),
+    query('mine').optional().isBoolean().toBoolean(),
     query('hot').optional().isBoolean().toBoolean(),
     query('search').optional().isString().trim(),
     query('close_date_from').optional().isDate(),
     query('close_date_to').optional().isDate(),
     query('lost_reason').optional().isString().trim(),
     query('page').optional().isInt({ min: 1 }).toInt(),
-    query('limit').optional().isInt({ min: 1, max: 200 }).toInt(),
+    query('limit').optional().isInt({ min: 1, max: 5000 }).toInt(),
   ],
   validate,
   async (req, res, next) => {
@@ -42,6 +43,12 @@ router.get('/',
       let where = "WHERE 1=1";
 
       where += req.scopeFilter('l', 'assigned_to', params);
+
+      // mine=true: zawęż do własnych leadów — nakłada się na scope (nie omija go)
+      if (req.query.mine === true) {
+        params.push(req.user.id);
+        where += ` AND l.assigned_to = $${params.length}`;
+      }
 
       if (req.query.stage) {
         params.push(req.query.stage);
@@ -58,7 +65,7 @@ router.get('/',
           where += ` AND l.source = ANY($${params.length}::text[])`;
         }
       }
-      if (req.query.assigned_to && req.isCrmManager) {
+      if (req.query.assigned_to && (req.isCrmManager || req.crmGlobalRead)) {
         const assignedIds = String(req.query.assigned_to).split(',').map(s => s.trim()).filter(Boolean);
         if (assignedIds.length === 1) {
           params.push(assignedIds[0]);
@@ -91,8 +98,9 @@ router.get('/',
       const countParams = [...params];
       params.push(limit, offset);
 
-      const [countResult, rows] = await Promise.all([
+      const [countResult, qualifiedCount, rows] = await Promise.all([
         db.query(`SELECT COUNT(*) FROM crm_leads l ${where}`, countParams),
+        db.query(`SELECT COUNT(*) FROM crm_leads l ${where} AND l.stage != 'new'`, countParams),
         db.query(`
           SELECT l.*,
             u.display_name AS assigned_to_name,
@@ -114,8 +122,9 @@ router.get('/',
       ]);
 
       res.json({
-        data:  rows.rows,
-        total: parseInt(countResult.rows[0].count),
+        data:            rows.rows,
+        total:           parseInt(countResult.rows[0].count),
+        total_qualified: parseInt(qualifiedCount.rows[0].count),
         page, limit,
         pages: Math.ceil(parseInt(countResult.rows[0].count) / limit),
       });
@@ -563,19 +572,19 @@ router.get('/report',
         // KPI zbiorcze — wartości przeliczane na PLN wg kursów walut
         db.query(`
           SELECT
-            COUNT(*) FILTER (WHERE l.stage NOT IN ('closed_won','closed_lost'))::int    AS active,
-            COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                         AS won,
-            COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                        AS lost,
-            COUNT(*) FILTER (WHERE l.hot = true AND l.stage NOT IN ('closed_won','closed_lost'))::int AS hot,
-            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('closed_won','closed_lost')),0)::numeric(14,2) AS pipeline_value,
-            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)                      AS won_value,
+            COUNT(*) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost'))::int    AS active,
+            COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                              AS won,
+            COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                             AS lost,
+            COUNT(*) FILTER (WHERE l.hot = true AND l.stage NOT IN ('new','closed_won','closed_lost'))::int AS hot,
+            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost')),0)::numeric(14,2) AS pipeline_value,
+            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)                            AS won_value,
             ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
               NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
             ROUND(AVG(EXTRACT(DAY FROM (l.updated_at - COALESCE(l.first_contact_date::timestamp, l.created_at))))
               FILTER (WHERE l.stage IN ('closed_won','closed_lost')))::int                    AS avg_cycle_days,
-            -- pipeline_in_period: leady aktywne z close_date w wybranym przedziale (pkt 9)
+            -- pipeline_in_period: leady aktywne (kwalifikacja+) z close_date w wybranym przedziale
             COALESCE(SUM(${valPln}) FILTER (
-              WHERE l.stage NOT IN ('closed_won','closed_lost')
+              WHERE l.stage NOT IN ('new','closed_won','closed_lost')
                 AND l.close_date IS NOT NULL
                 AND (${closeDateFrom} IS NULL OR l.close_date >= ${closeDateFrom}::date)
                 AND (${closeDateTo}   IS NULL OR l.close_date <= ${closeDateTo}::date)
@@ -614,12 +623,12 @@ router.get('/report',
           ? db.query(`
               SELECT COALESCE(u.display_name,'— nieprzypisany —') AS rep_name,
                      u.id AS rep_id,
-                     COUNT(*)::int                                                                     AS total,
-                     COUNT(*) FILTER (WHERE l.stage NOT IN ('closed_won','closed_lost'))::int         AS active,
-                     COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                             AS won,
-                     COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                            AS lost,
-                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('closed_won','closed_lost')),0)::numeric(14,2) AS pipeline_value,
-                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2) AS won_value,
+                     COUNT(*) FILTER (WHERE l.stage != 'new')::int                                    AS total,
+                     COUNT(*) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost'))::int    AS active,
+                     COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                              AS won,
+                     COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                             AS lost,
+                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost')),0)::numeric(14,2) AS pipeline_value,
+                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)  AS won_value,
                      ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
                        NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
                      ROUND(AVG(EXTRACT(DAY FROM (l.updated_at - COALESCE(l.first_contact_date::timestamp, l.created_at))))
@@ -1636,9 +1645,15 @@ router.post('/:id/migrate',
            subdomain, language, partner_currency, country,
            billing_address, billing_zip, billing_city, billing_country, billing_email_address,
            admin_first_name, admin_last_name, admin_email,
+           manager_id,
+           contact_name, contact_title, email, phone, industry,
+           annual_turnover_currency, online_pct,
+           notes, tags,
+           website, source, first_contact_date, logo_url,
            created_at, updated_at
          )
-         VALUES ($1,$2,$3,'onboarding',0,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now(),now())
+         VALUES ($1,$2,$3,'onboarding',0,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+                 $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,now(),now())
          ON CONFLICT DO NOTHING
          RETURNING id, company`,
         [
@@ -1646,17 +1661,31 @@ router.post('/:id/migrate',
           contract_value || null, contract_signed || null,
           ta?.htcd_partner_id || null,
           safeSubdomain,
-          ta?.language         || null,
-          ta?.partner_currency || null,
-          ta?.country          || null,
-          ta?.billing_address  || null,
-          ta?.billing_zip      || null,
-          ta?.billing_city     || null,
-          ta?.billing_country  || null,
+          ta?.language              || null,
+          ta?.partner_currency      || null,
+          ta?.country               || null,
+          ta?.billing_address       || null,
+          ta?.billing_zip           || null,
+          ta?.billing_city          || null,
+          ta?.billing_country       || null,
           ta?.billing_email_address || null,
-          ta?.admin_first_name || null,
-          ta?.admin_last_name  || null,
-          ta?.admin_email      || null,
+          ta?.admin_first_name      || null,
+          ta?.admin_last_name       || null,
+          ta?.admin_email           || null,
+          lead.assigned_to          || null,   // $19 manager_id
+          lead.contact_name         || null,   // $20
+          lead.contact_title        || null,   // $21
+          lead.email                || null,   // $22
+          lead.phone                || null,   // $23
+          lead.industry             || null,   // $24
+          lead.annual_turnover_currency || null, // $25
+          lead.online_pct           ?? null,   // $26
+          lead.notes                || null,   // $27
+          lead.tags                 || [],     // $28
+          lead.website              || null,   // $29
+          lead.source               || null,   // $30
+          lead.first_contact_date   || null,   // $31
+          lead.logo_url             || null,   // $32
         ]
       );
       if (!partnerIns.rows.length) return res.status(409).json({ error: 'Partner już istnieje dla tego leada' });

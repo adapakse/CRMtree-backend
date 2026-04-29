@@ -24,6 +24,7 @@ const logRoutes           = require('./routes/logs');
 const attachmentRoutes    = require('./routes/attachments');
 const settingsRoutes      = require('./routes/settings');
 const adminDataRoutes 	  = require('./routes/admin-data');
+const profileRoutes       = require('./routes/profile');
 const crmGmail 		  = require('./routes/crm-gmail');
 
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
@@ -143,6 +144,7 @@ app.use('/api/admin/users',     userRoutes);
 app.use('/api/admin/logs',      logRoutes);
 app.use('/api/admin/settings',  settingsRoutes);
 app.use('/api/admin/data',     adminDataRoutes);
+app.use('/api/profile',         profileRoutes);
 app.use('/api/crm/gmail', crmGmail);
 
 app.use('/api/groups',          groupRoutes);
