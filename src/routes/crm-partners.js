@@ -26,6 +26,17 @@ function assertManager(req, res) {
   return true;
 }
 
+async function isOnboardingGroupMember(userId, pool) {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM user_group_roles ugr
+     JOIN group_profiles gp ON gp.id = ugr.group_id
+     WHERE ugr.user_id = $1 AND gp.is_active = TRUE AND gp.name ILIKE '%onboarding%'
+     LIMIT 1`,
+    [userId]
+  );
+  return rows.length > 0;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // LISTA PARTNERÓW
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -45,20 +56,22 @@ router.get("/onboarding", requireAuth, crmAuth, async (req, res) => {
     const params = [];
     const conds  = ["p.status = 'onboarding'"];
 
-    if (req.user.is_admin) {
-      // admin — bez ograniczeń
-    } else if (req.user.crm_role === 'sales_manager') {
-      if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-        params.push(req.crmScopeUserIds);
-        conds.push(`p.manager_id = ANY($${params.length}::uuid[])`);
-      } else { conds.push('1=0'); }
+    if (req.user.is_admin || req.user.crm_role === 'sales_manager') {
+      // admin i manager widzą wszystkich partnerów w onboardingu
     } else {
-      // Handlowiec widzi tylko partnerów gdzie ma przypisane zadania
-      params.push(userId);
-      conds.push(`EXISTS (
-        SELECT 1 FROM crm_onboarding_tasks t
-        WHERE t.partner_id = p.id AND t.assigned_to = $${params.length}
-      )`);
+      // Handlowiec z grupy onboarding widzi wszystkich.
+      // Pozostali widzą partnerów gdzie są managerem LUB mają przypisane zadania.
+      const inOnboardingGroup = await isOnboardingGroupMember(userId, pool).catch(() => false);
+      if (!inOnboardingGroup) {
+        params.push(userId);
+        conds.push(`(
+          p.manager_id = $${params.length}
+          OR EXISTS (
+            SELECT 1 FROM crm_onboarding_tasks t
+            WHERE t.partner_id = p.id AND t.assigned_to = $${params.length}
+          )
+        )`);
+      }
     }
     if (search) {
       params.push(`%${search}%`);
@@ -103,8 +116,15 @@ router.get("/onboarding/tasks", requireAuth, crmAuth, async (req, res) => {
     const conds  = ["p.status = 'onboarding'"];
 
     if (!isManager) {
-      params.push(userId);
-      conds.push(`t.assigned_to = $${params.length}`);
+      const inOnboardingGroup = await isOnboardingGroupMember(userId, pool).catch(() => false);
+      if (!inOnboardingGroup) {
+        // Handlowiec widzi zadania gdzie jest przypisany LUB jest managerem partnera
+        params.push(userId);
+        conds.push(`(t.assigned_to = $${params.length} OR p.manager_id = $${params.length})`);
+      } else if (assigned_to) {
+        params.push(assigned_to);
+        conds.push(`t.assigned_to = $${params.length}`);
+      }
     } else if (assigned_to) {
       params.push(assigned_to);
       conds.push(`t.assigned_to = $${params.length}`);
@@ -154,7 +174,8 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
       sort = "company", dir = "asc",
     } = req.query;
 
-    const allowedSort = ["company", "status", "contract_signed", "contract_value", "created_at"];
+    const allowedSort = ["company", "status", "contract_signed", "contract_value", "created_at",
+                         "industry", "group_name", "manager_name", "contract_expires"];
     const sortCol = allowedSort.includes(sort) ? sort : "company";
     const sortDir = dir === "desc" ? "DESC" : "ASC";
 
@@ -207,9 +228,14 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     }
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const orderExpr = sortCol === 'company'
-      ? `COALESCE(p.company, dm.company_name, dm.name) ${sortDir}`
-      : `p.${sortCol} ${sortDir}`;
+    const orderExpr =
+      sortCol === 'company'
+        ? `COALESCE(p.company, dm.company_name, dm.name) ${sortDir} NULLS LAST`
+      : sortCol === 'group_name'
+        ? `COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) ${sortDir} NULLS LAST`
+      : sortCol === 'manager_name'
+        ? `u.display_name ${sortDir} NULLS LAST`
+      : `p.${sortCol} ${sortDir} NULLS LAST`;
 
     const countQ = await pool.query(
       `SELECT COUNT(*)
@@ -1318,7 +1344,11 @@ router.delete("/:id/tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
 // ONBOARDING STEP (advance)
 // ═══════════════════════════════════════════════════════════════════════════════
 router.post("/:id/onboarding-step", requireAuth, crmAuth, async (req, res) => {
-  if (!assertManager(req, res)) return;
+  const isManager = req.user.is_admin || req.user.crm_role === 'sales_manager';
+  if (!isManager) {
+    const allowed = await isOnboardingGroupMember(req.user.id, pool);
+    if (!allowed) return res.status(403).json({ error: "Brak uprawnień" });
+  }
   try {
     const crmId = await resolveCrmPartnerId(req.params.id, pool);
     if (!crmId) return res.status(404).json({ error: "Nie znaleziono" });

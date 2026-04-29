@@ -49,6 +49,7 @@ router.get(
       .optional()
       .isIn(["created_at", "name", "doc_number", "status", "expiration_date"]),
     query("order").optional().isIn(["asc", "desc"]),
+    query("no_files").optional().isIn(["true", "false"]),
   ],
   validate,
   async (req, res, next) => {
@@ -63,6 +64,7 @@ router.get(
         document_group_id,
         expiry_before,
         expiry_after,
+        no_files,
         page = 1,
         limit = 50,
         sort = "created_at",
@@ -137,6 +139,9 @@ router.get(
         conditions.push(`d.expiration_date >= $${p++}`);
         params.push(expiry_after);
       }
+      if (no_files === "true") {
+        conditions.push(`NOT EXISTS (SELECT 1 FROM document_versions dv WHERE dv.document_id = d.id)`);
+      }
 
       const where = "WHERE " + conditions.join(" AND ");
       const offset = (page - 1) * limit;
@@ -166,6 +171,9 @@ router.get(
              (SELECT json_agg(json_build_object('id',dt.id,'key',dt.key,'value',dt.value))
               FROM document_tags dt WHERE dt.document_id = d.id) AS tags,
              (SELECT COUNT(*) FROM document_versions dv WHERE dv.document_id = d.id) AS version_count,
+             EXISTS (
+               SELECT 1 FROM crm_partner_documents cpd WHERE cpd.document_id = d.id
+             ) AS has_partner,
              (SELECT COUNT(*)
               FROM workflow_tasks wt
               WHERE wt.document_id = d.id
