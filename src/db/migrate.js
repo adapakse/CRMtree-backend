@@ -1,6 +1,8 @@
 "use strict";
 
+// Load .env first, then .env.local (local overrides take precedence)
 require("dotenv").config();
+require("dotenv").config({ path: require("path").resolve(process.cwd(), ".env.local"), override: true });
 const fs = require("fs");
 const path = require("path");
 const { Pool } = require("pg");
