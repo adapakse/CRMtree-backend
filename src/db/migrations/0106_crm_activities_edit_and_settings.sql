@@ -14,6 +14,11 @@ ALTER TABLE crm_lead_activities
 ALTER TABLE crm_partner_activities
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
 
+-- Rozszerz constraint przed wstawieniem wartości 'json'
+ALTER TABLE app_settings DROP CONSTRAINT IF EXISTS app_settings_value_type_check;
+ALTER TABLE app_settings ADD CONSTRAINT app_settings_value_type_check
+  CHECK (value_type IN ('number','boolean','string','json','text'));
+
 -- 2. Parametry słownikowe CRM
 INSERT INTO app_settings (key, value, label, description, value_type, category) VALUES
 

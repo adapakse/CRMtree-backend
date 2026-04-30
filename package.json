@@ -1,7 +1,7 @@
 {
-  "name": "worktrips-doc-backend",
+  "name": "crmtree-backend",
   "version": "1.0.0",
-  "description": "worktrips.doc — Document Management System Backend",
+  "description": "crmtree — Customer Management System Backend",
   "main": "src/server.js",
   "engines": {
     "node": ">=20.0.0"

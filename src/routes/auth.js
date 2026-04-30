@@ -188,27 +188,39 @@ if (process.env.NODE_ENV === 'development') {
 <html lang="pl">
 <head>
   <meta charset="UTF-8">
-  <title>DEV Login — WorkTripsDoc</title>
+  <title>DEV Login — CRMtree</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f3f4f6; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-    .card { background: white; border-radius: 14px; padding: 36px 40px; box-shadow: 0 8px 32px rgba(0,0,0,.12); width: 100%; max-width: 380px; }
-    .badge { display: inline-block; background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 20px; letter-spacing: .4px; margin-bottom: 18px; }
-    h1 { font-size: 20px; font-weight: 700; color: #111827; margin-bottom: 4px; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0faf4; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .card { background: white; border-radius: 14px; padding: 36px 40px; box-shadow: 0 8px 32px rgba(59,170,93,.15); width: 100%; max-width: 380px; }
+    .logo { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+    .logo-icon { width: 36px; height: 36px; background: #3BAA5D; border-radius: 8px; display: flex; align-items: center; justify-content: center; }
+    .logo-icon svg { width: 22px; height: 22px; }
+    .logo-text { font-size: 20px; font-weight: 800; color: #111827; }
+    .logo-text span { color: #3BAA5D; }
+    .badge { display: inline-block; background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 20px; letter-spacing: .4px; margin-bottom: 16px; }
+    h1 { font-size: 15px; font-weight: 700; color: #111827; margin-bottom: 4px; }
     p  { font-size: 13px; color: #6b7280; margin-bottom: 24px; }
     label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 6px; }
     select, input { width: 100%; padding: 9px 12px; border: 1.5px solid #d1d5db; border-radius: 8px; font-size: 13px; outline: none; font-family: inherit; margin-bottom: 16px; }
-    select:focus, input:focus { border-color: #f97316; }
-    button { width: 100%; padding: 10px; background: #f97316; color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .15s; }
-    button:hover { background: #ea6c0a; }
+    select:focus, input:focus { border-color: #3BAA5D; box-shadow: 0 0 0 3px rgba(59,170,93,.12); }
+    button { width: 100%; padding: 10px; background: #3BAA5D; color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .15s; }
+    button:hover { background: #2F8F4D; }
     button:disabled { background: #d1d5db; cursor: not-allowed; }
     .err { color: #dc2626; font-size: 12px; margin-top: 10px; display: none; }
   </style>
 </head>
 <body>
   <div class="card">
+    <div class="logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 100 82" fill="none" stroke="white" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M50 82 Q50 70 50 58" stroke-width="6"/><path d="M50 58 Q45 50 34 43" stroke-width="4.5"/><path d="M50 58 Q55 50 66 43" stroke-width="4.5"/><path d="M34 43 Q20 37 9 35" stroke-width="3.5"/><path d="M66 43 Q80 37 91 35" stroke-width="3.5"/><path d="M50 52 Q50 42 50 34" stroke-width="3"/><path d="M50 34 Q46 26 43 20" stroke-width="2.5"/><path d="M50 34 Q54 26 57 20" stroke-width="2.5"/>
+        </svg>
+      </div>
+      <div class="logo-text">CRM<span>tree</span></div>
+    </div>
     <div class="badge">⚠ DEV MODE — lokalny bypass SSO</div>
-    <h1>WorkTripsDoc</h1>
     <p>Wybierz użytkownika lub wpisz e-mail aby zalogować się z pominięciem Google SSO.</p>
     <label for="userSelect">Użytkownik</label>
     <select id="userSelect">
@@ -216,7 +228,7 @@ if (process.env.NODE_ENV === 'development') {
       ${options}
     </select>
     <label for="emailInput">Lub wpisz e-mail</label>
-    <input id="emailInput" type="email" placeholder="user@worktrips.com">
+    <input id="emailInput" type="email" placeholder="user@firma.com">
     <button id="loginBtn">Zaloguj →</button>
     <div class="err" id="errMsg"></div>
   </div>
