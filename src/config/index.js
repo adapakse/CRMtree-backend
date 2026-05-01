@@ -1,6 +1,7 @@
 "use strict";
 
-require("dotenv").config();
+require("dotenv").config({ path: ".env.local", override: false });
+require("dotenv").config({ override: false });
 
 function required(name) {
   const v = process.env[name];

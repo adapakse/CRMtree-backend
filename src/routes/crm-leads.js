@@ -1218,7 +1218,7 @@ router.get('/:id/activities',
 router.post('/:id/activities',
   [
     param('id').isInt(),
-    body('type').notEmpty().isIn(['call','email','meeting','note','doc_sent']),
+    body('type').notEmpty().isIn(['call','email','meeting','note','doc_sent','task']),
     body('title').notEmpty().trim(),
     body('body').optional().trim(),
     body('activity_at').optional({ nullable: true }).isISO8601(),

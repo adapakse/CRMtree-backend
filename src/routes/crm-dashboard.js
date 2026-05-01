@@ -8,17 +8,22 @@ const { query } = require('express-validator');
 const db = require('../config/database');
 const { requireAuth }                  = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
-const { crmAuth, crmScope }            = require('../middleware/crm-rbac');
+const { crmAuth, loadCrmScope, crmScope } = require('../middleware/crm-rbac');
 
-router.use(requireAuth, injectAuditContext, crmAuth, crmScope);
+router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope, crmScope);
 
 // GET /api/crm/dashboard — pipeline leads
 router.get('/', async (req, res, next) => {
   try {
     const params = [];
-    const scopeLeads    = req.scopeFilter('l',  'assigned_to', params);
-    const scopePartners = req.scopeFilter('p',  'manager_id',  params);
+    const scopeLeads = req.scopeFilter('l', 'assigned_to', params);
     const userId = req.user.id;
+
+    const raParams = [];
+    const raLeads    = req.scopeFilter('l', 'assigned_to', raParams);
+    const raPartners = req.scopeFilter('p', 'manager_id',  raParams);
+    raParams.push(req.user.id);
+    const raUserId = `$${raParams.length}`;
 
     const [pipeline, recentLeads, recentActivities] = await Promise.all([
       db.query(`
@@ -45,17 +50,61 @@ router.get('/', async (req, res, next) => {
       `, params),
 
       db.query(`
-        SELECT a.id, a.type, a.title, a.activity_at, 'lead' AS source_type, l.company AS source_name
+        SELECT 'la_' || a.id::text AS uid, COALESCE(a.type,'note') AS type,
+               a.title, a.body, a.status, 'lead' AS source_type,
+               l.id::text AS source_id, l.company AS source_name,
+               a.activity_at, a.updated_at, au.display_name AS assigned_to_name
         FROM crm_lead_activities a
         JOIN crm_leads l ON l.id = a.lead_id
-        WHERE a.created_by = $1
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to)
+        WHERE a.type != 'email' ${raLeads}
         UNION ALL
-        SELECT a.id, a.type, a.title, a.activity_at, 'partner' AS source_type, p.company AS source_name
+        SELECT 'la_' || a.id::text AS uid, 'email' AS type,
+               a.title, NULL::text AS body, a.status, 'lead' AS source_type,
+               l.id::text AS source_id, l.company AS source_name,
+               a.activity_at, a.updated_at, NULL::text AS assigned_to_name
+        FROM crm_lead_activities a
+        JOIN crm_leads l ON l.id = a.lead_id
+        WHERE a.type = 'email' AND a.is_read = false ${raLeads}
+        UNION ALL
+        SELECT 'pa_' || a.id::text AS uid, COALESCE(a.type,'note') AS type,
+               a.title, a.body, a.status, 'partner' AS source_type,
+               p.id::text AS source_id, p.company AS source_name,
+               a.activity_at, a.updated_at, au.display_name AS assigned_to_name
         FROM crm_partner_activities a
         JOIN crm_partners p ON p.id = a.partner_id
-        WHERE a.created_by = $1
-        ORDER BY activity_at DESC LIMIT 15
-      `, [userId]),
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id)
+        WHERE a.type != 'email' ${raPartners}
+        UNION ALL
+        SELECT 'pa_' || a.id::text AS uid, 'email' AS type,
+               a.title, NULL::text AS body, a.status, 'partner' AS source_type,
+               p.id::text AS source_id, p.company AS source_name,
+               a.activity_at, a.updated_at, NULL::text AS assigned_to_name
+        FROM crm_partner_activities a
+        JOIN crm_partners p ON p.id = a.partner_id
+        WHERE a.type = 'email' AND a.is_read = false ${raPartners}
+        UNION ALL
+        SELECT 'onb_' || t.id::text AS uid, t.type AS type,
+               t.title, t.body, 'closed' AS status, 'onboarding' AS source_type,
+               p.id::text AS source_id, p.company AS source_name,
+               t.done_at AS activity_at, COALESCE(t.updated_at, t.created_at) AS updated_at,
+               au.display_name AS assigned_to_name
+        FROM crm_onboarding_tasks t
+        JOIN crm_partners p ON p.id = t.partner_id
+        LEFT JOIN users au ON au.id = t.assigned_to
+        WHERE t.done = true ${raPartners}
+        UNION ALL
+        SELECT 'doc_' || wt.id::text AS uid, 'task' AS type,
+               COALESCE(wt.message, d.name) AS title, NULL::text AS body,
+               'closed' AS status, 'document' AS source_type,
+               d.id::text AS source_id, d.name AS source_name,
+               wt.completed_at AS activity_at, wt.updated_at,
+               NULL::text AS assigned_to_name
+        FROM workflow_tasks wt
+        JOIN documents d ON d.id = wt.document_id
+        WHERE wt.task_status = 'completed' AND wt.assigned_to = ${raUserId}
+        ORDER BY updated_at DESC NULLS LAST LIMIT 15
+      `, raParams),
     ]);
 
     res.json({
@@ -63,6 +112,75 @@ router.get('/', async (req, res, next) => {
       recent_leads:       recentLeads.rows,
       recent_activities:  recentActivities.rows,
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/crm/tasks — unified task feed (all sources, open only)
+router.get('/tasks', async (req, res, next) => {
+  try {
+    const params = [];
+    const scopeLeads    = req.scopeFilter('l', 'assigned_to', params);
+    const scopePartners = req.scopeFilter('p', 'manager_id',  params);
+    params.push(req.user.id);
+    const $userId = `$${params.length}`;
+
+    // Dla filtrowania zadań używamy COALESCE(a.assigned_to, owner) zamiast samego ownera
+    const taskScopeLeads    = scopeLeads.replace('l.assigned_to',  'COALESCE(a.assigned_to, l.assigned_to)');
+    const taskScopePartners = scopePartners.replace('p.manager_id', 'COALESCE(a.assigned_to, p.manager_id)');
+
+    const { rows } = await db.query(`
+      SELECT * FROM (
+        SELECT 'la_' || a.id::text AS uid, a.id,
+               COALESCE(a.type,'task') AS type, a.title, a.body, a.status,
+               'lead' AS source_type, l.id::text AS source_id, l.company AS source_name,
+               a.activity_at, a.updated_at, au.display_name AS assigned_to_name
+        FROM crm_lead_activities a
+        JOIN crm_leads l ON l.id = a.lead_id
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to)
+        WHERE a.type != 'email' AND a.status != 'closed' ${taskScopeLeads}
+
+        UNION ALL
+
+        SELECT 'pa_' || a.id::text AS uid, a.id,
+               COALESCE(a.type,'task') AS type, a.title, a.body, a.status,
+               'partner' AS source_type, p.id::text AS source_id, p.company AS source_name,
+               a.activity_at, a.updated_at, au.display_name AS assigned_to_name
+        FROM crm_partner_activities a
+        JOIN crm_partners p ON p.id = a.partner_id
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id)
+        WHERE a.type != 'email' AND a.status != 'closed' ${taskScopePartners}
+
+        UNION ALL
+
+        SELECT 'onb_' || t.id::text AS uid, NULL::int AS id,
+               t.type, t.title, t.body,
+               CASE WHEN t.done THEN 'closed' ELSE 'open' END AS status,
+               'onboarding' AS source_type, p.id::text AS source_id, p.company AS source_name,
+               t.due_date::timestamptz AS activity_at, COALESCE(t.updated_at, t.created_at) AS updated_at,
+               au.display_name AS assigned_to_name
+        FROM crm_onboarding_tasks t
+        JOIN crm_partners p ON p.id = t.partner_id
+        LEFT JOIN users au ON au.id = t.assigned_to
+        WHERE t.done = false AND t.assigned_to = ${$userId}
+
+        UNION ALL
+
+        SELECT 'doc_' || wt.id::text AS uid, NULL::int AS id,
+               'task' AS type, COALESCE(wt.message, d.name) AS title, NULL::text AS body,
+               'open' AS status,
+               'document' AS source_type, d.id::text AS source_id, d.name AS source_name,
+               wt.due_date::timestamptz AS activity_at, wt.updated_at,
+               NULL::text AS assigned_to_name
+        FROM workflow_tasks wt
+        JOIN documents d ON d.id = wt.document_id
+        WHERE wt.task_status = 'pending' AND wt.assigned_to = ${$userId}
+      ) t
+      ORDER BY
+        CASE WHEN t.activity_at IS NULL THEN 1 ELSE 0 END,
+        t.activity_at ASC
+    `, params);
+
+    res.json(rows);
   } catch (err) { next(err); }
 });
 

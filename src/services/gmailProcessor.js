@@ -127,13 +127,106 @@ async function processNotification(emailAddress, historyId) {
         pool.query("SELECT partner_id FROM crm_partner_activities WHERE gmail_thread_id = $1 LIMIT 1", [msg.threadId]),
       ]);
 
-      const leadId    = leadQ.rows[0]?.lead_id    || null;
-      const partnerId = partnerQ.rows[0]?.partner_id || null;
+      let leadId    = leadQ.rows[0]?.lead_id    || null;
+      let partnerId = partnerQ.rows[0]?.partner_id || null;
       console.log(`[GmailProcessor] Dopasowanie: leadId=${leadId} partnerId=${partnerId}`);
 
       if (!leadId && !partnerId) {
-        console.log(`[GmailProcessor] Nieznany wątek ${msg.threadId} — pominięto`);
-        continue;
+        // Fallback: dopasowanie po adresie email / domenie nadawcy
+        const senderEmail  = parseEmailHeader(msg.from || '').email.toLowerCase();
+        const senderDomain = senderEmail.split('@')[1] || null;
+        const userDomain   = emailAddress.split('@')[1]?.toLowerCase();
+
+        // Pomiń maile wewnętrzne (ta sama domena co konto Gmail)
+        if (!senderDomain || senderDomain === userDomain) {
+          console.log(`[GmailProcessor] Wewnętrzny email / brak domeny — pominięto`);
+          continue;
+        }
+
+        // Dokładne dopasowanie email (lead > partner), łącznie z kontaktami
+        const [elMain, elCon, epMain, epCon] = await Promise.all([
+          pool.query('SELECT id FROM crm_leads WHERE LOWER(email) = $1 LIMIT 1', [senderEmail]),
+          pool.query('SELECT lead_id AS id FROM crm_lead_contacts WHERE LOWER(email) = $1 LIMIT 1', [senderEmail]),
+          pool.query('SELECT id FROM crm_partners WHERE LOWER(email) = $1 LIMIT 1', [senderEmail]),
+          pool.query('SELECT partner_id AS id FROM crm_partner_contacts WHERE LOWER(email) = $1 LIMIT 1', [senderEmail]),
+        ]);
+        leadId    = elMain.rows[0]?.id || elCon.rows[0]?.id    || null;
+        partnerId = epMain.rows[0]?.id || epCon.rows[0]?.id    || null;
+
+        // Dopasowanie po domenie (jeśli brak dokładnego)
+        if (!leadId && !partnerId) {
+          const domainPattern = `%@${senderDomain}`;
+          const [dlMain, dlCon, dpMain, dpCon] = await Promise.all([
+            pool.query("SELECT id FROM crm_leads WHERE LOWER(email) LIKE $1 LIMIT 1", [domainPattern]),
+            pool.query("SELECT lead_id AS id FROM crm_lead_contacts WHERE LOWER(email) LIKE $1 LIMIT 1", [domainPattern]),
+            pool.query("SELECT id FROM crm_partners WHERE LOWER(email) LIKE $1 LIMIT 1", [domainPattern]),
+            pool.query("SELECT partner_id AS id FROM crm_partner_contacts WHERE LOWER(email) LIKE $1 LIMIT 1", [domainPattern]),
+          ]);
+          leadId    = dlMain.rows[0]?.id || dlCon.rows[0]?.id    || null;
+          partnerId = dpMain.rows[0]?.id || dpCon.rows[0]?.id    || null;
+        }
+
+        if (!leadId && !partnerId) {
+          console.log(`[GmailProcessor] Nieznany nadawca ${senderEmail} — pominięto`);
+          continue;
+        }
+
+        const actTable2 = leadId ? 'crm_lead_activities'   : 'crm_partner_activities';
+        const idCol2    = leadId ? 'lead_id'               : 'partner_id';
+        const recordId2 = leadId || partnerId;
+
+        // Utwórz nową aktywność email (guard: nie duplikuj tej samej wiadomości)
+        const insRes = await pool.query(
+          `INSERT INTO ${actTable2}
+             (${idCol2}, type, title, body, activity_at, gmail_thread_id, gmail_message_id, is_read, status, created_by)
+           SELECT $1, 'email', $2, $3, $4, $5, $6, false, 'new', $7
+           WHERE NOT EXISTS (SELECT 1 FROM ${actTable2} WHERE gmail_message_id = $6)
+           RETURNING id`,
+          [recordId2, msg.subject || '(bez tematu)', msg.body || msg.snippet || null,
+           msg.date ? new Date(msg.date) : new Date(), msg.threadId, msg.id, userId],
+        );
+        console.log(`[GmailProcessor] Fallback match: ${actTable2} recordId=${recordId2} email="${senderEmail}" inserted=${insRes.rowCount}`);
+
+        if (insRes.rowCount > 0) {
+          // Zarejestruj wiadomość jako nieprzeczytaną
+          try {
+            await pool.query(
+              `INSERT INTO crm_email_message_reads (gmail_message_id, gmail_thread_id, is_read)
+               VALUES ($1, $2, false)
+               ON CONFLICT (gmail_message_id) DO NOTHING`,
+              [msg.id, msg.threadId],
+            );
+          } catch (e) { /* migracja może nie istnieć */ }
+
+          // Zapisz załączniki
+          for (const att of msg.attachments || []) {
+            try {
+              const buffer = await gmailService.getAttachmentBuffer(userId, msg.id, att.attachmentId);
+              await storeAttachment({
+                leadId:       leadId    || undefined,
+                partnerId:    partnerId || undefined,
+                messageId:    msg.id,
+                attachmentId: att.attachmentId,
+                filename:     att.filename,
+                mimeType:     att.mimeType,
+                buffer,
+                direction:    'received',
+              });
+            } catch (attErr) {
+              console.warn('[GmailProcessor] Fallback attachment failed:', attErr.message);
+            }
+          }
+
+          // Auto-zapisz nadawcę do kontaktów
+          const inboundAddresses = [
+            ...(msg.from ? [msg.from] : []),
+            ...(msg.cc   ? String(msg.cc).split(',').map(s => s.trim()).filter(Boolean) : []),
+          ];
+          if (leadId    && inboundAddresses.length) await autoSaveLeadContacts(leadId, inboundAddresses);
+          if (partnerId && inboundAddresses.length) await autoSavePartnerContacts(partnerId, inboundAddresses);
+        }
+
+        continue; // Pomiń standardowy UPDATE flow
       }
 
       const actTable = leadId ? "crm_lead_activities"   : "crm_partner_activities";

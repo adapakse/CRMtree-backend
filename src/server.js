@@ -7,7 +7,7 @@ const db           = require("./config/database");
 const pubsubPoller = require("./services/pubsubPoller");
 
 const server = app.listen(config.port, () => {
-  logger.info(`worktrips.doc backend running`, {
+  logger.info(`CRMtree backend running`, {
     port: config.port,
     env: config.env,
     appUrl: config.appUrl,

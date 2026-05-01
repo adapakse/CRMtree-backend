@@ -1,8 +1,12 @@
 "use strict";
 
-const { Pool } = require("pg");
+const pg     = require("pg");
+const { Pool } = pg;
 const config = require("./index");
 const logger = require("../utils/logger");
+
+// Keep DATE columns as plain "YYYY-MM-DD" strings — avoids UTC midnight → local day-shift (x-1 bug)
+pg.types.setTypeParser(1082, (val) => val);
 
 const pool = new Pool({
   host: config.db.host,
