@@ -275,11 +275,13 @@ router.post('/:id/reinit',
       );
 
       // ── group_profiles: insert missing (by name), skip existing ─────
+      // Partial index idx_group_profiles_tenant_name has WHERE tenant_id IS NOT NULL
+      // so ON CONFLICT must include the same predicate.
       const { rowCount: groupsCount } = await client.query(
         `INSERT INTO group_profiles (name, display_name, description, has_owner_restriction, is_active, created_at, updated_at, tenant_id)
          SELECT name, display_name, description, has_owner_restriction, is_active, NOW(), NOW(), $1
          FROM group_profiles WHERE tenant_id = $2
-         ON CONFLICT (tenant_id, name) DO NOTHING`,
+         ON CONFLICT (tenant_id, name) WHERE tenant_id IS NOT NULL DO NOTHING`,
         [targetId, goldId]
       );
 
