@@ -73,30 +73,66 @@ router.post('/',
       await client.query('BEGIN');
       const { name, slug, email_domain, dwh_schema_prefix } = req.body;
 
+      // Resolve gold (reference) tenant
+      const { rows: goldRows } = await client.query(
+        `SELECT id FROM tenants WHERE slug = 'crmtree-gold' LIMIT 1`
+      );
+      const goldId = goldRows[0]?.id ?? null;
+
       const { rows } = await client.query(
         `INSERT INTO tenants (name, slug, email_domain, dwh_schema_prefix, created_from_tenant_id)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING *`,
-        [name, slug, email_domain || null, dwh_schema_prefix || null, req.tenantId || null]
+        [name, slug, email_domain || null, dwh_schema_prefix || null, goldId || req.tenantId || null]
       );
       const tenant = rows[0];
 
-      // All features off by default
-      for (const feature of ALL_FEATURES) {
+      // ── Feature flags: copy from gold (or all-off if gold missing) ──
+      if (goldId) {
         await client.query(
-          `INSERT INTO tenant_features (tenant_id, feature, is_enabled) VALUES ($1, $2, false)`,
-          [tenant.id, feature]
+          `INSERT INTO tenant_features (tenant_id, feature, is_enabled)
+           SELECT $1, feature, is_enabled FROM tenant_features WHERE tenant_id = $2`,
+          [tenant.id, goldId]
+        );
+      } else {
+        for (const feature of ALL_FEATURES) {
+          await client.query(
+            `INSERT INTO tenant_features (tenant_id, feature, is_enabled) VALUES ($1, $2, false)`,
+            [tenant.id, feature]
+          );
+        }
+      }
+
+      // ── app_settings: copy all from gold ────────────────────────────
+      if (goldId) {
+        await client.query(
+          `INSERT INTO app_settings (key, value, label, description, value_type, category, updated_at, tenant_id)
+           SELECT key, value, label, description, value_type, category, NOW(), $1
+           FROM app_settings WHERE tenant_id = $2`,
+          [tenant.id, goldId]
         );
       }
 
-      // Password auth enabled by default
+      // ── group_profiles: copy from gold (new UUIDs) ───────────────────
+      if (goldId) {
+        await client.query(
+          `INSERT INTO group_profiles (name, display_name, description, has_owner_restriction, is_active, created_at, updated_at, tenant_id)
+           SELECT name, display_name, description, has_owner_restriction, is_active, NOW(), NOW(), $1
+           FROM group_profiles WHERE tenant_id = $2`,
+          [tenant.id, goldId]
+        );
+      }
+
+      // ── Password auth enabled ────────────────────────────────────────
       await client.query(
         `INSERT INTO tenant_auth_configs (tenant_id, provider, is_enabled) VALUES ($1, 'password', true)`,
         [tenant.id]
       );
 
       await client.query('COMMIT');
-      logger.info('Super admin created tenant', { tenantId: tenant.id, slug, by: req.user.email });
+      logger.info('Super admin created tenant', {
+        tenantId: tenant.id, slug, copiedFromGold: !!goldId, by: req.user.email,
+      });
       res.status(201).json(tenant);
     } catch (err) {
       await client.query('ROLLBACK');
