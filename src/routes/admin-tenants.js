@@ -1,0 +1,245 @@
+'use strict';
+// ─────────────────────────────────────────────────────────────────
+// routes/admin-tenants.js
+//
+// Super-admin API for tenant lifecycle management.
+// All endpoints require is_super_admin = true.
+//
+// GET    /api/admin/tenants           — list all tenants
+// POST   /api/admin/tenants           — create tenant
+// GET    /api/admin/tenants/:id       — tenant details + features
+// PATCH  /api/admin/tenants/:id       — update tenant metadata
+// PUT    /api/admin/tenants/:id/features — bulk-set feature flags
+// POST   /api/admin/tenants/:id/impersonate — get JWT as tenant admin
+// ─────────────────────────────────────────────────────────────────
+
+const router = require('express').Router();
+const { body, param } = require('express-validator');
+const db     = require('../config/database');
+const logger = require('../utils/logger');
+const { requireAuth, requireSuperAdmin, signAccessToken } = require('../middleware/auth');
+const { validate, injectAuditContext } = require('../middleware/errorHandler');
+
+router.use(requireAuth, requireSuperAdmin, injectAuditContext);
+
+const ALL_FEATURES = [
+  'documents', 'leads', 'sales_reports', 'onboarding',
+  'partner_registry', 'dwh_integration', 'performance',
+];
+
+// ── GET / — list all tenants ──────────────────────────────────────
+router.get('/', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(`
+      SELECT
+        t.id, t.name, t.slug, t.email_domain, t.dwh_schema_prefix,
+        t.is_active, t.created_at, t.updated_at,
+        COUNT(DISTINCT u.id) FILTER (WHERE u.is_active = true) AS user_count,
+        COUNT(DISTINCT u.id) AS total_users,
+        COALESCE(
+          JSON_AGG(
+            JSON_BUILD_OBJECT('feature', tf.feature, 'is_enabled', tf.is_enabled)
+            ORDER BY tf.feature
+          ) FILTER (WHERE tf.tenant_id IS NOT NULL),
+          '[]'
+        ) AS features
+      FROM tenants t
+      LEFT JOIN users u ON u.tenant_id = t.id
+      LEFT JOIN tenant_features tf ON tf.tenant_id = t.id
+      GROUP BY t.id
+      ORDER BY t.created_at DESC
+    `);
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// ── POST / — create tenant ────────────────────────────────────────
+router.post('/',
+  [
+    body('name').isString().trim().notEmpty().isLength({ max: 255 }),
+    body('slug').isString().trim().toLowerCase()
+      .matches(/^[a-z0-9][a-z0-9-]*[a-z0-9]$/)
+      .withMessage('slug musi mieć min 2 znaki i zawierać tylko [a-z0-9-]'),
+    body('email_domain').optional({ nullable: true }).isString().trim(),
+    body('dwh_schema_prefix').optional({ nullable: true }).isString().trim()
+      .matches(/^[a-z][a-z0-9_]*$/)
+      .withMessage('dwh_schema_prefix: tylko [a-z0-9_], musi zaczynać się literą'),
+  ], validate,
+  async (req, res, next) => {
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { name, slug, email_domain, dwh_schema_prefix } = req.body;
+
+      const { rows } = await client.query(
+        `INSERT INTO tenants (name, slug, email_domain, dwh_schema_prefix, created_from_tenant_id)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [name, slug, email_domain || null, dwh_schema_prefix || null, req.tenantId || null]
+      );
+      const tenant = rows[0];
+
+      // All features off by default
+      for (const feature of ALL_FEATURES) {
+        await client.query(
+          `INSERT INTO tenant_features (tenant_id, feature, is_enabled) VALUES ($1, $2, false)`,
+          [tenant.id, feature]
+        );
+      }
+
+      // Password auth enabled by default
+      await client.query(
+        `INSERT INTO tenant_auth_configs (tenant_id, provider, is_enabled) VALUES ($1, 'password', true)`,
+        [tenant.id]
+      );
+
+      await client.query('COMMIT');
+      logger.info('Super admin created tenant', { tenantId: tenant.id, slug, by: req.user.email });
+      res.status(201).json(tenant);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      next(err);
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ── GET /:id — tenant details ─────────────────────────────────────
+router.get('/:id',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT t.*,
+                COUNT(DISTINCT u.id) FILTER (WHERE u.is_active = true) AS user_count,
+                COUNT(DISTINCT u.id) AS total_users
+         FROM tenants t
+         LEFT JOIN users u ON u.tenant_id = t.id
+         WHERE t.id = $1
+         GROUP BY t.id`,
+        [req.params.id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Tenant not found' });
+
+      const { rows: features } = await db.query(
+        `SELECT feature, is_enabled FROM tenant_features WHERE tenant_id = $1 ORDER BY feature`,
+        [req.params.id]
+      );
+      const { rows: authConfigs } = await db.query(
+        `SELECT provider, is_enabled FROM tenant_auth_configs WHERE tenant_id = $1 ORDER BY provider`,
+        [req.params.id]
+      );
+
+      res.json({ ...rows[0], features, auth_configs: authConfigs });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PATCH /:id — update tenant metadata ──────────────────────────
+router.patch('/:id',
+  [
+    param('id').isUUID(),
+    body('name').optional().isString().trim().notEmpty().isLength({ max: 255 }),
+    body('email_domain').optional({ nullable: true }),
+    body('dwh_schema_prefix').optional({ nullable: true }),
+    body('is_active').optional().isBoolean(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const allowed = ['name', 'email_domain', 'dwh_schema_prefix', 'is_active'];
+      const sets = [];
+      const vals = [req.params.id];
+      let i = 2;
+      for (const field of allowed) {
+        if (field in req.body) {
+          sets.push(`${field} = $${i++}`);
+          vals.push(req.body[field]);
+        }
+      }
+      if (!sets.length) return res.status(400).json({ error: 'No fields to update' });
+      sets.push(`updated_at = NOW()`);
+
+      const { rows } = await db.query(
+        `UPDATE tenants SET ${sets.join(', ')} WHERE id = $1 RETURNING *`,
+        vals
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Tenant not found' });
+
+      logger.info('Super admin updated tenant', { tenantId: req.params.id, by: req.user.email });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /:id/features — bulk update feature flags ─────────────────
+router.put('/:id/features',
+  [
+    param('id').isUUID(),
+    body('features').isObject(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const { features } = req.body;
+      for (const [feature, enabled] of Object.entries(features)) {
+        if (!ALL_FEATURES.includes(feature)) continue;
+        await db.query(
+          `INSERT INTO tenant_features (tenant_id, feature, is_enabled)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (tenant_id, feature) DO UPDATE SET is_enabled = $3, updated_at = NOW()`,
+          [req.params.id, feature, Boolean(enabled)]
+        );
+      }
+      const { rows } = await db.query(
+        `SELECT feature, is_enabled FROM tenant_features WHERE tenant_id = $1 ORDER BY feature`,
+        [req.params.id]
+      );
+      logger.info('Super admin updated features', { tenantId: req.params.id, by: req.user.email });
+      res.json(rows);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /:id/impersonate — JWT as tenant's admin ─────────────────
+router.post('/:id/impersonate',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT id, email, first_name, last_name, display_name,
+                is_admin, is_active, crm_role, tenant_id, is_super_admin
+         FROM users
+         WHERE tenant_id = $1 AND is_admin = true AND is_active = true
+         ORDER BY created_at ASC
+         LIMIT 1`,
+        [req.params.id]
+      );
+      if (!rows.length) {
+        return res.status(404).json({ error: 'No active admin user found for this tenant' });
+      }
+
+      const impUser = rows[0];
+      const accessToken = signAccessToken(impUser);
+
+      logger.warn('Super admin impersonation', {
+        superAdminId:    req.user.id,
+        superAdminEmail: req.user.email,
+        targetTenantId:  req.params.id,
+        impersonatedId:  impUser.id,
+        impersonatedEmail: impUser.email,
+      });
+
+      res.json({
+        access_token: accessToken,
+        impersonated_user: {
+          id:           impUser.id,
+          email:        impUser.email,
+          display_name: impUser.display_name,
+          tenant_id:    impUser.tenant_id,
+        },
+      });
+    } catch (err) { next(err); }
+  }
+);
+
+module.exports = router;

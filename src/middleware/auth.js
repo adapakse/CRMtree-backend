@@ -201,10 +201,19 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// ─── requireSuperAdmin middleware ────────────────────────────────────────────
+function requireSuperAdmin(req, res, next) {
+  if (!req.user?.is_super_admin) {
+    return res.status(403).json({ error: "Super admin access required" });
+  }
+  next();
+}
+
 module.exports = {
   passport,
   requireAuth,
   requireAdmin,
+  requireSuperAdmin,
   signAccessToken,
   signRefreshToken,
   saveRefreshToken,
