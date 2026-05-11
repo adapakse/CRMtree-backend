@@ -77,7 +77,7 @@ if (samlCert && samlCert.length > 10) {
           // Tylko administratorzy mogą dodawać nowych użytkowników przez panel.
           const { rows } = await db.query(
             `SELECT id, email, first_name, last_name, display_name,
-                    is_admin, is_active, crm_role
+                    is_admin, is_active, crm_role, tenant_id, is_super_admin
              FROM users
              WHERE lower(email) = lower($1)
              LIMIT 1`,
@@ -124,7 +124,7 @@ passport.deserializeUser(async (id, done) => {
   try {
     const { rows } = await db.query(
       `SELECT id, email, first_name, last_name, display_name,
-              is_admin, is_active, crm_role
+              is_admin, is_active, crm_role, tenant_id, is_super_admin
        FROM users WHERE id = $1`,
       [id]
     );
@@ -138,10 +138,12 @@ passport.deserializeUser(async (id, done) => {
 function signAccessToken(user) {
   return jwt.sign(
     {
-      sub:      user.id,
-      email:    user.email,
-      name:     user.display_name,
-      is_admin: user.is_admin,
+      sub:            user.id,
+      email:          user.email,
+      name:           user.display_name,
+      is_admin:       user.is_admin,
+      tenant_id:      user.tenant_id   ?? null,
+      is_super_admin: user.is_super_admin ?? false,
     },
     config.jwt.secret,
     { expiresIn: config.jwt.expiresIn, algorithm: "HS256" }
@@ -173,7 +175,7 @@ async function requireAuth(req, res, next) {
     const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ["HS256"] });
     const { rows } = await db.query(
       `SELECT id, email, first_name, last_name, display_name,
-              is_admin, is_active, crm_role
+              is_admin, is_active, crm_role, tenant_id, is_super_admin
        FROM users WHERE id = $1`,
       [decoded.sub]
     );
