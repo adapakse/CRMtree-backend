@@ -5,7 +5,7 @@
 // Super-admin API for tenant lifecycle management.
 // All endpoints require is_super_admin = true.
 //
-// GET    /api/admin/tenants           — list all tenants
+// GET    /api/admin/tenants                  — list all tenants
 // POST   /api/admin/tenants           — create tenant
 // GET    /api/admin/tenants/:id       — tenant details + features
 // PATCH  /api/admin/tenants/:id       — update tenant metadata
@@ -13,10 +13,12 @@
 // POST   /api/admin/tenants/:id/impersonate — get JWT as tenant admin
 // ─────────────────────────────────────────────────────────────────
 
-const router = require('express').Router();
+const router   = require('express').Router();
+const crypto   = require('crypto');
+const bcrypt   = require('bcryptjs');
 const { body, param } = require('express-validator');
-const db     = require('../config/database');
-const logger = require('../utils/logger');
+const db       = require('../config/database');
+const logger   = require('../utils/logger');
 const { requireAuth, requireSuperAdmin, signAccessToken } = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 
@@ -197,6 +199,66 @@ router.put('/:id/features',
       logger.info('Super admin updated features', { tenantId: req.params.id, by: req.user.email });
       res.json(rows);
     } catch (err) { next(err); }
+  }
+);
+
+// ── GET /:id/users — list users for a tenant ─────────────────────
+router.get('/:id/users',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT id, email, first_name, last_name, display_name,
+                is_admin, is_active, crm_role, created_at, last_login_at
+         FROM users
+         WHERE tenant_id = $1
+         ORDER BY is_admin DESC, display_name ASC`,
+        [req.params.id]
+      );
+      res.json(rows);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /:id/users — create first/additional admin for a tenant ──
+router.post('/:id/users',
+  [
+    param('id').isUUID(),
+    body('email').isEmail().normalizeEmail(),
+    body('first_name').isString().trim().notEmpty().isLength({ max: 100 }),
+    body('last_name').isString().trim().notEmpty().isLength({ max: 100 }),
+    body('is_admin').optional().isBoolean(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const { email, first_name, last_name, is_admin = true } = req.body;
+
+      // Verify tenant exists
+      const { rows: tenantRows } = await db.query('SELECT id FROM tenants WHERE id = $1', [req.params.id]);
+      if (!tenantRows.length) return res.status(404).json({ error: 'Tenant not found' });
+
+      // Generate a secure temp password — shown once, never stored in plain text
+      const tempPassword = crypto.randomBytes(10).toString('base64url').slice(0, 14);
+      const password_hash = await bcrypt.hash(tempPassword, 12);
+
+      const { rows } = await db.query(
+        `INSERT INTO users
+           (email, first_name, last_name, is_active, is_admin, tenant_id, password_hash, must_change_password)
+         VALUES ($1, $2, $3, true, $4, $5, $6, true)
+         RETURNING id, email, first_name, last_name, display_name, is_admin, is_active, created_at`,
+        [email, first_name, last_name, is_admin, req.params.id, password_hash]
+      );
+
+      logger.info('Super admin created tenant user', {
+        tenantId: req.params.id, email, isAdmin: is_admin, by: req.user.email,
+      });
+
+      // Return temp password only once — not stored anywhere readable
+      res.status(201).json({ ...rows[0], temp_password: tempPassword });
+    } catch (err) {
+      if (err.code === '23505') return res.status(409).json({ error: 'User with this email already exists' });
+      next(err);
+    }
   }
 );
 
