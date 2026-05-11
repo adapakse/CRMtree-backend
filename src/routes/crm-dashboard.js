@@ -141,6 +141,17 @@ router.get('/tasks', async (req, res, next) => {
 
         UNION ALL
 
+        SELECT 'la_em_' || a.id::text AS uid, a.id,
+               'email' AS type, a.title, a.body, 'open' AS status,
+               'lead' AS source_type, l.id::text AS source_id, l.company AS source_name,
+               a.activity_at, a.updated_at, au.display_name AS assigned_to_name
+        FROM crm_lead_activities a
+        JOIN crm_leads l ON l.id = a.lead_id
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to)
+        WHERE a.type = 'email' AND a.is_read = false ${taskScopeLeads}
+
+        UNION ALL
+
         SELECT 'pa_' || a.id::text AS uid, a.id,
                COALESCE(a.type,'task') AS type, a.title, a.body, a.status,
                'partner' AS source_type, p.id::text AS source_id, p.company AS source_name,
@@ -149,6 +160,17 @@ router.get('/tasks', async (req, res, next) => {
         JOIN crm_partners p ON p.id = a.partner_id
         LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id)
         WHERE a.type != 'email' AND a.status != 'closed' ${taskScopePartners}
+
+        UNION ALL
+
+        SELECT 'pa_em_' || a.id::text AS uid, a.id,
+               'email' AS type, a.title, a.body, 'open' AS status,
+               'partner' AS source_type, p.id::text AS source_id, p.company AS source_name,
+               a.activity_at, a.updated_at, au.display_name AS assigned_to_name
+        FROM crm_partner_activities a
+        JOIN crm_partners p ON p.id = a.partner_id
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id)
+        WHERE a.type = 'email' AND a.is_read = false ${taskScopePartners}
 
         UNION ALL
 
@@ -285,6 +307,94 @@ router.get('/partner-performance',
         product_mix:    productMix.rows,
         opportunities:  opportunities.rows,
       });
+    } catch (err) { next(err); }
+  }
+);
+
+// GET /api/crm/dashboard/activities — paginated activity feed
+router.get('/activities',
+  [
+    query('offset').optional().isInt({ min: 0 }).toInt(),
+    query('limit').optional().isInt({ min: 1, max: 50 }).toInt(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const offset = parseInt(req.query.offset) || 0;
+      const limit  = Math.min(parseInt(req.query.limit) || 20, 50);
+
+      const raParams = [];
+      const raLeads    = req.scopeFilter('l', 'assigned_to', raParams);
+      const raPartners = req.scopeFilter('p', 'manager_id',  raParams);
+      raParams.push(req.user.id);
+      const raUserId = `$${raParams.length}`;
+      raParams.push(limit);
+      const $limit  = `$${raParams.length}`;
+      raParams.push(offset);
+      const $offset = `$${raParams.length}`;
+
+      const { rows } = await db.query(`
+        SELECT uid, type, title, status, source_type, source_id, source_name,
+               activity_at, updated_at, assigned_to_name
+        FROM (
+          SELECT 'la_' || a.id::text AS uid, COALESCE(a.type,'note') AS type,
+                 a.title, a.status, 'lead' AS source_type,
+                 l.id::text AS source_id, l.company AS source_name,
+                 a.activity_at, a.updated_at, au.display_name AS assigned_to_name
+          FROM crm_lead_activities a
+          JOIN crm_leads l ON l.id = a.lead_id
+          LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to)
+          WHERE a.type != 'email' ${raLeads}
+          UNION ALL
+          SELECT 'la_' || a.id::text AS uid, 'email' AS type,
+                 a.title, a.status, 'lead' AS source_type,
+                 l.id::text AS source_id, l.company AS source_name,
+                 a.activity_at, a.updated_at, NULL::text AS assigned_to_name
+          FROM crm_lead_activities a
+          JOIN crm_leads l ON l.id = a.lead_id
+          WHERE a.type = 'email' AND a.is_read = false ${raLeads}
+          UNION ALL
+          SELECT 'pa_' || a.id::text AS uid, COALESCE(a.type,'note') AS type,
+                 a.title, a.status, 'partner' AS source_type,
+                 p.id::text AS source_id, p.company AS source_name,
+                 a.activity_at, a.updated_at, au.display_name AS assigned_to_name
+          FROM crm_partner_activities a
+          JOIN crm_partners p ON p.id = a.partner_id
+          LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id)
+          WHERE a.type != 'email' ${raPartners}
+          UNION ALL
+          SELECT 'pa_' || a.id::text AS uid, 'email' AS type,
+                 a.title, a.status, 'partner' AS source_type,
+                 p.id::text AS source_id, p.company AS source_name,
+                 a.activity_at, a.updated_at, NULL::text AS assigned_to_name
+          FROM crm_partner_activities a
+          JOIN crm_partners p ON p.id = a.partner_id
+          WHERE a.type = 'email' AND a.is_read = false ${raPartners}
+          UNION ALL
+          SELECT 'onb_' || t.id::text AS uid, t.type AS type,
+                 t.title, 'closed' AS status, 'onboarding' AS source_type,
+                 p.id::text AS source_id, p.company AS source_name,
+                 t.done_at AS activity_at, COALESCE(t.updated_at, t.created_at) AS updated_at,
+                 au.display_name AS assigned_to_name
+          FROM crm_onboarding_tasks t
+          JOIN crm_partners p ON p.id = t.partner_id
+          LEFT JOIN users au ON au.id = t.assigned_to
+          WHERE t.done = true ${raPartners}
+          UNION ALL
+          SELECT 'doc_' || wt.id::text AS uid, 'task' AS type,
+                 COALESCE(wt.message, d.name) AS title, 'closed' AS status, 'document' AS source_type,
+                 d.id::text AS source_id, d.name AS source_name,
+                 wt.completed_at AS activity_at, wt.updated_at,
+                 NULL::text AS assigned_to_name
+          FROM workflow_tasks wt
+          JOIN documents d ON d.id = wt.document_id
+          WHERE wt.task_status = 'completed' AND wt.assigned_to = ${raUserId}
+        ) sub
+        ORDER BY updated_at DESC NULLS LAST
+        LIMIT ${$limit} OFFSET ${$offset}
+      `, raParams);
+
+      res.json(rows);
     } catch (err) { next(err); }
   }
 );

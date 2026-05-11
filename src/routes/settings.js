@@ -5,6 +5,7 @@ const router = express.Router();
 const db = require("../config/database");
 const { requireAuth, requireAdmin } = require("../middleware/auth");
 const { injectAuditContext } = require("../middleware/errorHandler");
+const { clearTrainingModeCache } = require("../utils/trainingMode");
 
 // ─── GET /api/admin/settings ──────────────────────────────────────────────────
 // Returns all settings as a flat key→value object.
@@ -106,6 +107,8 @@ router.put(
               ? row.value === "true"
               : row.value;
       }
+
+      if (keys.includes('crm_training_mode')) clearTrainingModeCache();
 
       // Audit log
       if (req.auditLog) {

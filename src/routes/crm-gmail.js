@@ -15,6 +15,82 @@ const {
   autoSavePartnerContacts,
   storeAttachment,
 } = require("../services/gmailProcessor");
+const { isTrainingMode } = require("../utils/trainingMode");
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Resolves partner by UUID (crm_partners.id) or integer (dwh_partner_id).
+// Returns { id: uuid, company } or null.
+async function resolvePartner(rawId) {
+  if (UUID_RE.test(String(rawId))) {
+    const { rows } = await pool.query(
+      "SELECT id, company FROM crm_partners WHERE id = $1", [rawId]
+    );
+    return rows[0] ?? null;
+  }
+  const num = parseInt(rawId);
+  if (isNaN(num)) return null;
+  const { rows } = await pool.query(
+    "SELECT id, company FROM crm_partners WHERE dwh_partner_id = $1", [num]
+  );
+  if (rows.length) return rows[0];
+  // Not in crm_partners yet — lazy-create from DWH
+  const dm = await pool.query(
+    `SELECT COALESCE(NULLIF(trim(company_name),''), NULLIF(trim(name),''), partner_id::text) AS company
+     FROM dwh.partner WHERE partner_id = $1`, [num]
+  );
+  if (!dm.rows.length) return null;
+  const ins = await pool.query(
+    `INSERT INTO crm_partners (company, dwh_partner_id, status, onboarding_step, created_at, updated_at)
+     VALUES ($1, $2, 'active', 3, now(), now())
+     ON CONFLICT (dwh_partner_id) DO UPDATE SET updated_at = now()
+     RETURNING id, company`,
+    [dm.rows[0].company, num]
+  );
+  return ins.rows[0] ?? null;
+}
+
+// Treść symulowanej odpowiedzi e-mail w trybie szkoleniowym
+const TRAINING_REPLY_BODY = `Dzień dobry,
+
+Dziękuję za wiadomość. Zapoznałem się z przesłaną ofertą i jestem zainteresowany dalszą rozmową.
+Proszę o kontakt w celu umówienia spotkania w przyszłym tygodniu.
+
+Z poważaniem,
+Jan Kowalski
+Dyrektor ds. Operacyjnych`;
+
+async function scheduleTrainingReplyLead(leadId, subject, threadId, userId) {
+  setTimeout(async () => {
+    try {
+      const fakeReplyId = `training_reply_${uuidv4().replace(/-/g, '')}`;
+      await pool.query(
+        `INSERT INTO crm_lead_activities
+           (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, is_read)
+         VALUES ($1, 'email', $2, $3, NOW(), $4, $5, false)`,
+        [leadId, `Re: ${subject}`, TRAINING_REPLY_BODY, threadId, fakeReplyId],
+      );
+    } catch (e) {
+      console.warn('[Training] scheduleTrainingReplyLead failed:', e.message);
+    }
+  }, 45_000);
+}
+
+async function scheduleTrainingReplyPartner(partnerId, subject, threadId) {
+  setTimeout(async () => {
+    try {
+      const fakeReplyId = `training_reply_${uuidv4().replace(/-/g, '')}`;
+      await pool.query(
+        `INSERT INTO crm_partner_activities
+           (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, is_read)
+         VALUES ($1, 'email', $2, $3, NOW(), $4, $5, false)`,
+        [partnerId, `Re: ${subject}`, TRAINING_REPLY_BODY, threadId, fakeReplyId],
+      );
+    } catch (e) {
+      console.warn('[Training] scheduleTrainingReplyPartner failed:', e.message);
+    }
+  }, 45_000);
+}
 
 // multer — do załączników w wysyłce
 let upload = null;
@@ -217,22 +293,45 @@ async function sendLeadHandler(req, res) {
     const leadQ = await pool.query("SELECT id, company FROM crm_leads WHERE id = $1", [leadId]);
     if (!leadQ.rows.length) return res.status(404).json({ error: "Lead nie znaleziony" });
 
-    const attachments = (req.files || []).map((f) => ({
-      filename: f.originalname,
-      mimeType: f.mimetype,
-      data:     f.buffer.toString("base64"),
-      _buffer:  f.buffer,  // zachowaj Buffer do zapisu w blob
-    }));
+    const training = await isTrainingMode();
 
-    const { messageId, threadId: sentThreadId } = await gmailService.sendEmail({
-      userId:      req.user.id,
-      to, cc: cc || null, subject,
-      body:        body || "",
-      threadId:    threadId   || null,
-      inReplyTo:   inReplyTo  || null,
-      references:  references || null,
-      attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
-    });
+    let messageId, sentThreadId;
+
+    if (training) {
+      messageId    = `training_sent_${uuidv4().replace(/-/g, '')}`;
+      sentThreadId = threadId || `training_thread_${uuidv4().replace(/-/g, '')}`;
+    } else {
+      const attachments = (req.files || []).map((f) => ({
+        filename: f.originalname,
+        mimeType: f.mimetype,
+        data:     f.buffer.toString("base64"),
+        _buffer:  f.buffer,
+      }));
+
+      const sent = await gmailService.sendEmail({
+        userId:      req.user.id,
+        to, cc: cc || null, subject,
+        body:        body || "",
+        threadId:    threadId   || null,
+        inReplyTo:   inReplyTo  || null,
+        references:  references || null,
+        attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
+      });
+      messageId    = sent.messageId;
+      sentThreadId = sent.threadId;
+
+      for (const att of attachments) {
+        storeAttachment({
+          leadId,
+          messageId,
+          attachmentId: null,
+          filename:     att.filename,
+          mimeType:     att.mimeType,
+          buffer:       att._buffer,
+          direction:    "sent",
+        }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
+      }
+    }
 
     // Zapisz aktywność
     const actR = await pool.query(
@@ -243,25 +342,16 @@ async function sendLeadHandler(req, res) {
       [leadId, subject, body || null, sentThreadId, messageId, req.user.id],
     );
 
-    // Zapisz wysłane załączniki do Blob (asynchronicznie — nie blokuj odpowiedzi)
-    for (const att of attachments) {
-      storeAttachment({
-        leadId,
-        messageId,
-        attachmentId: null,   // wysłane attachmenty nie mają Gmail attachmentId
-        filename:     att.filename,
-        mimeType:     att.mimeType,
-        buffer:       att._buffer,
-        direction:    "sent",
-      }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
-    }
-
     // Auto-zapis odbiorców (To + CC) do extra_contacts leada
     const allRecipients = [
       ...String(to).split(",").map((s) => s.trim()).filter(Boolean),
       ...(cc ? String(cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
     ];
     await autoSaveLeadContacts(leadId, allRecipients);
+
+    if (training) {
+      scheduleTrainingReplyLead(leadId, subject, sentThreadId, req.user.id);
+    }
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
@@ -285,65 +375,63 @@ if (upload) {
 
 async function sendPartnerHandler(req, res) {
   try {
-    const partnerId = parseInt(req.params.partnerId);
     const { to, cc, subject, body, threadId, inReplyTo, references } = req.body;
 
     if (!to || !subject) {
       return res.status(400).json({ error: "Pola 'to' i 'subject' są wymagane" });
     }
 
-    let partnerQ = await pool.query("SELECT id, company FROM crm_partners WHERE dwh_partner_id = $1", [partnerId]);
-    if (!partnerQ.rows.length) {
-      const dm = await pool.query(
-        `SELECT COALESCE(NULLIF(trim(company_name),''), NULLIF(trim(name),''), partner_id::text) AS company FROM dwh.partner WHERE partner_id = $1`, [partnerId]
-      );
-      if (!dm.rows.length) return res.status(404).json({ error: "Partner nie znaleziony" });
-      partnerQ = await pool.query(
-        `INSERT INTO crm_partners (company, dwh_partner_id, status, onboarding_step, created_at, updated_at)
-         VALUES ($1, $2, 'active', 3, now(), now())
-         ON CONFLICT (dwh_partner_id) DO UPDATE SET updated_at = now()
-         RETURNING id, company`,
-        [dm.rows[0].company, partnerId]
-      );
+    const partner = await resolvePartner(req.params.partnerId);
+    if (!partner) return res.status(404).json({ error: "Partner nie znaleziony" });
+
+    const training = await isTrainingMode();
+
+    let messageId, sentThreadId;
+    const crmPartnerId = partner.id;
+
+    if (training) {
+      messageId    = `training_sent_${uuidv4().replace(/-/g, '')}`;
+      sentThreadId = threadId || `training_thread_${uuidv4().replace(/-/g, '')}`;
+    } else {
+      const attachments = (req.files || []).map((f) => ({
+        filename: f.originalname,
+        mimeType: f.mimetype,
+        data:     f.buffer.toString("base64"),
+        _buffer:  f.buffer,
+      }));
+
+      const sent = await gmailService.sendEmail({
+        userId:      req.user.id,
+        to, cc: cc || null, subject,
+        body:        body || "",
+        threadId:    threadId   || null,
+        inReplyTo:   inReplyTo  || null,
+        references:  references || null,
+        attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
+      });
+      messageId    = sent.messageId;
+      sentThreadId = sent.threadId;
+
+      for (const att of attachments) {
+        storeAttachment({
+          partnerId: crmPartnerId,
+          messageId,
+          attachmentId: null,
+          filename:     att.filename,
+          mimeType:     att.mimeType,
+          buffer:       att._buffer,
+          direction:    "sent",
+        }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
+      }
     }
-
-    const attachments = (req.files || []).map((f) => ({
-      filename: f.originalname,
-      mimeType: f.mimetype,
-      data:     f.buffer.toString("base64"),
-      _buffer:  f.buffer,
-    }));
-
-    const { messageId, threadId: sentThreadId } = await gmailService.sendEmail({
-      userId:      req.user.id,
-      to, cc: cc || null, subject,
-      body:        body || "",
-      threadId:    threadId   || null,
-      inReplyTo:   inReplyTo  || null,
-      references:  references || null,
-      attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
-    });
 
     const actR = await pool.query(
       `INSERT INTO crm_partner_activities
          (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, is_read)
        VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, true)
        RETURNING id`,
-      [partnerQ.rows[0].id, subject, body || null, sentThreadId, messageId, req.user.id],
+      [crmPartnerId, subject, body || null, sentThreadId, messageId, req.user.id],
     );
-
-    const crmPartnerId = partnerQ.rows[0].id;
-    for (const att of attachments) {
-      storeAttachment({
-        partnerId: crmPartnerId,
-        messageId,
-        attachmentId: null,
-        filename:     att.filename,
-        mimeType:     att.mimeType,
-        buffer:       att._buffer,
-        direction:    "sent",
-      }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
-    }
 
     // Auto-zapis odbiorców (To + CC) do kontaktów partnera
     const allRecipients = [
@@ -351,6 +439,10 @@ async function sendPartnerHandler(req, res) {
       ...(cc ? String(cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
     ];
     await autoSavePartnerContacts(crmPartnerId, allRecipients);
+
+    if (training) {
+      scheduleTrainingReplyPartner(crmPartnerId, subject, sentThreadId);
+    }
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
@@ -456,7 +548,8 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
 
 router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const partnerId = parseInt(req.params.partnerId);
+    const resolved  = await resolvePartner(req.params.partnerId);
+    const partnerId = resolved?.id ?? req.params.partnerId;
     const messages  = await gmailService.getThread(req.user.id, req.params.threadId);
 
     for (const msg of messages) {
