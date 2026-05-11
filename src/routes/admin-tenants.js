@@ -238,6 +238,73 @@ router.put('/:id/features',
   }
 );
 
+// ── POST /:id/reinit — copy settings from gold to existing tenant ─
+router.post('/:id/reinit',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { rows: tenantRows } = await client.query(
+        `SELECT id, name FROM tenants WHERE id = $1`, [req.params.id]
+      );
+      if (!tenantRows.length) return res.status(404).json({ error: 'Tenant not found' });
+
+      const { rows: goldRows } = await client.query(
+        `SELECT id FROM tenants WHERE slug = 'crmtree-gold' LIMIT 1`
+      );
+      if (!goldRows.length) return res.status(404).json({ error: 'Tenant crmtree-gold not found' });
+
+      const goldId    = goldRows[0].id;
+      const targetId  = req.params.id;
+
+      // ── app_settings: upsert (update existing, insert missing) ──────
+      const { rowCount: settingsCount } = await client.query(
+        `INSERT INTO app_settings (key, value, label, description, value_type, category, updated_at, tenant_id)
+         SELECT key, value, label, description, value_type, category, NOW(), $1
+         FROM app_settings WHERE tenant_id = $2
+         ON CONFLICT (tenant_id, key) DO UPDATE SET
+           value       = EXCLUDED.value,
+           label       = EXCLUDED.label,
+           description = EXCLUDED.description,
+           value_type  = EXCLUDED.value_type,
+           category    = EXCLUDED.category,
+           updated_at  = NOW()`,
+        [targetId, goldId]
+      );
+
+      // ── group_profiles: insert missing (by name), skip existing ─────
+      const { rowCount: groupsCount } = await client.query(
+        `INSERT INTO group_profiles (name, display_name, description, has_owner_restriction, is_active, created_at, updated_at, tenant_id)
+         SELECT name, display_name, description, has_owner_restriction, is_active, NOW(), NOW(), $1
+         FROM group_profiles WHERE tenant_id = $2
+         ON CONFLICT (tenant_id, name) DO NOTHING`,
+        [targetId, goldId]
+      );
+
+      // ── tenant_features: upsert from gold ───────────────────────────
+      await client.query(
+        `INSERT INTO tenant_features (tenant_id, feature, is_enabled)
+         SELECT $1, feature, is_enabled FROM tenant_features WHERE tenant_id = $2
+         ON CONFLICT (tenant_id, feature) DO UPDATE SET is_enabled = EXCLUDED.is_enabled, updated_at = NOW()`,
+        [targetId, goldId]
+      );
+
+      await client.query('COMMIT');
+      logger.info('Super admin reinit tenant from gold', {
+        tenantId: targetId, settingsCount, groupsCount, by: req.user.email,
+      });
+      res.json({ reinitialized: true, settings_upserted: settingsCount, groups_inserted: groupsCount });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      next(err);
+    } finally {
+      client.release();
+    }
+  }
+);
+
 // ── GET /:id/users — list users for a tenant ─────────────────────
 router.get('/:id/users',
   [param('id').isUUID()], validate,
