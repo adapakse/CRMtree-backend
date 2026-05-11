@@ -574,7 +574,7 @@ router.get('/logs', async (req, res, next) => {
     const { rows } = await db.query(`
       SELECT l.*, u.display_name AS imported_by_name
       FROM crm_import_logs l
-      LEFT JOIN users u ON u.id = l.imported_by
+      LEFT JOIN users u ON u.id = l.imported_by AND u.tenant_id = $1
       ${where}
       ORDER BY l.started_at DESC
       LIMIT 100
@@ -642,7 +642,7 @@ router.get('/export/:type', async (req, res, next) => {
       const { rows } = await db.query(`
         SELECT l.*, u.email AS assigned_to_email_val
         FROM crm_leads l
-        LEFT JOIN users u ON u.id = l.assigned_to
+        LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
         WHERE l.converted_at IS NULL AND l.tenant_id = $1 ${scope}
         ORDER BY l.company
       `, params);
@@ -673,7 +673,7 @@ router.get('/export/:type', async (req, res, next) => {
                mu.email AS manager_email_val
         FROM crm_partners p
         LEFT JOIN crm_partner_groups g ON g.id = p.group_id
-        LEFT JOIN users mu ON mu.id = p.manager_id
+        LEFT JOIN users mu ON mu.id = p.manager_id AND mu.tenant_id = $1
         WHERE p.tenant_id = $1
         ORDER BY p.company
       `, [req.tenantId]);
@@ -723,10 +723,10 @@ router.get('/export/:type', async (req, res, next) => {
                '') AS tags_str
         FROM documents d
         LEFT JOIN group_profiles gp ON gp.id = d.group_id
-        LEFT JOIN users u ON u.id = d.owner_id
-        WHERE d.deleted_at IS NULL
+        LEFT JOIN users u ON u.id = d.owner_id AND u.tenant_id = $1
+        WHERE d.deleted_at IS NULL AND d.tenant_id = $1
         ORDER BY d.doc_number
-      `);
+      `, [req.tenantId]);
 
       const lines = [header];
       for (const r of rows) {

@@ -27,7 +27,7 @@ router.get('/', async (req, res, next) => {
                'onboarding_step',p.onboarding_step
              )) FILTER (WHERE p.id IS NOT NULL), '[]') AS partners
       FROM crm_partner_groups g
-      LEFT JOIN users u ON u.id = g.manager_id
+      LEFT JOIN users u ON u.id = g.manager_id AND u.tenant_id = $1
       LEFT JOIN crm_partners p ON p.group_id = g.id
       WHERE g.tenant_id = $1
       GROUP BY g.id, u.display_name
@@ -94,9 +94,9 @@ router.get('/:id', [param('id').isInt()], validate, async (req, res, next) => {
           'manager_name',pu.display_name,'onboarding_step',p.onboarding_step
         )) FILTER (WHERE p.id IS NOT NULL), '[]') AS partners
       FROM crm_partner_groups g
-      LEFT JOIN users u ON u.id = g.manager_id
+      LEFT JOIN users u ON u.id = g.manager_id AND u.tenant_id = $2
       LEFT JOIN crm_partners p ON p.group_id = g.id
-      LEFT JOIN users pu ON pu.id = p.manager_id
+      LEFT JOIN users pu ON pu.id = p.manager_id AND pu.tenant_id = $2
       WHERE g.id = $1 AND g.tenant_id = $2
       GROUP BY g.id, u.display_name
     `, [parseInt(req.params.id), req.tenantId]);

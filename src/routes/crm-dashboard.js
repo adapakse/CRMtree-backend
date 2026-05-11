@@ -44,7 +44,7 @@ router.get('/', async (req, res, next) => {
         SELECT l.id, l.company, l.stage, l.value_pln, l.hot, l.updated_at,
                u.display_name AS assigned_to_name
         FROM crm_leads l
-        LEFT JOIN users u ON u.id = l.assigned_to
+        LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
         WHERE l.tenant_id = $1 AND l.converted_at IS NULL ${scopeLeads}
         ORDER BY l.updated_at DESC LIMIT 10
       `, params),
@@ -56,7 +56,7 @@ router.get('/', async (req, res, next) => {
                a.activity_at, a.updated_at, au.display_name AS assigned_to_name
         FROM crm_lead_activities a
         JOIN crm_leads l ON l.id = a.lead_id
-        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to)
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to) AND au.tenant_id = $1
         WHERE a.tenant_id = $1 AND a.type != 'email' ${raLeads}
         UNION ALL
         SELECT 'la_' || a.id::text AS uid, 'email' AS type,
@@ -73,7 +73,7 @@ router.get('/', async (req, res, next) => {
                a.activity_at, a.updated_at, au.display_name AS assigned_to_name
         FROM crm_partner_activities a
         JOIN crm_partners p ON p.id = a.partner_id
-        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id)
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id) AND au.tenant_id = $1
         WHERE a.tenant_id = $1 AND a.type != 'email' ${raPartners}
         UNION ALL
         SELECT 'pa_' || a.id::text AS uid, 'email' AS type,
@@ -91,7 +91,7 @@ router.get('/', async (req, res, next) => {
                au.display_name AS assigned_to_name
         FROM crm_onboarding_tasks t
         JOIN crm_partners p ON p.id = t.partner_id
-        LEFT JOIN users au ON au.id = t.assigned_to
+        LEFT JOIN users au ON au.id = t.assigned_to AND au.tenant_id = $1
         WHERE t.done = true AND p.tenant_id = $1 ${raPartners}
         UNION ALL
         SELECT 'doc_' || wt.id::text AS uid, 'task' AS type,
@@ -136,7 +136,7 @@ router.get('/tasks', async (req, res, next) => {
                a.activity_at, a.updated_at, au.display_name AS assigned_to_name
         FROM crm_lead_activities a
         JOIN crm_leads l ON l.id = a.lead_id
-        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to)
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to) AND au.tenant_id = $1
         WHERE a.tenant_id = $1 AND a.type != 'email' AND a.status != 'closed' ${taskScopeLeads}
 
         UNION ALL
@@ -147,7 +147,7 @@ router.get('/tasks', async (req, res, next) => {
                a.activity_at, a.updated_at, au.display_name AS assigned_to_name
         FROM crm_lead_activities a
         JOIN crm_leads l ON l.id = a.lead_id
-        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to)
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to) AND au.tenant_id = $1
         WHERE a.tenant_id = $1 AND a.type = 'email' AND a.is_read = false ${taskScopeLeads}
 
         UNION ALL
@@ -158,7 +158,7 @@ router.get('/tasks', async (req, res, next) => {
                a.activity_at, a.updated_at, au.display_name AS assigned_to_name
         FROM crm_partner_activities a
         JOIN crm_partners p ON p.id = a.partner_id
-        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id)
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id) AND au.tenant_id = $1
         WHERE a.tenant_id = $1 AND a.type != 'email' AND a.status != 'closed' ${taskScopePartners}
 
         UNION ALL
@@ -169,7 +169,7 @@ router.get('/tasks', async (req, res, next) => {
                a.activity_at, a.updated_at, au.display_name AS assigned_to_name
         FROM crm_partner_activities a
         JOIN crm_partners p ON p.id = a.partner_id
-        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id)
+        LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id) AND au.tenant_id = $1
         WHERE a.tenant_id = $1 AND a.type = 'email' AND a.is_read = false ${taskScopePartners}
 
         UNION ALL
@@ -182,7 +182,7 @@ router.get('/tasks', async (req, res, next) => {
                au.display_name AS assigned_to_name
         FROM crm_onboarding_tasks t
         JOIN crm_partners p ON p.id = t.partner_id
-        LEFT JOIN users au ON au.id = t.assigned_to
+        LEFT JOIN users au ON au.id = t.assigned_to AND au.tenant_id = $1
         WHERE t.done = false AND p.tenant_id = $1 AND t.assigned_to = ${$userId}
 
         UNION ALL
@@ -254,7 +254,7 @@ router.get('/partner-performance',
              WHERE o.partner_id = p.id AND o.tenant_id = p.tenant_id AND o.status = 'open') AS open_opp_value
           FROM crm_partners p
           LEFT JOIN crm_partner_groups g ON g.id = p.group_id
-          LEFT JOIN users u ON u.id = p.manager_id
+          LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
           WHERE p.tenant_id = $1 ${scopePartners}
           ORDER BY p.arr DESC NULLS LAST
         `, params),
@@ -346,7 +346,7 @@ router.get('/activities',
                  a.activity_at, a.updated_at, au.display_name AS assigned_to_name
           FROM crm_lead_activities a
           JOIN crm_leads l ON l.id = a.lead_id
-          LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to)
+          LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to) AND au.tenant_id = $1
           WHERE a.tenant_id = $1 AND a.type != 'email' ${raLeads}
           UNION ALL
           SELECT 'la_' || a.id::text AS uid, 'email' AS type,
@@ -363,7 +363,7 @@ router.get('/activities',
                  a.activity_at, a.updated_at, au.display_name AS assigned_to_name
           FROM crm_partner_activities a
           JOIN crm_partners p ON p.id = a.partner_id
-          LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id)
+          LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id) AND au.tenant_id = $1
           WHERE a.tenant_id = $1 AND a.type != 'email' ${raPartners}
           UNION ALL
           SELECT 'pa_' || a.id::text AS uid, 'email' AS type,
@@ -381,7 +381,7 @@ router.get('/activities',
                  au.display_name AS assigned_to_name
           FROM crm_onboarding_tasks t
           JOIN crm_partners p ON p.id = t.partner_id
-          LEFT JOIN users au ON au.id = t.assigned_to
+          LEFT JOIN users au ON au.id = t.assigned_to AND au.tenant_id = $1
           WHERE t.done = true AND p.tenant_id = $1 ${raPartners}
           UNION ALL
           SELECT 'doc_' || wt.id::text AS uid, 'task' AS type,
@@ -415,7 +415,7 @@ router.get('/renewals', async (req, res, next) => {
         END AS adoption_pct,
         (p.contract_expires - CURRENT_DATE) AS days_until_expiry
       FROM crm_partners p
-      LEFT JOIN users u ON u.id = p.manager_id
+      LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
       WHERE p.tenant_id = $1
         AND p.contract_expires IS NOT NULL
         AND p.status IN ('active','onboarding')

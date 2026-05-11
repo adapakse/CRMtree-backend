@@ -33,11 +33,11 @@ const DWH_FIN_SELECT = `
   SUM(s.number_of_products)::int               AS transactions_count,
   0                                             AS pax_count`;
 
-// JOIN partnerów CRM przez klucz DWH (zawiera też dwh.partner dla filtrów)
+// JOIN partnerów CRM przez klucz DWH ($1 zawsze = tenantId)
 const DWH_JOIN_PARTNERS = `
-  LEFT JOIN crm_partners p ON p.dwh_partner_id = s.partner_id
-  LEFT JOIN users u ON u.id = p.manager_id
-  LEFT JOIN crm_partner_groups g ON g.id = p.group_id
+  LEFT JOIN crm_partners p ON p.dwh_partner_id = s.partner_id AND p.tenant_id = $1
+  LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
+  LEFT JOIN crm_partner_groups g ON g.id = p.group_id AND g.tenant_id = $1
   LEFT JOIN dwh.partner dm ON dm.partner_id = s.partner_id`;
 
 // Zawsze wykluczaj konta testowe z DWH
@@ -61,11 +61,12 @@ router.get('/partners', requireAuth, crmAuth, async (req, res, next) => {
          s.partner_id                         AS dwh_partner_id,
          u.display_name                       AS salesperson_name
        FROM dwh.sales s
-       LEFT JOIN crm_partners p ON p.dwh_partner_id = s.partner_id
+       LEFT JOIN crm_partners p ON p.dwh_partner_id = s.partner_id AND p.tenant_id = $1
        LEFT JOIN dwh.partner dm ON dm.partner_id = s.partner_id
-       LEFT JOIN users u ON u.id = p.manager_id
+       LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
        WHERE COALESCE(dm.is_test_account, false) = false
-       ORDER BY partner_name`
+       ORDER BY partner_name`,
+      [req.tenantId]
     );
     res.json(rows);
   } catch (err) { next(err); }
@@ -106,7 +107,7 @@ router.get('/summary', requireAuth, crmAuth, async (req, res, next) => {
 router.get('/by-partner', requireAuth, crmAuth, loadCrmScope, async (req, res, next) => {
   try {
     const { service_category, salesperson_name } = req.query;
-    const where = [], params = [];
+    const where = [], params = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN_PARTNERS)
 
     addPeriodFilters(where, params, req.query.period_from, req.query.period_to);
     if (service_category)  { params.push(service_category);  where.push(`s.service_category = $${params.length}`); }
@@ -145,7 +146,7 @@ router.get('/by-partner', requireAuth, crmAuth, loadCrmScope, async (req, res, n
 router.get('/by-salesperson', requireAuth, crmAuth, loadCrmScope, async (req, res, next) => {
   try {
     const { service_category } = req.query;
-    const where = [], params = [];
+    const where = [], params = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN_PARTNERS)
 
     addPeriodFilters(where, params, req.query.period_from, req.query.period_to);
     if (service_category) { params.push(service_category); where.push(`s.service_category = $${params.length}`); }
@@ -205,7 +206,7 @@ router.get('/by-product', requireAuth, crmAuth, async (req, res, next) => {
 router.get('/', requireAuth, crmAuth, async (req, res, next) => {
   try {
     const { service_category, partner_id } = req.query;
-    const where = [], params = [];
+    const where = [], params = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN_PARTNERS)
     addPeriodFilters(where, params, req.query.period_from, req.query.period_to);
     if (service_category) { params.push(service_category);  where.push(`s.service_category = $${params.length}`); }
     if (partner_id)       { params.push(parseInt(partner_id)); where.push(`s.partner_id = $${params.length}`); }
@@ -248,7 +249,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
     const pto   = req.query.period_to   || '';
 
     function buildConditions() {
-      const w = [], p = [];
+      const w = [], p = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN_PARTNERS)
       addPeriodFilters(w, p, pfrom, pto);
       if (service_category) { p.push(service_category);   w.push(`s.service_category = $${p.length}`); }
       if (!req.isCrmManager && !req.crmGlobalRead) {
@@ -352,7 +353,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
       const prevPFrom = prevFromDate.toISOString().substring(0, 7);
       const prevPTo   = prevToDate.toISOString().substring(0, 7);
 
-      const prevW = [], prevP = [];
+      const prevW = [], prevP = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN_PARTNERS)
       addPeriodFilters(prevW, prevP, prevPFrom, prevPTo);
       if (service_category) { prevP.push(service_category); prevW.push(`s.service_category = $${prevP.length}`); }
       if (!req.isCrmManager && !req.crmGlobalRead) { prevP.push(req.user.id);  prevW.push(`p.manager_id = $${prevP.length}`); }

@@ -92,7 +92,7 @@ router.get("/onboarding", requireAuth, crmAuth, async (req, res) => {
              (SELECT COUNT(*) FROM crm_onboarding_tasks t WHERE t.partner_id = p.id AND t.done = true)::int AS done_count
       FROM crm_partners p
       LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
-      LEFT JOIN users u ON u.id = p.manager_id
+      LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
       ${where}
       ORDER BY p.created_at DESC
     `, params);
@@ -152,8 +152,8 @@ router.get("/onboarding/tasks", requireAuth, crmAuth, async (req, res) => {
              db.display_name AS done_by_name
       FROM crm_onboarding_tasks t
       JOIN crm_partners p ON p.id = t.partner_id
-      LEFT JOIN users u  ON u.id  = t.assigned_to
-      LEFT JOIN users db ON db.id = t.done_by
+      LEFT JOIN users u  ON u.id  = t.assigned_to AND u.tenant_id  = $1
+      LEFT JOIN users db ON db.id = t.done_by     AND db.tenant_id = $1
       ${where}
       ORDER BY t.due_date ASC NULLS LAST, t.created_at ASC
     `, params);
@@ -276,7 +276,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               (SELECT COUNT(*) FROM crm_partner_documents WHERE partner_id = p.id AND tenant_id = p.tenant_id)::int AS doc_count
        FROM dwh.partner dm
        FULL OUTER JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
-       LEFT JOIN users u ON u.id = p.manager_id
+       LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        ${whereSql}
        ORDER BY ${orderExpr}
@@ -348,9 +348,9 @@ router.get("/tasks", requireAuth, crmAuth, async (req, res) => {
         a.assigned_to    AS act_assigned_to_id
       FROM crm_partner_activities a
       JOIN crm_partners p   ON p.id  = a.partner_id
-      LEFT JOIN users u     ON u.id  = a.created_by
-      LEFT JOIN users mu    ON mu.id = p.manager_id
-      LEFT JOIN users au    ON au.id = a.assigned_to
+      LEFT JOIN users u     ON u.id  = a.created_by  AND u.tenant_id  = $1
+      LEFT JOIN users mu    ON mu.id = p.manager_id  AND mu.tenant_id = $1
+      LEFT JOIN users au    ON au.id = a.assigned_to AND au.tenant_id = $1
       ${where}
       ORDER BY
         CASE WHEN a.activity_at IS NULL THEN 1 ELSE 0 END,
@@ -506,7 +506,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name
        FROM crm_partners p
        LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
-       LEFT JOIN users u ON u.id = p.manager_id
+       LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $2
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        WHERE p.id = $1 AND p.tenant_id = $2`,
       [crmId, req.tenantId]
@@ -532,8 +532,8 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               u.display_name  AS created_by_name,
               au.display_name AS assigned_to_name
        FROM crm_partner_activities a
-       LEFT JOIN users u  ON u.id  = a.created_by
-       LEFT JOIN users au ON au.id = a.assigned_to
+       LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
+       LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
        WHERE a.partner_id = $1 AND a.tenant_id = $2
        ORDER BY a.activity_at DESC NULLS LAST`,
       [crmId, req.tenantId]
@@ -850,7 +850,7 @@ router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
     const r = await pool.query(
       `SELECT a.*, u.display_name AS created_by_name
        FROM crm_partner_activities a
-       LEFT JOIN users u ON u.id = a.created_by
+       LEFT JOIN users u ON u.id = a.created_by AND u.tenant_id = $2
        WHERE a.partner_id = $1 AND a.tenant_id = $2
        ORDER BY a.activity_at DESC`,
       [crmId, req.tenantId]
@@ -897,8 +897,8 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
         created_by, status, tenant_id
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'new',$17)
       RETURNING *,
-        (SELECT display_name FROM users WHERE id = created_by)  AS created_by_name,
-        (SELECT display_name FROM users WHERE id = assigned_to) AS assigned_to_name`,
+        (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $17) AS created_by_name,
+        (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $17) AS assigned_to_name`,
       [
         partnerId, type, title, body || null,
         activity_at || null,
@@ -927,7 +927,7 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
       setImmediate(async () => {
         try {
           const { rows: assigneeRows } = await pool.query(
-            'SELECT email, display_name FROM users WHERE id=$1', [assigned_to]
+            'SELECT email, display_name FROM users WHERE id=$1 AND tenant_id=$2', [assigned_to, req.tenantId]
           );
           if (assigneeRows.length && assigneeRows[0].email) {
             await email.sendCrmActivityAssigned({
@@ -1032,8 +1032,8 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
           updated_at=NOW()
       WHERE id=$14 AND tenant_id=$15
       RETURNING *,
-        (SELECT display_name FROM users WHERE id = created_by)  AS created_by_name,
-        (SELECT display_name FROM users WHERE id = assigned_to) AS assigned_to_name
+        (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $15) AS created_by_name,
+        (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $15) AS assigned_to_name
     `, [type, title, body||null, activity_at||null, participants||null, meeting_location||null,
         assigned_to||null, newStatus, close_comment||null,
         opp_value??null, opp_currency||'PLN', opp_status||null, opp_due_date||null,
@@ -1141,8 +1141,8 @@ router.get("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
     const r = await pool.query(
       `SELECT t.*, u.display_name AS assigned_to_name, d.display_name AS done_by_name
        FROM crm_onboarding_tasks t
-       LEFT JOIN users u ON u.id = t.assigned_to
-       LEFT JOIN users d ON d.id = t.done_by
+       LEFT JOIN users u ON u.id = t.assigned_to AND u.tenant_id = $2
+       LEFT JOIN users d ON d.id = t.done_by AND d.tenant_id = $2
        WHERE t.partner_id = $1 AND t.tenant_id = $2
        ORDER BY t.step, t.created_at`,
       [crmId, req.tenantId]
@@ -1166,7 +1166,7 @@ router.post("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
     );
     const task = r.rows[0];
     if (assigned_to) {
-      const uQ = await pool.query("SELECT display_name FROM users WHERE id=$1", [assigned_to]);
+      const uQ = await pool.query("SELECT display_name FROM users WHERE id=$1 AND tenant_id=$2", [assigned_to, req.tenantId]);
       task.assigned_to_name = uQ.rows[0]?.display_name || null;
     }
     res.status(201).json(task);
@@ -1210,11 +1210,11 @@ router.patch("/:id/onboarding-tasks/:taskId", requireAuth, crmAuth, async (req, 
     if (!r.rows.length) return res.status(404).json({ error: "Nie znaleziono" });
     const task = r.rows[0];
     if (task.assigned_to) {
-      const uQ = await pool.query("SELECT display_name FROM users WHERE id=$1", [task.assigned_to]);
+      const uQ = await pool.query("SELECT display_name FROM users WHERE id=$1 AND tenant_id=$2", [task.assigned_to, req.tenantId]);
       task.assigned_to_name = uQ.rows[0]?.display_name || null;
     }
     if (task.done_by) {
-      const dQ = await pool.query("SELECT display_name FROM users WHERE id=$1", [task.done_by]);
+      const dQ = await pool.query("SELECT display_name FROM users WHERE id=$1 AND tenant_id=$2", [task.done_by, req.tenantId]);
       task.done_by_name = dQ.rows[0]?.display_name || null;
     }
     res.json(task);
@@ -1246,8 +1246,8 @@ router.get("/:id/tasks", requireAuth, crmAuth, async (req, res) => {
     const r = await pool.query(
       `SELECT t.*, u.display_name AS assigned_to_name, d.display_name AS done_by_name
        FROM crm_onboarding_tasks t
-       LEFT JOIN users u ON u.id = t.assigned_to
-       LEFT JOIN users d ON d.id = t.done_by
+       LEFT JOIN users u ON u.id = t.assigned_to AND u.tenant_id = $2
+       LEFT JOIN users d ON d.id = t.done_by AND d.tenant_id = $2
        WHERE t.partner_id = $1 AND t.tenant_id = $2
        ORDER BY t.step, t.created_at`,
       [crmId, req.tenantId]
@@ -1271,7 +1271,7 @@ router.post("/:id/tasks", requireAuth, crmAuth, async (req, res) => {
     );
     const task = r.rows[0];
     if (assigned_to) {
-      const uQ = await pool.query("SELECT display_name FROM users WHERE id=$1", [assigned_to]);
+      const uQ = await pool.query("SELECT display_name FROM users WHERE id=$1 AND tenant_id=$2", [assigned_to, req.tenantId]);
       task.assigned_to_name = uQ.rows[0]?.display_name || null;
     }
     res.status(201).json(task);
@@ -1316,11 +1316,11 @@ router.patch("/:id/tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
     const task = r.rows[0];
     // Dołącz display names
     if (task.assigned_to) {
-      const uQ = await pool.query("SELECT display_name FROM users WHERE id=$1", [task.assigned_to]);
+      const uQ = await pool.query("SELECT display_name FROM users WHERE id=$1 AND tenant_id=$2", [task.assigned_to, req.tenantId]);
       task.assigned_to_name = uQ.rows[0]?.display_name || null;
     }
     if (task.done_by) {
-      const dQ = await pool.query("SELECT display_name FROM users WHERE id=$1", [task.done_by]);
+      const dQ = await pool.query("SELECT display_name FROM users WHERE id=$1 AND tenant_id=$2", [task.done_by, req.tenantId]);
       task.done_by_name = dQ.rows[0]?.display_name || null;
     }
     res.json(task);

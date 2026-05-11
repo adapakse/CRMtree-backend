@@ -113,7 +113,7 @@ router.get('/',
             (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false)::int AS new_email_count,
             (SELECT MAX(updated_at) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at
           FROM crm_leads l
-          LEFT JOIN users u ON u.id = l.assigned_to
+          LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
           LEFT JOIN crm_partners cp ON cp.lead_id = l.id
           ${where}
           ORDER BY l.updated_at DESC
@@ -225,8 +225,9 @@ router.get('/users', async (req, res, next) => {
       WHERE is_active = true
         AND crm_role IN ('salesperson', 'sales_manager')
         AND is_admin = false
+        AND tenant_id = $1
       ORDER BY display_name
-    `);
+    `, [req.tenantId]);
     res.json(rows);
   } catch (err) { next(err); }
 });
@@ -239,11 +240,12 @@ router.get('/groups', async (req, res, next) => {
     const { rows } = await db.query(`
       SELECT gp.id, gp.name, array_agg(ugr.user_id::text ORDER BY ugr.user_id) AS user_ids
       FROM group_profiles gp
-      JOIN user_group_roles ugr ON ugr.group_id = gp.id
+      JOIN user_group_roles ugr ON ugr.group_id = gp.id AND ugr.tenant_id = $1
       WHERE gp.is_active = TRUE
+        AND gp.tenant_id = $1
       GROUP BY gp.id, gp.name
       ORDER BY gp.name
-    `);
+    `, [req.tenantId]);
     res.json(rows);
   } catch (err) { next(err); }
 });
@@ -285,13 +287,15 @@ router.get('/contact-suggestions', async (req, res, next) => {
   try {
     const { lead_id, partner_id } = req.query;
 
-    // Usery z rolą CRM
+    // Usery z rolą CRM — tylko bieżący tenant
     const { rows: users } = await db.query(`
       SELECT display_name AS name, email
       FROM users
-      WHERE is_active = true AND (crm_role IN ('salesperson','sales_manager') OR is_admin = true)
+      WHERE is_active = true
+        AND (crm_role IN ('salesperson','sales_manager') OR is_admin = true)
+        AND tenant_id = $1
       ORDER BY display_name
-    `);
+    `, [req.tenantId]);
 
     const suggestions = users.map(u => ({ email: u.email, name: u.name }));
 
@@ -381,9 +385,9 @@ router.get('/tasks', async (req, res, next) => {
         a.assigned_to   AS act_assigned_to_id
       FROM crm_lead_activities a
       JOIN crm_leads l      ON l.id   = a.lead_id
-      LEFT JOIN users u     ON u.id   = a.created_by
-      LEFT JOIN users lu    ON lu.id  = l.assigned_to
-      LEFT JOIN users au    ON au.id  = a.assigned_to
+      LEFT JOIN users u     ON u.id   = a.created_by  AND u.tenant_id  = $1
+      LEFT JOIN users lu    ON lu.id  = l.assigned_to AND lu.tenant_id = $1
+      LEFT JOIN users au    ON au.id  = a.assigned_to AND au.tenant_id = $1
       ${where}
       ORDER BY
         CASE WHEN a.activity_at IS NULL THEN 1 ELSE 0 END,
@@ -438,9 +442,9 @@ router.get('/calendar', async (req, res, next) => {
         a.assigned_to   AS act_assigned_to_id
       FROM crm_lead_activities a
       JOIN crm_leads l      ON l.id   = a.lead_id
-      LEFT JOIN users u     ON u.id   = a.created_by
-      LEFT JOIN users lu    ON lu.id  = l.assigned_to
-      LEFT JOIN users au    ON au.id  = a.assigned_to
+      LEFT JOIN users u     ON u.id   = a.created_by  AND u.tenant_id  = $1
+      LEFT JOIN users lu    ON lu.id  = l.assigned_to AND lu.tenant_id = $1
+      LEFT JOIN users au    ON au.id  = a.assigned_to AND au.tenant_id = $1
       ${where}
       ORDER BY a.activity_at
     `, params);
@@ -481,9 +485,9 @@ router.get('/calendar', async (req, res, next) => {
         a.assigned_to   AS act_assigned_to_id
       FROM crm_partner_activities a
       JOIN crm_partners p   ON p.id   = a.partner_id
-      LEFT JOIN users u     ON u.id   = a.created_by
-      LEFT JOIN users mu    ON mu.id  = p.manager_id
-      LEFT JOIN users au    ON au.id  = a.assigned_to
+      LEFT JOIN users u     ON u.id   = a.created_by  AND u.tenant_id  = $1
+      LEFT JOIN users mu    ON mu.id  = p.manager_id  AND mu.tenant_id = $1
+      LEFT JOIN users au    ON au.id  = a.assigned_to AND au.tenant_id = $1
       ${wherePart}
       ORDER BY a.activity_at
     `, paramsPart);
@@ -737,7 +741,7 @@ router.get('/report',
                        )))
                      ) FILTER (WHERE l.stage = 'closed_won'))::int AS avg_cycle_days
               FROM crm_leads l
-              LEFT JOIN users u ON u.id = l.assigned_to
+              LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
               ${where}
               GROUP BY u.display_name, u.id
               ORDER BY won_value DESC NULLS LAST
@@ -986,8 +990,8 @@ router.get('/:id',
                  'is_read',a.is_read
                ) AS act
                FROM crm_lead_activities a
-               LEFT JOIN users au  ON au.id  = a.created_by
-               LEFT JOIN users au2 ON au2.id = a.assigned_to
+               LEFT JOIN users au  ON au.id  = a.created_by  AND au.tenant_id  = $2
+               LEFT JOIN users au2 ON au2.id = a.assigned_to AND au2.tenant_id = $2
                WHERE a.lead_id = l.id AND a.tenant_id = l.tenant_id
              ) sub
             ), '[]'
@@ -998,7 +1002,7 @@ router.get('/:id',
             )) FILTER (WHERE ld.id IS NOT NULL), '[]'
           ) AS linked_documents
         FROM crm_leads l
-        LEFT JOIN users u  ON u.id = l.assigned_to
+        LEFT JOIN users u  ON u.id = l.assigned_to AND u.tenant_id = $2
         LEFT JOIN crm_lead_documents ld ON ld.lead_id = l.id AND ld.tenant_id = l.tenant_id
         WHERE l.id = $1 AND l.tenant_id = $2
         GROUP BY l.id, u.display_name, u.email
@@ -1210,7 +1214,7 @@ router.get('/:id/activities',
       const { rows } = await db.query(`
         SELECT a.*, u.display_name AS created_by_name
         FROM crm_lead_activities a
-        LEFT JOIN users u ON u.id = a.created_by
+        LEFT JOIN users u ON u.id = a.created_by AND u.tenant_id = $2
         WHERE a.lead_id = $1 AND a.tenant_id = $2
         ORDER BY a.activity_at DESC
       `, [id, req.tenantId]);
@@ -1243,8 +1247,8 @@ router.post('/:id/activities',
           (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, assigned_to, created_by, status, tenant_id)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new',$11)
         RETURNING *,
-          (SELECT display_name FROM users WHERE id = created_by) AS created_by_name,
-          (SELECT display_name FROM users WHERE id = assigned_to) AS assigned_to_name
+          (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $11) AS created_by_name,
+          (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $11) AS assigned_to_name
       `, [id, type, title, bodyText||null,
           activity_at||null,
           duration_min||null, participants||null, meeting_location||null,
@@ -1263,7 +1267,7 @@ router.post('/:id/activities',
       if (assigned_to && assigned_to !== req.user.id) {
         try {
           const { rows: assigneeRows } = await db.query(
-            'SELECT email, display_name FROM users WHERE id=$1', [assigned_to]
+            'SELECT email, display_name FROM users WHERE id=$1 AND tenant_id=$2', [assigned_to, req.tenantId]
           );
           const { rows: leadRows } = await db.query(
             'SELECT company FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]
@@ -1344,8 +1348,8 @@ router.patch('/:id/activities/:actId',
             assigned_to=$7, status=$8, close_comment=$9, updated_at=now()
         WHERE id=$10 AND tenant_id=$11
         RETURNING *,
-          (SELECT display_name FROM users WHERE id = created_by) AS created_by_name,
-          (SELECT display_name FROM users WHERE id = assigned_to) AS assigned_to_name
+          (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $11) AS created_by_name,
+          (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $11) AS assigned_to_name
       `, [type, title, body||null, activity_at||null, participants||null, meeting_location||null,
           assigned_to||null, newStatus, close_comment||null, actId, req.tenantId]);
 

@@ -94,7 +94,7 @@ router.get('/',
       const { rows } = await db.query(`
         SELECT b.*, u.display_name AS user_name
         FROM crm_sales_budgets b
-        JOIN users u ON u.id = b.user_id
+        JOIN users u ON u.id = b.user_id AND u.tenant_id = $2
         ${where}
         ORDER BY b.user_id, b.period_type, b.period_number
       `, params);
