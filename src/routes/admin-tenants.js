@@ -19,6 +19,7 @@ const bcrypt   = require('bcryptjs');
 const { body, param } = require('express-validator');
 const db       = require('../config/database');
 const logger   = require('../utils/logger');
+const { encrypt, decrypt } = require('../utils/encrypt');
 const { requireAuth, requireSuperAdmin, signAccessToken } = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 
@@ -405,6 +406,100 @@ router.post('/:id/impersonate',
           tenant_id:    impUser.tenant_id,
         },
       });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── GET /:id/email-providers — list configured email providers ────────────────
+router.get('/:id/email-providers',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT id, provider, client_id, redirect_uri, extra_config, is_enabled, created_at, updated_at
+         FROM tenant_email_providers
+         WHERE tenant_id = $1
+         ORDER BY provider`,
+        [req.params.id]
+      );
+      res.json(rows.map(r => ({ ...r, client_secret_configured: true })));
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /:id/email-providers/:provider — upsert credentials ──────────────────
+router.put('/:id/email-providers/:provider',
+  [
+    param('id').isUUID(),
+    param('provider').isIn(['gmail', 'outlook']),
+    body('client_id').isString().trim().notEmpty(),
+    body('client_secret').optional({ nullable: true }).isString(),
+    body('redirect_uri').optional({ nullable: true }).isString().trim(),
+    body('extra_config').optional().isObject(),
+    body('is_enabled').optional().isBoolean(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const { rows: tenantRows } = await db.query('SELECT id FROM tenants WHERE id = $1', [req.params.id]);
+      if (!tenantRows.length) return res.status(404).json({ error: 'Tenant not found' });
+
+      const { client_id, client_secret, redirect_uri, extra_config = {}, is_enabled = true } = req.body;
+
+      const { rows: existing } = await db.query(
+        'SELECT client_secret FROM tenant_email_providers WHERE tenant_id = $1 AND provider = $2',
+        [req.params.id, req.params.provider]
+      );
+
+      let encSecret;
+      if (client_secret) {
+        encSecret = encrypt(client_secret);
+      } else if (existing.length) {
+        encSecret = existing[0].client_secret;
+      } else {
+        return res.status(400).json({ error: 'client_secret jest wymagany dla nowej konfiguracji' });
+      }
+
+      const { rows } = await db.query(
+        `INSERT INTO tenant_email_providers
+           (tenant_id, provider, client_id, client_secret, redirect_uri, extra_config, is_enabled)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (tenant_id, provider) DO UPDATE SET
+           client_id     = EXCLUDED.client_id,
+           client_secret = EXCLUDED.client_secret,
+           redirect_uri  = EXCLUDED.redirect_uri,
+           extra_config  = EXCLUDED.extra_config,
+           is_enabled    = EXCLUDED.is_enabled,
+           updated_at    = NOW()
+         RETURNING id, provider, client_id, redirect_uri, extra_config, is_enabled, created_at, updated_at`,
+        [req.params.id, req.params.provider, client_id, encSecret,
+         redirect_uri || null, JSON.stringify(extra_config), is_enabled]
+      );
+
+      logger.info('Super admin upserted email provider', {
+        tenantId: req.params.id, provider: req.params.provider, by: req.user.email,
+      });
+      res.json({ ...rows[0], client_secret_configured: true });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── DELETE /:id/email-providers/:provider — remove provider credentials ───────
+router.delete('/:id/email-providers/:provider',
+  [
+    param('id').isUUID(),
+    param('provider').isIn(['gmail', 'outlook']),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const { rowCount } = await db.query(
+        'DELETE FROM tenant_email_providers WHERE tenant_id = $1 AND provider = $2',
+        [req.params.id, req.params.provider]
+      );
+      if (!rowCount) return res.status(404).json({ error: 'Provider not configured' });
+      logger.info('Super admin deleted email provider', {
+        tenantId: req.params.id, provider: req.params.provider, by: req.user.email,
+      });
+      res.status(204).end();
     } catch (err) { next(err); }
   }
 );

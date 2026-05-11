@@ -6,29 +6,60 @@ const { google } = require("googleapis");
 const crypto     = require("crypto");
 const { pool }   = require("../config/database");
 const config     = require("../config");
+const { decrypt } = require("../utils/encrypt");
 
-// ── OAuth2 client factory ─────────────────────────────────────────────────────
-function makeOAuth2Client() {
+// ── OAuth2 client factory (accepts optional per-tenant credential override) ───
+function makeOAuth2Client(creds = null) {
   return new google.auth.OAuth2(
-    config.google.clientId,
-    config.google.clientSecret,
-    config.google.redirectUri,
+    creds?.client_id     || config.google.clientId,
+    creds?.client_secret || config.google.clientSecret,
+    creds?.redirect_uri  || config.google.redirectUri,
   );
 }
 
-// ── Pobierz / odśwież token usera ────────────────────────────────────────────
+// ── Pobierz konfigurację Gmail tenanta (z DB) ─────────────────────────────────
+async function getTenantGmailCreds(tenantId) {
+  if (!tenantId) return null;
+  const { rows } = await pool.query(
+    `SELECT client_id, client_secret, redirect_uri, extra_config
+     FROM tenant_email_providers
+     WHERE tenant_id = $1 AND provider = 'gmail' AND is_enabled = true`,
+    [tenantId]
+  );
+  if (!rows.length) return null;
+  return {
+    client_id:    rows[0].client_id,
+    client_secret: decrypt(rows[0].client_secret),
+    redirect_uri:  rows[0].redirect_uri || null,
+    extra_config:  rows[0].extra_config || {},
+  };
+}
+
+// ── Pobierz / odśwież token usera (+ konfiguracja tenanta w jednym zapytaniu) ──
 async function getAuthForUser(userId) {
   const { rows } = await pool.query(
-    "SELECT access_token, refresh_token, expires_at FROM user_gmail_tokens WHERE user_id = $1",
+    `SELECT t.access_token, t.refresh_token, t.expires_at,
+            ep.client_id     AS ep_client_id,
+            ep.client_secret AS ep_secret_enc,
+            ep.redirect_uri  AS ep_redirect_uri
+     FROM user_gmail_tokens t
+     JOIN users u ON u.id = t.user_id
+     LEFT JOIN tenant_email_providers ep
+       ON ep.tenant_id = u.tenant_id AND ep.provider = 'gmail' AND ep.is_enabled = true
+     WHERE t.user_id = $1`,
     [userId],
   );
   if (!rows.length) throw new Error("Brak połączonego konta Gmail. Zaloguj się przez OAuth.");
 
-  const oauth2 = makeOAuth2Client();
+  const row   = rows[0];
+  const creds = row.ep_client_id
+    ? { client_id: row.ep_client_id, client_secret: decrypt(row.ep_secret_enc), redirect_uri: row.ep_redirect_uri }
+    : null;
+  const oauth2 = makeOAuth2Client(creds);
   oauth2.setCredentials({
-    access_token:  rows[0].access_token,
-    refresh_token: rows[0].refresh_token,
-    expiry_date:   rows[0].expires_at ? new Date(rows[0].expires_at).getTime() : null,
+    access_token:  row.access_token,
+    refresh_token: row.refresh_token,
+    expiry_date:   row.expires_at ? new Date(row.expires_at).getTime() : null,
   });
 
   // Auto-refresh jeśli token wygasł
@@ -85,8 +116,10 @@ function parseOAuthState(state) {
 
 // ── URL autoryzacji OAuth2 ────────────────────────────────────────────────────
 // userId zakodowany w `state` — callback nie wymaga headera Authorization
-function getAuthUrl(userId) {
-  const oauth2 = makeOAuth2Client();
+// tenantId opcjonalne: jeśli podane, używa konfiguracji tenanta z DB
+async function getAuthUrl(userId, tenantId = null) {
+  const creds  = await getTenantGmailCreds(tenantId);
+  const oauth2 = makeOAuth2Client(creds);
   return oauth2.generateAuthUrl({
     access_type: "offline",
     prompt:      "consent",
@@ -102,7 +135,20 @@ function getAuthUrl(userId) {
 
 // ── Wymiana code → tokeny i zapis do DB ───────────────────────────────────────
 async function exchangeCodeAndSave(code, userId) {
-  const oauth2 = makeOAuth2Client();
+  // Look up tenant Gmail config via the user record (one joined query)
+  const { rows: uRows } = await pool.query(
+    `SELECT u.tenant_id,
+            ep.client_id, ep.client_secret AS ep_secret_enc, ep.redirect_uri
+     FROM users u
+     LEFT JOIN tenant_email_providers ep
+       ON ep.tenant_id = u.tenant_id AND ep.provider = 'gmail' AND ep.is_enabled = true
+     WHERE u.id = $1`,
+    [userId],
+  );
+  const creds = uRows[0]?.client_id
+    ? { client_id: uRows[0].client_id, client_secret: decrypt(uRows[0].ep_secret_enc), redirect_uri: uRows[0].redirect_uri }
+    : null;
+  const oauth2 = makeOAuth2Client(creds);
   const { tokens } = await oauth2.getToken(code);
   oauth2.setCredentials(tokens);
 
@@ -376,14 +422,25 @@ async function renewAllWatches(pool) {
 
 // ── Rejestracja Pub/Sub watch ─────────────────────────────────────────────────
 async function registerWatch(userId) {
-  if (!config.google.pubsubTopic) return null;
+  // Resolve pubsub topic: tenant's extra_config takes precedence over global config
+  const { rows: tRows } = await pool.query(
+    `SELECT ep.extra_config
+     FROM users u
+     LEFT JOIN tenant_email_providers ep
+       ON ep.tenant_id = u.tenant_id AND ep.provider = 'gmail' AND ep.is_enabled = true
+     WHERE u.id = $1`,
+    [userId],
+  );
+  const pubsubTopic = tRows[0]?.extra_config?.pubsub_topic || config.google.pubsubTopic;
+  if (!pubsubTopic) return null;
+
   const oauth2 = await getAuthForUser(userId);
   const gmail  = google.gmail({ version: "v1", auth: oauth2 });
   const res    = await gmail.users.watch({
     userId: "me",
     requestBody: {
-      topicName:  config.google.pubsubTopic,
-      labelIds:   ["INBOX"],
+      topicName: pubsubTopic,
+      labelIds:  ["INBOX"],
     },
   });
   // Zapisz historyId

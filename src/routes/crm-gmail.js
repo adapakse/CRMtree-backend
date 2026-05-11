@@ -127,13 +127,11 @@ async function registerAttachmentRefs({ leadId, partnerId, messageId, attachment
 // OAUTH2
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get("/oauth/url", requireAuth, (req, res) => {
-  if (!config.google.clientId || !config.google.clientSecret) {
-    return res.status(503).json({ error: "Gmail OAuth nie jest skonfigurowany (brak GOOGLE_CLIENT_ID/SECRET)" });
-  }
-  // userId zakodowany w state — callback nie potrzebuje JWT
-  const url = gmailService.getAuthUrl(req.user.id);
-  res.json({ url });
+router.get("/oauth/url", requireAuth, async (req, res, next) => {
+  try {
+    const url = await gmailService.getAuthUrl(req.user.id, req.user.tenant_id);
+    res.json({ url });
+  } catch (err) { next(err); }
 });
 
 // Brak requireAuth — Google redirectuje przeglądarkę bez headera Authorization.
