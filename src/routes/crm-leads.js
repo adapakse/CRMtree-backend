@@ -39,8 +39,8 @@ router.get('/',
       const limit  = req.query.limit || 50;
       const offset = (page - 1) * limit;
 
-      const params = [];
-      let where = "WHERE 1=1";
+      const params = [req.tenantId];
+      let where = "WHERE l.tenant_id = $1";
 
       where += req.scopeFilter('l', 'assigned_to', params);
 
@@ -107,11 +107,11 @@ router.get('/',
             u.email        AS assigned_to_email,
             cp.id          AS converted_partner_id,
             cp.company     AS converted_partner_company,
-            (SELECT COUNT(*) FROM crm_lead_activities a WHERE a.lead_id = l.id) AS activity_count,
-            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
-            (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id) AS document_count,
-            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email' AND is_read = false)::int AS new_email_count,
-            (SELECT MAX(updated_at) FROM crm_lead_activities WHERE lead_id = l.id AND type = 'email' AND is_read = false) AS last_reply_at
+            (SELECT COUNT(*) FROM crm_lead_activities a WHERE a.lead_id = l.id AND a.tenant_id = l.tenant_id) AS activity_count,
+            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
+            (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id AND d.tenant_id = l.tenant_id) AS document_count,
+            (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false)::int AS new_email_count,
+            (SELECT MAX(updated_at) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at
           FROM crm_leads l
           LEFT JOIN users u ON u.id = l.assigned_to
           LEFT JOIN crm_partners cp ON cp.lead_id = l.id
@@ -171,10 +171,10 @@ router.post('/',
       // Sprawdź unikalność NIP w leadach i partnerach
       if (nip) {
         const { rows: nipCheck } = await db.query(
-          `SELECT 'lead' AS src FROM crm_leads WHERE nip = $1
-           UNION ALL SELECT 'partner' AS src FROM crm_partners WHERE nip = $1
+          `SELECT 'lead' AS src FROM crm_leads WHERE nip = $1 AND tenant_id = $2
+           UNION ALL SELECT 'partner' AS src FROM crm_partners WHERE nip = $1 AND tenant_id = $2
            LIMIT 1`,
-          [nip]
+          [nip, req.tenantId]
         );
         if (nipCheck.length) {
           return res.status(409).json({ error: 'Ten Numer NIP jest już przypisany dla innego rekordu.' });
@@ -186,8 +186,8 @@ router.post('/',
           (company, contact_name, contact_title, email, phone, source, stage,
            value_pln, annual_turnover_currency, online_pct, probability, close_date, industry, assigned_to,
            tags, notes, hot, nip, created_by, agent_name, agent_email, agent_phone,
-           website, logo_url, first_contact_date)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+           website, logo_url, first_contact_date, tenant_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
         RETURNING *
       `, [
         company, contact_name||null, contact_title||null, email||null,
@@ -196,7 +196,7 @@ router.post('/',
         ownerId, tags||[], notes||null, hot, nip||null, req.user.id,
         req.body.agent_name||null, req.body.agent_email||null, req.body.agent_phone||null,
         req.body.website||null, req.body.logo_url||null,
-        req.body.first_contact_date||null,
+        req.body.first_contact_date||null, req.tenantId,
       ]);
 
       await audit.log({
@@ -298,8 +298,8 @@ router.get('/contact-suggestions', async (req, res, next) => {
     // Email kontaktu z leada
     if (lead_id) {
       const { rows: lead } = await db.query(
-        `SELECT contact_name AS name, email FROM crm_leads WHERE id=$1 AND email IS NOT NULL`,
-        [parseInt(lead_id)]
+        `SELECT contact_name AS name, email FROM crm_leads WHERE id=$1 AND tenant_id=$2 AND email IS NOT NULL`,
+        [parseInt(lead_id), req.tenantId]
       );
       lead.forEach(l => { if (l.email && !suggestions.find(s => s.email === l.email)) suggestions.push({ email: l.email, name: l.name || l.email }); });
     }
@@ -308,8 +308,8 @@ router.get('/contact-suggestions', async (req, res, next) => {
     if (partner_id) {
       const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const partnerQ = UUID_RE.test(String(partner_id))
-        ? await db.query(`SELECT contact_name, email, billing_contact_name, billing_email FROM crm_partners WHERE id=$1`, [partner_id])
-        : await db.query(`SELECT contact_name, email, billing_contact_name, billing_email FROM crm_partners WHERE dwh_partner_id=$1`, [parseInt(partner_id)]);
+        ? await db.query(`SELECT contact_name, email, billing_contact_name, billing_email FROM crm_partners WHERE id=$1 AND tenant_id=$2`, [partner_id, req.tenantId])
+        : await db.query(`SELECT contact_name, email, billing_contact_name, billing_email FROM crm_partners WHERE dwh_partner_id=$1 AND tenant_id=$2`, [parseInt(partner_id), req.tenantId]);
       const { rows: partner } = partnerQ;
       if (partner[0]) {
         const p = partner[0];
@@ -335,7 +335,8 @@ router.get('/tasks', async (req, res, next) => {
     const includeNoDate = include_no_date === 'true';
 
     const conds  = ["a.type != 'email'"];
-    const params = [];
+    const params = [req.tenantId];
+    conds.push(`l.tenant_id = $1`);
 
     if (!showClosed)    conds.push("a.status != 'closed'");
     if (!includeNoDate) conds.push("a.activity_at IS NOT NULL");
@@ -403,7 +404,8 @@ router.get('/calendar', async (req, res, next) => {
 
     // ── Lead activities ──────────────────────────────────────────────────────
     const conds  = ["a.type != 'email'", "a.activity_at IS NOT NULL"];
-    const params = [];
+    const params = [req.tenantId];
+    conds.push(`l.tenant_id = $1`);
 
     if (date_from) { params.push(date_from); conds.push(`a.activity_at >= $${params.length}::date`); }
     if (date_to)   { params.push(date_to);   conds.push(`a.activity_at <  ($${params.length}::date + interval '1 day')`); }
@@ -445,7 +447,8 @@ router.get('/calendar', async (req, res, next) => {
 
     // ── Partner activities ───────────────────────────────────────────────────
     const condsPart  = ["a.type != 'email'", "a.activity_at IS NOT NULL"];
-    const paramsPart = [];
+    const paramsPart = [req.tenantId];
+    condsPart.push(`p.tenant_id = $1`);
 
     if (date_from) { paramsPart.push(date_from); condsPart.push(`a.activity_at >= $${paramsPart.length}::date`); }
     if (date_to)   { paramsPart.push(date_to);   condsPart.push(`a.activity_at <  ($${paramsPart.length}::date + interval '1 day')`); }
@@ -525,8 +528,8 @@ router.get('/report',
         WHEN 'CHF' THEN COALESCE(l.value_pln,0) * ${rates.CHF}
         ELSE COALESCE(l.value_pln,0) END)`;
 
-      const conditions = [];
-      const params     = [];
+      const conditions = [`l.tenant_id = $1`];
+      const params     = [req.tenantId];
 
       // Scope
       if (req.user.is_admin) {
@@ -562,8 +565,8 @@ router.get('/report',
       const andWhere = conditions.length ? ' AND '     + conditions.join(' AND ') : '';
 
       // Trend aktywnych leadów — data filtrowana po dacie kwalifikacji (q.qualified_at)
-      const trendParams = [];
-      const trendConds  = [];
+      const trendParams = [req.tenantId];
+      const trendConds  = [`l.tenant_id = $1`];
       if (req.user.is_admin) {
         // brak ograniczeń
       } else if (req.user.crm_role === 'sales_manager') {
@@ -589,11 +592,11 @@ router.get('/report',
         trendParams.push(req.query.assigned_to);
         trendConds.push(`l.assigned_to = $${trendParams.length}`);
       }
-      const trendWhere = trendConds.length ? 'WHERE ' + trendConds.join(' AND ') : '';
+      const trendWhere = 'WHERE ' + trendConds.join(' AND ');
 
       // Trend wygranych — data filtrowana po dacie przejścia w closed_won (won_at lub updated_at)
-      const wonTrendParams = [];
-      const wonTrendConds  = ['l.stage = \'closed_won\''];
+      const wonTrendParams = [req.tenantId];
+      const wonTrendConds  = [`l.tenant_id = $1`, 'l.stage = \'closed_won\''];
       if (req.user.is_admin) {
         // brak ograniczeń
       } else if (req.user.crm_role === 'sales_manager') {
@@ -963,7 +966,7 @@ router.get('/:id',
   [param('id').isInt()], validate,
   async (req, res, next) => {
     try {
-      const params = [parseInt(req.params.id)];
+      const params = [parseInt(req.params.id), req.tenantId];
 
       const { rows } = await db.query(`
         SELECT l.*,
@@ -985,7 +988,7 @@ router.get('/:id',
                FROM crm_lead_activities a
                LEFT JOIN users au  ON au.id  = a.created_by
                LEFT JOIN users au2 ON au2.id = a.assigned_to
-               WHERE a.lead_id = l.id
+               WHERE a.lead_id = l.id AND a.tenant_id = l.tenant_id
              ) sub
             ), '[]'
           ) AS activities,
@@ -996,8 +999,8 @@ router.get('/:id',
           ) AS linked_documents
         FROM crm_leads l
         LEFT JOIN users u  ON u.id = l.assigned_to
-        LEFT JOIN crm_lead_documents ld ON ld.lead_id = l.id
-        WHERE l.id = $1
+        LEFT JOIN crm_lead_documents ld ON ld.lead_id = l.id AND ld.tenant_id = l.tenant_id
+        WHERE l.id = $1 AND l.tenant_id = $2
         GROUP BY l.id, u.display_name, u.email
       `, params);
 
@@ -1016,8 +1019,8 @@ router.get('/:id',
 
       // Dodatkowe kontakty
       const { rows: extraContacts } = await db.query(
-        `SELECT * FROM crm_lead_contacts WHERE lead_id=$1 ORDER BY created_at`,
-        [parseInt(req.params.id)]
+        `SELECT * FROM crm_lead_contacts WHERE lead_id=$1 AND tenant_id=$2 ORDER BY created_at`,
+        [parseInt(req.params.id), req.tenantId]
       );
       res.json({ ...lead, extra_contacts: extraContacts, can_edit });
     } catch (err) { next(err); }
@@ -1043,7 +1046,7 @@ router.patch('/:id',
   async (req, res, next) => {
     try {
       const id = parseInt(req.params.id);
-      const { rows: existing } = await db.query('SELECT * FROM crm_leads WHERE id=$1', [id]);
+      const { rows: existing } = await db.query('SELECT * FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]);
       if (!existing.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
       try { assertOwnership(existing[0], req, 'assigned_to'); }
@@ -1055,10 +1058,10 @@ router.patch('/:id',
       // Sprawdź unikalność NIP przy aktualizacji (wyklucz własny rekord)
       if (req.body.nip) {
         const { rows: nipCheck } = await db.query(
-          `SELECT 'lead' AS src FROM crm_leads WHERE nip = $1 AND id != $2
-           UNION ALL SELECT 'partner' AS src FROM crm_partners WHERE nip = $1
+          `SELECT 'lead' AS src FROM crm_leads WHERE nip = $1 AND id != $2 AND tenant_id = $3
+           UNION ALL SELECT 'partner' AS src FROM crm_partners WHERE nip = $1 AND tenant_id = $3
            LIMIT 1`,
-          [req.body.nip, id]
+          [req.body.nip, id, req.tenantId]
         );
         if (nipCheck.length) {
           return res.status(409).json({ error: 'Ten Numer NIP jest już przypisany dla innego rekordu.' });
@@ -1111,9 +1114,10 @@ router.patch('/:id',
       setClauses.push(`updated_at = $${p++}`);
       params.push(new Date());
       params.push(id);
+      params.push(req.tenantId);
 
       const { rows } = await db.query(
-        `UPDATE crm_leads SET ${setClauses.join(', ')} WHERE id = $${p} RETURNING *`,
+        `UPDATE crm_leads SET ${setClauses.join(', ')} WHERE id = $${p} AND tenant_id = $${p + 1} RETURNING *`,
         params
       );
 
@@ -1169,10 +1173,10 @@ router.delete('/:id',
   async (req, res, next) => {
     try {
       const id = parseInt(req.params.id);
-      const { rows: existing } = await db.query('SELECT company FROM crm_leads WHERE id=$1', [id]);
+      const { rows: existing } = await db.query('SELECT company FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]);
       if (!existing.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
-      await db.query('DELETE FROM crm_leads WHERE id=$1', [id]);
+      await db.query('DELETE FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]);
 
       await audit.log({
         user:        req.user,
@@ -1196,9 +1200,10 @@ router.get('/:id/activities',
       const id = parseInt(req.params.id);
       const params = [id];
       const scope = req.scopeFilter('l', 'assigned_to', params);
+      params.push(req.tenantId);
 
       const { rows: lead } = await db.query(
-        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope}`, params
+        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope} AND l.tenant_id = $${params.length}`, params
       );
       if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
@@ -1206,9 +1211,9 @@ router.get('/:id/activities',
         SELECT a.*, u.display_name AS created_by_name
         FROM crm_lead_activities a
         LEFT JOIN users u ON u.id = a.created_by
-        WHERE a.lead_id = $1
+        WHERE a.lead_id = $1 AND a.tenant_id = $2
         ORDER BY a.activity_at DESC
-      `, [id]);
+      `, [id, req.tenantId]);
 
       res.json(rows);
     } catch (err) { next(err); }
@@ -1235,17 +1240,17 @@ router.post('/:id/activities',
 
       const { rows } = await db.query(`
         INSERT INTO crm_lead_activities
-          (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, assigned_to, created_by, status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new')
+          (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, assigned_to, created_by, status, tenant_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new',$11)
         RETURNING *,
           (SELECT display_name FROM users WHERE id = created_by) AS created_by_name,
           (SELECT display_name FROM users WHERE id = assigned_to) AS assigned_to_name
       `, [id, type, title, bodyText||null,
           activity_at||null,
           duration_min||null, participants||null, meeting_location||null,
-          assigned_to||null, req.user.id]);
+          assigned_to||null, req.user.id, req.tenantId]);
 
-      await db.query('UPDATE crm_leads SET updated_at=now() WHERE id=$1', [id]);
+      await db.query('UPDATE crm_leads SET updated_at=now() WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]);
       await audit.log({
         user:       req.user,
         action:     'crm_activity_create',
@@ -1261,7 +1266,7 @@ router.post('/:id/activities',
             'SELECT email, display_name FROM users WHERE id=$1', [assigned_to]
           );
           const { rows: leadRows } = await db.query(
-            'SELECT company FROM crm_leads WHERE id=$1', [id]
+            'SELECT company FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]
           );
           if (assigneeRows.length && assigneeRows[0].email) {
             await email.sendCrmActivityAssigned({
@@ -1308,8 +1313,8 @@ router.patch('/:id/activities/:actId',
       const leadId = parseInt(req.params.id);
       const actId  = parseInt(req.params.actId);
       const { rows: existing } = await db.query(
-        'SELECT * FROM crm_lead_activities WHERE id=$1 AND lead_id=$2',
-        [actId, leadId]
+        'SELECT * FROM crm_lead_activities WHERE id=$1 AND lead_id=$2 AND tenant_id=$3',
+        [actId, leadId, req.tenantId]
       );
       if (!existing.length) return res.status(404).json({ error: 'Aktywność nie znaleziona' });
       const act = existing[0];
@@ -1337,12 +1342,12 @@ router.patch('/:id/activities/:actId',
         UPDATE crm_lead_activities
         SET type=$1, title=$2, body=$3, activity_at=$4, participants=$5, meeting_location=$6,
             assigned_to=$7, status=$8, close_comment=$9, updated_at=now()
-        WHERE id=$10
+        WHERE id=$10 AND tenant_id=$11
         RETURNING *,
           (SELECT display_name FROM users WHERE id = created_by) AS created_by_name,
           (SELECT display_name FROM users WHERE id = assigned_to) AS assigned_to_name
       `, [type, title, body||null, activity_at||null, participants||null, meeting_location||null,
-          assigned_to||null, newStatus, close_comment||null, actId]);
+          assigned_to||null, newStatus, close_comment||null, actId, req.tenantId]);
 
       const auditAction = newStatus === 'closed' && act.status !== 'closed'
         ? 'crm_activity_close'
@@ -1370,14 +1375,14 @@ router.delete('/:id/activities/:actId',
       const leadId = parseInt(req.params.id);
       const actId  = parseInt(req.params.actId);
       const { rows: existing } = await db.query(
-        'SELECT * FROM crm_lead_activities WHERE id=$1 AND lead_id=$2',
-        [actId, leadId]
+        'SELECT * FROM crm_lead_activities WHERE id=$1 AND lead_id=$2 AND tenant_id=$3',
+        [actId, leadId, req.tenantId]
       );
       if (!existing.length) return res.status(404).json({ error: 'Aktywność nie znaleziona' });
       if (existing[0].created_by !== req.user.id && !req.isCrmManager) {
         return res.status(403).json({ error: 'Brak uprawnień' });
       }
-      await db.query('DELETE FROM crm_lead_activities WHERE id=$1', [actId]);
+      await db.query('DELETE FROM crm_lead_activities WHERE id=$1 AND tenant_id=$2', [actId, req.tenantId]);
       await audit.log({
         user:        req.user,
         action:      'crm_lead_update',
@@ -1399,8 +1404,8 @@ router.patch('/:id/activities/:actId/read',
       const actId  = parseInt(req.params.actId);
       const isRead = req.body.is_read !== undefined ? !!req.body.is_read : true;
       const { rows } = await db.query(
-        'UPDATE crm_lead_activities SET is_read=$1, updated_at=NOW() WHERE id=$2 AND lead_id=$3 RETURNING id',
-        [isRead, actId, leadId]
+        'UPDATE crm_lead_activities SET is_read=$1, updated_at=NOW() WHERE id=$2 AND lead_id=$3 AND tenant_id=$4 RETURNING id',
+        [isRead, actId, leadId, req.tenantId]
       );
       if (!rows.length) return res.status(404).json({ error: 'Aktywność nie znaleziona' });
       res.json({ ok: true });
@@ -1416,9 +1421,9 @@ router.get('/:id/documents', [param('id').isInt()], validate, async (req, res, n
              d.doc_number, d.doc_type
       FROM crm_lead_documents ld
       LEFT JOIN documents d ON d.id = ld.document_id
-      WHERE ld.lead_id = $1
+      WHERE ld.lead_id = $1 AND ld.tenant_id = $2
       ORDER BY ld.linked_at DESC
-    `, [parseInt(req.params.id)]);
+    `, [parseInt(req.params.id), req.tenantId]);
     res.json(rows);
   } catch (err) { next(err); }
 });
@@ -1429,11 +1434,11 @@ router.post('/:id/documents',
   async (req, res, next) => {
     try {
       const { rows } = await db.query(`
-        INSERT INTO crm_lead_documents (lead_id, document_id, doc_role, linked_by)
-        VALUES ($1,$2,$3,$4)
+        INSERT INTO crm_lead_documents (lead_id, document_id, doc_role, linked_by, tenant_id)
+        VALUES ($1,$2,$3,$4,$5)
         ON CONFLICT (lead_id, document_id) DO UPDATE SET doc_role = EXCLUDED.doc_role
         RETURNING *
-      `, [parseInt(req.params.id), req.body.document_id, req.body.doc_role||null, req.user.id]);
+      `, [parseInt(req.params.id), req.body.document_id, req.body.doc_role||null, req.user.id, req.tenantId]);
       await audit.log({
         user:      req.user,
         action:    'crm_lead_update',
@@ -1450,8 +1455,8 @@ router.delete('/:id/documents/:docId',
   [param('id').isInt(), param('docId').isUUID()], validate,
   async (req, res, next) => {
     try {
-      await db.query('DELETE FROM crm_lead_documents WHERE lead_id=$1 AND document_id=$2',
-        [parseInt(req.params.id), req.params.docId]);
+      await db.query('DELETE FROM crm_lead_documents WHERE lead_id=$1 AND document_id=$2 AND tenant_id=$3',
+        [parseInt(req.params.id), req.params.docId, req.tenantId]);
       res.status(204).end();
     } catch (err) { next(err); }
   }
@@ -1467,8 +1472,9 @@ router.get('/:id/history',
       // Sprawdź dostęp do leada
       const scopeParams = [id];
       const scope = req.scopeFilter('l', 'assigned_to', scopeParams);
+      scopeParams.push(req.tenantId);
       const { rows: lead } = await db.query(
-        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope}`, scopeParams
+        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope} AND l.tenant_id = $${scopeParams.length}`, scopeParams
       );
       if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
@@ -1497,13 +1503,14 @@ router.get('/:id/test-account',
       const id = parseInt(req.params.id);
       const params = [id];
       const scope  = req.scopeFilter('l', 'assigned_to', params);
+      params.push(req.tenantId);
       const { rows: lead } = await db.query(
-        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope}`, params
+        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope} AND l.tenant_id = $${params.length}`, params
       );
       if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
       const { rows } = await db.query(
-        `SELECT * FROM crm_lead_test_accounts WHERE lead_id = $1`, [id]
+        `SELECT * FROM crm_lead_test_accounts WHERE lead_id = $1 AND tenant_id = $2`, [id, req.tenantId]
       );
       res.json(rows[0] || null);
     } catch (err) { next(err); }
@@ -1538,8 +1545,9 @@ router.post('/:id/test-account',
       // Pobierz dane leada (company + nip potrzebne dla zewnętrznego API)
       const params = [id];
       const scope  = req.scopeFilter('l', 'assigned_to', params);
+      params.push(req.tenantId);
       const { rows: leads } = await db.query(
-        `SELECT id, company, nip FROM crm_leads l WHERE l.id = $1 ${scope}`, params
+        `SELECT id, company, nip FROM crm_leads l WHERE l.id = $1 ${scope} AND l.tenant_id = $${params.length}`, params
       );
       if (!leads.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
       const lead = leads[0];
@@ -1557,8 +1565,8 @@ router.post('/:id/test-account',
            subdomain, language, partner_currency, country,
            billing_address, billing_zip, billing_city, billing_country, billing_email_address,
            admin_first_name, admin_last_name, admin_email,
-           status, last_called_at, called_by, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',now(),$14,now())
+           status, last_called_at, called_by, updated_at, tenant_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',now(),$14,now(),$15)
         ON CONFLICT (lead_id) DO UPDATE SET
           subdomain             = EXCLUDED.subdomain,
           language              = EXCLUDED.language,
@@ -1582,7 +1590,7 @@ router.post('/:id/test-account',
         subdomain, language, partner_currency, country,
         billing_address, billing_zip, billing_city, billing_country, billing_email_address,
         admin_first_name, admin_last_name, admin_email,
-        req.user.id,
+        req.user.id, req.tenantId,
       ]);
 
       // Pobierz indywidualne ustawienia HTCD z app_settings
@@ -1662,7 +1670,7 @@ router.post('/:id/test-account',
             price_list_url      = $4,
             last_error          = $5,
             updated_at          = now()
-        WHERE lead_id = $6
+        WHERE lead_id = $6 AND tenant_id = $7
         RETURNING *
       `, [
         apiResult.success ? 'created' : 'error',
@@ -1670,7 +1678,7 @@ router.post('/:id/test-account',
         apiResult.success ? (apiResult.htcdPartnerId || null) : null,
         apiResult.success ? (apiResult.priceListUrl  || null) : null,
         apiResult.success ? null : apiResult.error,
-        id,
+        id, req.tenantId,
       ]);
 
       await audit.log({
@@ -1701,8 +1709,8 @@ router.get('/:id/contacts', crmScope, [param('id').isInt()], validate,
   async (req, res, next) => {
     try {
       const { rows } = await db.query(
-        `SELECT * FROM crm_lead_contacts WHERE lead_id=$1 ORDER BY created_at`,
-        [parseInt(req.params.id)]
+        `SELECT * FROM crm_lead_contacts WHERE lead_id=$1 AND tenant_id=$2 ORDER BY created_at`,
+        [parseInt(req.params.id), req.tenantId]
       );
       res.json(rows);
     } catch (err) { next(err); }
@@ -1717,16 +1725,16 @@ router.post('/:id/contacts', crmScope, [param('id').isInt()], validate,
       if (!Array.isArray(contacts)) return res.status(400).json({ error: 'contacts must be array' });
 
       // Delete existing and replace with new set
-      await db.query('DELETE FROM crm_lead_contacts WHERE lead_id=$1', [parseInt(req.params.id)]);
+      await db.query('DELETE FROM crm_lead_contacts WHERE lead_id=$1 AND tenant_id=$2', [parseInt(req.params.id), req.tenantId]);
 
       const inserted = [];
       for (const c of contacts) {
         // Skip empty rows
         if (!c.contact_name && !c.email && !c.phone) continue;
         const { rows } = await db.query(
-          `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone)
-           VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-          [parseInt(req.params.id), c.contact_name||null, c.contact_title||null, c.email||null, c.phone||null]
+          `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone, tenant_id)
+           VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+          [parseInt(req.params.id), c.contact_name||null, c.contact_title||null, c.email||null, c.phone||null, req.tenantId]
         );
         inserted.push(rows[0]);
       }
@@ -1747,7 +1755,7 @@ router.post('/:id/migrate',
   async (req, res, next) => {
     try {
       const id = parseInt(req.params.id);
-      const { rows: leads } = await db.query('SELECT * FROM crm_leads WHERE id=$1', [id]);
+      const { rows: leads } = await db.query('SELECT * FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]);
       if (!leads.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
       const lead = leads[0];
 
@@ -1761,9 +1769,9 @@ router.post('/:id/migrate',
       // Dane z konta testowego (jeśli istnieje i zostało pomyślnie założone)
       const { rows: taRows } = await db.query(
         `SELECT * FROM crm_lead_test_accounts
-         WHERE lead_id = $1 AND status = 'created' AND htcd_partner_id IS NOT NULL
+         WHERE lead_id = $1 AND tenant_id = $2 AND status = 'created' AND htcd_partner_id IS NOT NULL
          LIMIT 1`,
-        [id]
+        [id, req.tenantId]
       );
       const ta = taRows[0] || null;
 
@@ -1790,10 +1798,11 @@ router.post('/:id/migrate',
            annual_turnover_currency, online_pct,
            notes, tags,
            website, source, first_contact_date, logo_url,
+           tenant_id,
            created_at, updated_at
          )
          VALUES ($1,$2,$3,'onboarding',0,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-                 $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,now(),now())
+                 $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,now(),now())
          ON CONFLICT DO NOTHING
          RETURNING id, company`,
         [
@@ -1826,6 +1835,7 @@ router.post('/:id/migrate',
           lead.source               || null,   // $30
           lead.first_contact_date   || null,   // $31
           lead.logo_url             || null,   // $32
+          req.tenantId,                        // $33
         ]
       );
       if (!partnerIns.rows.length) return res.status(409).json({ error: 'Partner już istnieje dla tego leada' });
@@ -1933,7 +1943,7 @@ router.post('/:id/migrate',
 
       // Zaktualizuj leada: stage='onboarding', converted_at=now()
       await db.query(
-        `UPDATE crm_leads SET converted_at=now(), stage='onboarding', updated_at=now() WHERE id=$1`, [id]
+        `UPDATE crm_leads SET converted_at=now(), stage='onboarding', updated_at=now() WHERE id=$1 AND tenant_id=$2`, [id, req.tenantId]
       );
 
       await audit.log({
@@ -1957,7 +1967,7 @@ router.get('/:id/logo',
   async (req, res, next) => {
     try {
       const { rows } = await db.query(
-        'SELECT logo_url FROM crm_leads WHERE id=$1', [parseInt(req.params.id)]
+        'SELECT logo_url FROM crm_leads WHERE id=$1 AND tenant_id=$2', [parseInt(req.params.id), req.tenantId]
       );
       if (!rows.length || !rows[0].logo_url) return res.status(404).json({ error: 'Brak logo' });
       const url = await require('../services/storageService').generateSasUrl(rows[0].logo_url, 60);
@@ -1972,7 +1982,7 @@ router.get('/:id/logo-img',
   async (req, res, next) => {
     try {
       const { rows } = await db.query(
-        'SELECT logo_url FROM crm_leads WHERE id=$1', [parseInt(req.params.id)]
+        'SELECT logo_url FROM crm_leads WHERE id=$1 AND tenant_id=$2', [parseInt(req.params.id), req.tenantId]
       );
       if (!rows.length || !rows[0].logo_url) {
         return res.status(404).end();

@@ -41,7 +41,7 @@ async function apiKeyAuth(req, res, next) {
 }
 
 // ── Helper: upsert transaction + products ─────────────────────────
-async function upsertTransaction(client, data) {
+async function upsertTransaction(client, data, tenantId) {
   const {
     external_id, partner_id, booking_ref, transaction_date,
     traveler_name, traveler_email, currency = 'PLN', status = 'confirmed',
@@ -57,8 +57,8 @@ async function upsertTransaction(client, data) {
     INSERT INTO crm_transactions
       (external_id, partner_id, booking_ref, transaction_date, traveler_name,
        traveler_email, total_net, total_gross, total_commission, total_margin,
-       currency, status, raw_payload)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       currency, status, raw_payload, tenant_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
     ON CONFLICT (external_id) DO UPDATE SET
       status           = EXCLUDED.status,
       total_net        = EXCLUDED.total_net,
@@ -72,7 +72,7 @@ async function upsertTransaction(client, data) {
     external_id, partner_id||null, booking_ref||null, transaction_date,
     traveler_name||null, traveler_email||null,
     totalNet, totalGross, totalCommission, totalMargin,
-    currency, status, JSON.stringify(data),
+    currency, status, JSON.stringify(data), tenantId,
   ]);
 
   const txnId = rows[0].id;
@@ -89,10 +89,10 @@ async function upsertTransaction(client, data) {
         flight_number, airline, cabin_class, seat,
         car_category, pickup_location, dropoff_location,
         net_cost, gross_cost, commission_pct, commission_amt, margin_amt,
-        currency, pax_count, notes
+        currency, pax_count, notes, tenant_id
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-        $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
+        $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33
       )
     `, [
       txnId,
@@ -108,7 +108,7 @@ async function upsertTransaction(client, data) {
       p.commission_pct != null ? parseFloat(p.commission_pct) : null,
       p.commission_amt != null ? parseFloat(p.commission_amt) : null,
       p.margin_amt     != null ? parseFloat(p.margin_amt)     : null,
-      p.currency||'PLN', p.pax_count||1, p.notes||null,
+      p.currency||'PLN', p.pax_count||1, p.notes||null, tenantId,
     ]);
   }
 
@@ -135,7 +135,7 @@ router.post('/',
     const client = await db.pool.connect();
     try {
       await client.query('BEGIN');
-      const txnId = await upsertTransaction(client, req.body);
+      const txnId = await upsertTransaction(client, req.body, req.tenantId);
       await client.query('COMMIT');
       res.status(201).json({ ok: true, id: txnId, external_id: req.body.external_id });
     } catch (err) {
@@ -161,7 +161,7 @@ router.post('/batch',
       const client = await db.pool.connect();
       try {
         await client.query('BEGIN');
-        const id = await upsertTransaction(client, txn);
+        const id = await upsertTransaction(client, txn, req.tenantId);
         await client.query('COMMIT');
         results.push({ external_id: txn.external_id, ok: true, id });
       } catch (e) {
@@ -198,8 +198,8 @@ router.get('/',
       const limit  = req.query.limit || 50;
       const offset = (page - 1) * limit;
 
-      const params = [];
-      let where = 'WHERE 1=1';
+      const params = [req.tenantId];
+      let where = 'WHERE t.tenant_id = $1';
 
       if (!req.isCrmManager) {
         params.push(req.user.id);
@@ -254,8 +254,8 @@ router.get('/report/summary',
   validate,
   async (req, res, next) => {
     try {
-      const params = [];
-      let where = "WHERE t.status='confirmed'";
+      const params = [req.tenantId];
+      let where = "WHERE t.tenant_id = $1 AND t.status='confirmed'";
       if (!req.isCrmManager) {
         params.push(req.user.id);
         where += ` AND EXISTS (SELECT 1 FROM crm_partners p WHERE p.id=t.partner_id AND p.manager_id=$${params.length})`;
@@ -325,8 +325,8 @@ router.patch('/:id/status',
   async (req, res, next) => {
     try {
       const { rows } = await db.query(
-        `UPDATE crm_transactions SET status=$1, updated_at=now() WHERE id=$2 RETURNING *`,
-        [req.body.status, parseInt(req.params.id)]
+        `UPDATE crm_transactions SET status=$1, updated_at=now() WHERE id=$2 AND tenant_id=$3 RETURNING *`,
+        [req.body.status, parseInt(req.params.id), req.tenantId]
       );
       if (!rows.length) return res.status(404).json({ error: 'Transakcja nie znaleziona' });
       res.json(rows[0]);

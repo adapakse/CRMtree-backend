@@ -21,17 +21,17 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // Resolves partner by UUID (crm_partners.id) or integer (dwh_partner_id).
 // Returns { id: uuid, company } or null.
-async function resolvePartner(rawId) {
+async function resolvePartner(rawId, tenantId) {
   if (UUID_RE.test(String(rawId))) {
     const { rows } = await pool.query(
-      "SELECT id, company FROM crm_partners WHERE id = $1", [rawId]
+      "SELECT id, company FROM crm_partners WHERE id = $1 AND tenant_id = $2", [rawId, tenantId]
     );
     return rows[0] ?? null;
   }
   const num = parseInt(rawId);
   if (isNaN(num)) return null;
   const { rows } = await pool.query(
-    "SELECT id, company FROM crm_partners WHERE dwh_partner_id = $1", [num]
+    "SELECT id, company FROM crm_partners WHERE dwh_partner_id = $1 AND tenant_id = $2", [num, tenantId]
   );
   if (rows.length) return rows[0];
   // Not in crm_partners yet — lazy-create from DWH
@@ -41,11 +41,11 @@ async function resolvePartner(rawId) {
   );
   if (!dm.rows.length) return null;
   const ins = await pool.query(
-    `INSERT INTO crm_partners (company, dwh_partner_id, status, onboarding_step, created_at, updated_at)
-     VALUES ($1, $2, 'active', 3, now(), now())
+    `INSERT INTO crm_partners (company, dwh_partner_id, status, onboarding_step, created_at, updated_at, tenant_id)
+     VALUES ($1, $2, 'active', 3, now(), now(), $3)
      ON CONFLICT (dwh_partner_id) DO UPDATE SET updated_at = now()
      RETURNING id, company`,
-    [dm.rows[0].company, num]
+    [dm.rows[0].company, num, tenantId]
   );
   return ins.rows[0] ?? null;
 }
@@ -60,15 +60,15 @@ Z poważaniem,
 Jan Kowalski
 Dyrektor ds. Operacyjnych`;
 
-async function scheduleTrainingReplyLead(leadId, subject, threadId, userId) {
+async function scheduleTrainingReplyLead(leadId, subject, threadId, userId, tenantId) {
   setTimeout(async () => {
     try {
       const fakeReplyId = `training_reply_${uuidv4().replace(/-/g, '')}`;
       await pool.query(
         `INSERT INTO crm_lead_activities
-           (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, is_read)
-         VALUES ($1, 'email', $2, $3, NOW(), $4, $5, false)`,
-        [leadId, `Re: ${subject}`, TRAINING_REPLY_BODY, threadId, fakeReplyId],
+           (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, is_read, tenant_id)
+         VALUES ($1, 'email', $2, $3, NOW(), $4, $5, false, $6)`,
+        [leadId, `Re: ${subject}`, TRAINING_REPLY_BODY, threadId, fakeReplyId, tenantId],
       );
     } catch (e) {
       console.warn('[Training] scheduleTrainingReplyLead failed:', e.message);
@@ -76,15 +76,15 @@ async function scheduleTrainingReplyLead(leadId, subject, threadId, userId) {
   }, 45_000);
 }
 
-async function scheduleTrainingReplyPartner(partnerId, subject, threadId) {
+async function scheduleTrainingReplyPartner(partnerId, subject, threadId, tenantId) {
   setTimeout(async () => {
     try {
       const fakeReplyId = `training_reply_${uuidv4().replace(/-/g, '')}`;
       await pool.query(
         `INSERT INTO crm_partner_activities
-           (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, is_read)
-         VALUES ($1, 'email', $2, $3, NOW(), $4, $5, false)`,
-        [partnerId, `Re: ${subject}`, TRAINING_REPLY_BODY, threadId, fakeReplyId],
+           (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, is_read, tenant_id)
+         VALUES ($1, 'email', $2, $3, NOW(), $4, $5, false, $6)`,
+        [partnerId, `Re: ${subject}`, TRAINING_REPLY_BODY, threadId, fakeReplyId, tenantId],
       );
     } catch (e) {
       console.warn('[Training] scheduleTrainingReplyPartner failed:', e.message);
@@ -107,17 +107,17 @@ try {
  * Zapisuje metadane załączników do crm_email_attachments bez pobierania treści (blob_path = NULL).
  * Wywołana przy pobieraniu wątku — umożliwia późniejsze pobranie.
  */
-async function registerAttachmentRefs({ leadId, partnerId, messageId, attachments }) {
+async function registerAttachmentRefs({ leadId, partnerId, messageId, attachments, tenantId }) {
   const idCol = leadId ? "lead_id" : "partner_id";
   const idVal = leadId || partnerId;
   for (const att of attachments || []) {
     try {
       await pool.query(
         `INSERT INTO crm_email_attachments
-           (${idCol}, gmail_message_id, gmail_attachment_id, filename, mime_type, direction)
-         VALUES ($1, $2, $3, $4, $5, 'received')
+           (${idCol}, gmail_message_id, gmail_attachment_id, filename, mime_type, direction, tenant_id)
+         VALUES ($1, $2, $3, $4, $5, 'received', $6)
          ON CONFLICT DO NOTHING`,
-        [idVal, messageId, att.attachmentId, att.filename, att.mimeType || "application/octet-stream"],
+        [idVal, messageId, att.attachmentId, att.filename, att.mimeType || "application/octet-stream", tenantId],
       );
     } catch (_) {}
   }
@@ -290,7 +290,10 @@ async function sendLeadHandler(req, res) {
       return res.status(400).json({ error: "Pola 'to' i 'subject' są wymagane" });
     }
 
-    const leadQ = await pool.query("SELECT id, company FROM crm_leads WHERE id = $1", [leadId]);
+    const leadQ = await pool.query(
+      "SELECT id, company FROM crm_leads WHERE id = $1 AND tenant_id = $2",
+      [leadId, req.tenantId]
+    );
     if (!leadQ.rows.length) return res.status(404).json({ error: "Lead nie znaleziony" });
 
     const training = await isTrainingMode();
@@ -336,10 +339,10 @@ async function sendLeadHandler(req, res) {
     // Zapisz aktywność
     const actR = await pool.query(
       `INSERT INTO crm_lead_activities
-         (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, is_read)
-       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, true)
+         (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, is_read, tenant_id)
+       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, true, $7)
        RETURNING id`,
-      [leadId, subject, body || null, sentThreadId, messageId, req.user.id],
+      [leadId, subject, body || null, sentThreadId, messageId, req.user.id, req.tenantId],
     );
 
     // Auto-zapis odbiorców (To + CC) do extra_contacts leada
@@ -350,7 +353,7 @@ async function sendLeadHandler(req, res) {
     await autoSaveLeadContacts(leadId, allRecipients);
 
     if (training) {
-      scheduleTrainingReplyLead(leadId, subject, sentThreadId, req.user.id);
+      scheduleTrainingReplyLead(leadId, subject, sentThreadId, req.user.id, req.tenantId);
     }
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
@@ -381,7 +384,7 @@ async function sendPartnerHandler(req, res) {
       return res.status(400).json({ error: "Pola 'to' i 'subject' są wymagane" });
     }
 
-    const partner = await resolvePartner(req.params.partnerId);
+    const partner = await resolvePartner(req.params.partnerId, req.tenantId);
     if (!partner) return res.status(404).json({ error: "Partner nie znaleziony" });
 
     const training = await isTrainingMode();
@@ -427,10 +430,10 @@ async function sendPartnerHandler(req, res) {
 
     const actR = await pool.query(
       `INSERT INTO crm_partner_activities
-         (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, is_read)
-       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, true)
+         (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, is_read, tenant_id)
+       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, true, $7)
        RETURNING id`,
-      [crmPartnerId, subject, body || null, sentThreadId, messageId, req.user.id],
+      [crmPartnerId, subject, body || null, sentThreadId, messageId, req.user.id, req.tenantId],
     );
 
     // Auto-zapis odbiorców (To + CC) do kontaktów partnera
@@ -441,7 +444,7 @@ async function sendPartnerHandler(req, res) {
     await autoSavePartnerContacts(crmPartnerId, allRecipients);
 
     if (training) {
-      scheduleTrainingReplyPartner(crmPartnerId, subject, sentThreadId);
+      scheduleTrainingReplyPartner(crmPartnerId, subject, sentThreadId, req.tenantId);
     }
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
@@ -471,7 +474,7 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
 
     for (const msg of messages) {
       if (msg.attachments?.length) {
-        registerAttachmentRefs({ leadId, messageId: msg.id, attachments: msg.attachments }).catch(() => {});
+        registerAttachmentRefs({ leadId, messageId: msg.id, attachments: msg.attachments, tenantId: req.tenantId }).catch(() => {});
       }
     }
 
@@ -480,8 +483,8 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
       // Wiadomości wychodzące — mają wiersz w crm_lead_activities (created_by != NULL)
       const { rows: outRows } = await pool.query(
         `SELECT id AS activity_id, gmail_message_id FROM crm_lead_activities
-         WHERE lead_id = $1 AND gmail_message_id = ANY($2)`,
-        [leadId, msgIds],
+         WHERE lead_id = $1 AND gmail_message_id = ANY($2) AND tenant_id = $3`,
+        [leadId, msgIds, req.tenantId],
       );
       const outIds = new Set(outRows.map(r => r.gmail_message_id));
 
@@ -493,21 +496,21 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
       if (incomingIds.length) {
         pool.query(
           `UPDATE crm_email_message_reads SET is_read = true, updated_at = NOW()
-           WHERE gmail_message_id = ANY($1)`,
-          [incomingIds],
+           WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
+          [incomingIds, req.tenantId],
         ).catch(e => console.warn("[Gmail] auto-mark read failed:", e.message));
         // Oznacz aktywność wątku jako przeczytaną (jeśli była nieprzeczytana)
         pool.query(
           `UPDATE crm_lead_activities SET is_read = true, updated_at = NOW()
-           WHERE lead_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false`,
-          [leadId, req.params.threadId],
+           WHERE lead_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false AND tenant_id = $3`,
+          [leadId, req.params.threadId, req.tenantId],
         ).catch(e => console.warn("[Gmail] mark thread activity read failed:", e.message));
       }
 
       // Pobierz aktualny stan is_read z bazy (po UPDATE powyżej)
       const { rows: readRows } = await pool.query(
-        `SELECT gmail_message_id, is_read FROM crm_email_message_reads WHERE gmail_message_id = ANY($1)`,
-        [msgIds],
+        `SELECT gmail_message_id, is_read FROM crm_email_message_reads WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
+        [msgIds, req.tenantId],
       );
       const readMap = Object.fromEntries(readRows.map(r => [r.gmail_message_id, r.is_read]));
 
@@ -529,8 +532,8 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
       const { rows: sentAtts } = await pool.query(
         `SELECT gmail_message_id, filename, mime_type, blob_path, gmail_attachment_id
          FROM crm_email_attachments
-         WHERE lead_id = $1 AND gmail_message_id = ANY($2) AND direction = 'sent'`,
-        [leadId, msgIds],
+         WHERE lead_id = $1 AND gmail_message_id = ANY($2) AND direction = 'sent' AND tenant_id = $3`,
+        [leadId, msgIds, req.tenantId],
       );
       for (const msg of messages) {
         msg.sentAttachments = sentAtts
@@ -548,13 +551,13 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
 
 router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const resolved  = await resolvePartner(req.params.partnerId);
+    const resolved  = await resolvePartner(req.params.partnerId, req.tenantId);
     const partnerId = resolved?.id ?? req.params.partnerId;
     const messages  = await gmailService.getThread(req.user.id, req.params.threadId);
 
     for (const msg of messages) {
       if (msg.attachments?.length) {
-        registerAttachmentRefs({ partnerId, messageId: msg.id, attachments: msg.attachments }).catch(() => {});
+        registerAttachmentRefs({ partnerId, messageId: msg.id, attachments: msg.attachments, tenantId: req.tenantId }).catch(() => {});
       }
     }
 
@@ -562,8 +565,8 @@ router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (
     if (msgIds.length) {
       const { rows: outRows } = await pool.query(
         `SELECT id AS activity_id, gmail_message_id FROM crm_partner_activities
-         WHERE partner_id = $1 AND gmail_message_id = ANY($2)`,
-        [partnerId, msgIds],
+         WHERE partner_id = $1 AND gmail_message_id = ANY($2) AND tenant_id = $3`,
+        [partnerId, msgIds, req.tenantId],
       );
       const outIds = new Set(outRows.map(r => r.gmail_message_id));
 
@@ -572,19 +575,19 @@ router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (
       if (incomingIds.length) {
         pool.query(
           `UPDATE crm_email_message_reads SET is_read = true, updated_at = NOW()
-           WHERE gmail_message_id = ANY($1)`,
-          [incomingIds],
+           WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
+          [incomingIds, req.tenantId],
         ).catch(e => console.warn("[Gmail] auto-mark read failed:", e.message));
         pool.query(
           `UPDATE crm_partner_activities SET is_read = true, updated_at = NOW()
-           WHERE partner_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false`,
-          [partnerId, req.params.threadId],
+           WHERE partner_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false AND tenant_id = $3`,
+          [partnerId, req.params.threadId, req.tenantId],
         ).catch(e => console.warn("[Gmail] mark partner thread activity read failed:", e.message));
       }
 
       const { rows: readRows } = await pool.query(
-        `SELECT gmail_message_id, is_read FROM crm_email_message_reads WHERE gmail_message_id = ANY($1)`,
-        [msgIds],
+        `SELECT gmail_message_id, is_read FROM crm_email_message_reads WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
+        [msgIds, req.tenantId],
       );
       const readMap = Object.fromEntries(readRows.map(r => [r.gmail_message_id, r.is_read]));
 
@@ -603,8 +606,8 @@ router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (
       const { rows: sentAtts } = await pool.query(
         `SELECT gmail_message_id, filename, mime_type, blob_path
          FROM crm_email_attachments
-         WHERE partner_id = $1 AND gmail_message_id = ANY($2) AND direction = 'sent'`,
-        [partnerId, msgIds],
+         WHERE partner_id = $1 AND gmail_message_id = ANY($2) AND direction = 'sent' AND tenant_id = $3`,
+        [partnerId, msgIds, req.tenantId],
       );
       for (const msg of messages) {
         msg.sentAttachments = sentAtts
@@ -629,10 +632,10 @@ router.patch('/messages/:msgId/read', requireAuth, crmAuth, async (req, res) => 
     const { msgId } = req.params;
     const isRead = req.body.is_read !== undefined ? !!req.body.is_read : true;
     await pool.query(
-      `INSERT INTO crm_email_message_reads (gmail_message_id, is_read, updated_at)
-       VALUES ($1, $2, NOW())
+      `INSERT INTO crm_email_message_reads (gmail_message_id, is_read, updated_at, tenant_id)
+       VALUES ($1, $2, NOW(), $3)
        ON CONFLICT (gmail_message_id) DO UPDATE SET is_read = $2, updated_at = NOW()`,
-      [msgId, isRead],
+      [msgId, isRead, req.tenantId],
     );
     res.json({ ok: true });
   } catch (err) {
@@ -655,9 +658,9 @@ router.get("/sent-attachment/:messageId", requireAuth, crmAuth, async (req, res)
   try {
     const { rows } = await pool.query(
       `SELECT blob_path FROM crm_email_attachments
-       WHERE gmail_message_id = $1 AND direction = 'sent' AND filename = $2
+       WHERE gmail_message_id = $1 AND direction = 'sent' AND filename = $2 AND tenant_id = $3
        LIMIT 1`,
-      [messageId, filename],
+      [messageId, filename, req.tenantId],
     );
     if (!rows.length || !rows[0].blob_path) {
       return res.status(404).json({ error: "Załącznik niedostępny." });
@@ -679,9 +682,9 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
     const { rows } = await pool.query(
       `SELECT blob_path, filename, mime_type
        FROM crm_email_attachments
-       WHERE gmail_message_id = $1 AND gmail_attachment_id = $2
+       WHERE gmail_message_id = $1 AND gmail_attachment_id = $2 AND tenant_id = $3
        LIMIT 1`,
-      [messageId, attachmentId],
+      [messageId, attachmentId, req.tenantId],
     );
 
     if (rows.length && rows[0].blob_path) {
@@ -700,8 +703,8 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
       .then(() => pool.query(
         `UPDATE crm_email_attachments
          SET blob_path = $1
-         WHERE gmail_message_id = $2 AND gmail_attachment_id = $3`,
-        [blobPath, messageId, attachmentId],
+         WHERE gmail_message_id = $2 AND gmail_attachment_id = $3 AND tenant_id = $4`,
+        [blobPath, messageId, attachmentId, req.tenantId],
       ))
       .catch((e) => console.warn("[Gmail] Attachment blob cache failed:", e.message));
 

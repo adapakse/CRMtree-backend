@@ -25,11 +25,12 @@ router.get(
                 COUNT(DISTINCT ugr.user_id)  AS member_count,
                 COUNT(DISTINCT d.id)         AS document_count
          FROM group_profiles gp
-         LEFT JOIN user_group_roles ugr ON ugr.group_id = gp.id
-         LEFT JOIN documents d ON d.group_id = gp.id AND d.deleted_at IS NULL
-         ${showInactive ? "" : "WHERE gp.is_active = TRUE"}
+         LEFT JOIN user_group_roles ugr ON ugr.group_id = gp.id AND ugr.tenant_id = $1
+         LEFT JOIN documents d ON d.group_id = gp.id AND d.deleted_at IS NULL AND d.tenant_id = $1
+         WHERE gp.tenant_id = $1${showInactive ? "" : " AND gp.is_active = TRUE"}
          GROUP BY gp.id
          ORDER BY gp.name`,
+        [req.tenantId],
       );
       res.json(rows);
     } catch (err) {
@@ -50,11 +51,11 @@ router.get("/:id", [param("id").isUUID()], validate, async (req, res, next) => {
                 'access_level', ugr.access_level
               )) FILTER (WHERE ugr.user_id IS NOT NULL) AS members
        FROM group_profiles gp
-       LEFT JOIN user_group_roles ugr ON ugr.group_id = gp.id
-       LEFT JOIN users u ON u.id = ugr.user_id
-       WHERE gp.id = $1
+       LEFT JOIN user_group_roles ugr ON ugr.group_id = gp.id AND ugr.tenant_id = $2
+       LEFT JOIN users u ON u.id = ugr.user_id AND u.tenant_id = $2
+       WHERE gp.id = $1 AND gp.tenant_id = $2
        GROUP BY gp.id`,
-      [req.params.id],
+      [req.params.id, req.tenantId],
     );
     if (!rows.length) return res.status(404).json({ error: "Group not found" });
     res.json(rows[0]);
@@ -85,8 +86,8 @@ router.post(
         has_owner_restriction = false,
       } = req.body;
       const { rows } = await db.query(
-        `INSERT INTO group_profiles (name, display_name, description, has_owner_restriction, created_by)
-         VALUES ($1,$2,$3,$4,$5)
+        `INSERT INTO group_profiles (name, display_name, description, has_owner_restriction, created_by, tenant_id)
+         VALUES ($1,$2,$3,$4,$5,$6)
          RETURNING *`,
         [
           name,
@@ -94,6 +95,7 @@ router.post(
           description || null,
           has_owner_restriction,
           req.user.id,
+          req.tenantId,
         ],
       );
       await audit.log({
@@ -128,8 +130,8 @@ router.patch(
   async (req, res, next) => {
     try {
       const { rows: before } = await db.query(
-        "SELECT * FROM group_profiles WHERE id = $1",
-        [req.params.id],
+        "SELECT * FROM group_profiles WHERE id = $1 AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (!before.length)
         return res.status(404).json({ error: "Group not found" });
@@ -153,9 +155,10 @@ router.patch(
       if (!setClauses.length)
         return res.status(400).json({ error: "No fields to update" });
       params.push(req.params.id);
+      params.push(req.tenantId);
 
       const { rows } = await db.query(
-        `UPDATE group_profiles SET ${setClauses.join(",")} WHERE id = $${p} RETURNING *`,
+        `UPDATE group_profiles SET ${setClauses.join(",")} WHERE id = $${p} AND tenant_id = $${p + 1} RETURNING *`,
         params,
       );
       await audit.log({
@@ -188,8 +191,8 @@ router.delete(
   async (req, res, next) => {
     try {
       const { rows: docCheck } = await db.query(
-        "SELECT COUNT(*) FROM documents WHERE group_id = $1 AND deleted_at IS NULL",
-        [req.params.id],
+        "SELECT COUNT(*) FROM documents WHERE group_id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (parseInt(docCheck.rows[0].count) > 0) {
         return res.status(409).json({
@@ -199,8 +202,8 @@ router.delete(
       }
 
       const { rows } = await db.query(
-        "UPDATE group_profiles SET is_active = FALSE WHERE id = $1 RETURNING *",
-        [req.params.id],
+        "UPDATE group_profiles SET is_active = FALSE WHERE id = $1 AND tenant_id = $2 RETURNING *",
+        [req.params.id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Group not found" });

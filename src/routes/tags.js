@@ -10,10 +10,10 @@ const { validate, injectAuditContext } = require("../middleware/errorHandler");
 
 router.use(requireAuth, injectAuditContext);
 
-async function loadDoc(id) {
+async function loadDoc(id, tenantId) {
   const { rows } = await db.query(
-    "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL",
-    [id],
+    "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+    [id, tenantId],
   );
   return rows[0] || null;
 }
@@ -21,14 +21,16 @@ async function loadDoc(id) {
 // GET /api/documents/:documentId/tags
 router.get("/", async (req, res, next) => {
   try {
-    const doc = await loadDoc(req.params.documentId);
+    const doc = await loadDoc(req.params.documentId, req.tenantId);
     if (!doc) return res.status(404).json({ error: "Document not found" });
     await perms.assertCanRead(req.user.id, doc);
 
     const { rows } = await db.query(
-      `SELECT id, key, value, created_at, updated_at
-       FROM document_tags WHERE document_id = $1 ORDER BY key`,
-      [doc.id],
+      `SELECT dt.id, dt.key, dt.value, dt.created_at, dt.updated_at
+       FROM document_tags dt
+       JOIN documents d ON d.id = dt.document_id AND d.tenant_id = $2
+       WHERE dt.document_id = $1 ORDER BY dt.key`,
+      [doc.id, req.tenantId],
     );
     res.json(rows);
   } catch (err) {
@@ -46,7 +48,7 @@ router.post(
   validate,
   async (req, res, next) => {
     try {
-      const doc = await loadDoc(req.params.documentId);
+      const doc = await loadDoc(req.params.documentId, req.tenantId);
       if (!doc) return res.status(404).json({ error: "Document not found" });
       await perms.assertCanFull(req.user.id, doc);
 
@@ -82,20 +84,23 @@ router.patch(
   validate,
   async (req, res, next) => {
     try {
-      const doc = await loadDoc(req.params.documentId);
+      const doc = await loadDoc(req.params.documentId, req.tenantId);
       if (!doc) return res.status(404).json({ error: "Document not found" });
       await perms.assertCanFull(req.user.id, doc);
 
       const { rows: before } = await db.query(
-        "SELECT * FROM document_tags WHERE id = $1 AND document_id = $2",
-        [req.params.tagId, doc.id],
+        `SELECT dt.* FROM document_tags dt
+         JOIN documents d ON d.id = dt.document_id AND d.tenant_id = $3
+         WHERE dt.id = $1 AND dt.document_id = $2`,
+        [req.params.tagId, doc.id, req.tenantId],
       );
       if (!before.length)
         return res.status(404).json({ error: "Tag not found" });
 
       const { rows } = await db.query(
-        "UPDATE document_tags SET value = $1, updated_at = NOW() WHERE id = $2 RETURNING *",
-        [req.body.value, req.params.tagId],
+        `UPDATE document_tags SET value = $1, updated_at = NOW()
+         WHERE id = $2 AND document_id = $3 RETURNING *`,
+        [req.body.value, req.params.tagId, doc.id],
       );
       await audit.log({
         user: req.user,
@@ -119,13 +124,16 @@ router.delete(
   validate,
   async (req, res, next) => {
     try {
-      const doc = await loadDoc(req.params.documentId);
+      const doc = await loadDoc(req.params.documentId, req.tenantId);
       if (!doc) return res.status(404).json({ error: "Document not found" });
       await perms.assertCanFull(req.user.id, doc);
 
       const { rows } = await db.query(
-        "DELETE FROM document_tags WHERE id = $1 AND document_id = $2 RETURNING *",
-        [req.params.tagId, doc.id],
+        `DELETE FROM document_tags
+         WHERE id = $1 AND document_id = $2
+           AND document_id IN (SELECT id FROM documents WHERE tenant_id = $3)
+         RETURNING *`,
+        [req.params.tagId, doc.id, req.tenantId],
       );
       if (!rows.length) return res.status(404).json({ error: "Tag not found" });
 

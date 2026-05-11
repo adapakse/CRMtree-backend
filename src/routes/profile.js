@@ -14,8 +14,8 @@ router.use(requireAuth, injectAuditContext);
 router.get('/signature', async (req, res, next) => {
   try {
     const { rows } = await db.query(
-      'SELECT html FROM user_email_signatures WHERE user_id = $1',
-      [req.user.id]
+      'SELECT html FROM user_email_signatures WHERE user_id = $1 AND tenant_id = $2',
+      [req.user.id, req.tenantId]
     );
     res.json({ html: rows[0]?.html || '' });
   } catch (err) { next(err); }
@@ -29,10 +29,10 @@ router.put('/signature',
     try {
       const html = req.body.html ?? '';
       await db.query(`
-        INSERT INTO user_email_signatures (user_id, html, updated_at)
-        VALUES ($1, $2, NOW())
+        INSERT INTO user_email_signatures (user_id, html, updated_at, tenant_id)
+        VALUES ($1, $2, NOW(), $3)
         ON CONFLICT (user_id) DO UPDATE SET html = EXCLUDED.html, updated_at = NOW()
-      `, [req.user.id, html]);
+      `, [req.user.id, html, req.tenantId]);
       res.json({ ok: true });
     } catch (err) { next(err); }
   }

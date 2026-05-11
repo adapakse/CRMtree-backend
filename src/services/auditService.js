@@ -8,7 +8,7 @@ const logger = require("../utils/logger");
  * This is the ONLY way audit logs should be written — always append-only.
  *
  * @param {object} opts
- * @param {object} opts.user           - { id, email, display_name }  (can be null for system)
+ * @param {object} opts.user           - { id, email, display_name, tenant_id }  (can be null for system)
  * @param {object} [opts.document]     - { id, doc_number, name }
  * @param {string} opts.action         - audit_action enum value
  * @param {object} [opts.beforeState]  - snapshot before change
@@ -36,8 +36,8 @@ async function log({
          (user_id, user_email, user_name,
           document_id, document_number, document_name,
           action, before_state, after_state, metadata,
-          ip_address, user_agent)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          ip_address, user_agent, tenant_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         user?.id || null,
         user?.email || null,
@@ -51,6 +51,7 @@ async function log({
         metadata ? JSON.stringify(metadata) : null,
         ipAddress || null,
         userAgent || null,
+        user?.tenant_id || null,
       ],
     );
   } catch (err) {
@@ -62,8 +63,11 @@ async function log({
 /**
  * Query audit logs with filtering and pagination.
  * Admin-only endpoint.
+ *
+ * @param {string} tenantId  - required, scopes results to one tenant
  */
 async function queryLogs({
+  tenantId,
   dateFrom,
   dateTo,
   userId,
@@ -78,6 +82,10 @@ async function queryLogs({
   const conditions = [];
   const params = [];
   let p = 1;
+
+  // tenant scoping — always first condition
+  conditions.push(`tenant_id = $${p++}`);
+  params.push(tenantId);
 
   if (dateFrom) {
     conditions.push(`created_at >= $${p++}`);

@@ -11,13 +11,13 @@ const { validate, injectAuditContext } = require("../middleware/errorHandler");
 
 router.use(requireAuth, injectAuditContext);
 
-async function getDoc(docId, userId, isAdmin) {
+async function getDoc(docId, userId, isAdmin, tenantId) {
   const { rows } = await db.query(
     `SELECT d.*, ugr.access_level AS _access
      FROM documents d
      LEFT JOIN user_group_roles ugr ON ugr.group_id = d.group_id AND ugr.user_id = $2
-     WHERE d.id = $1 AND d.deleted_at IS NULL`,
-    [docId, userId],
+     WHERE d.id = $1 AND d.deleted_at IS NULL AND d.tenant_id = $3`,
+    [docId, userId, tenantId],
   );
   if (!rows.length) return null;
   const doc = rows[0];
@@ -36,6 +36,7 @@ router.get(
         req.params.documentId,
         req.user.id,
         req.user.is_admin,
+        req.tenantId,
       );
       if (!doc) return res.status(404).json({ error: "Document not found" });
       if (!doc._access) return res.status(403).json({ error: "Access denied" });
@@ -49,8 +50,9 @@ router.get(
        FROM document_attachments a
        LEFT JOIN attachment_versions av ON av.attachment_id = a.id
        WHERE a.document_id = $1
+         AND a.document_id IN (SELECT id FROM documents WHERE tenant_id = $2)
        GROUP BY a.id ORDER BY a.created_at`,
-        [req.params.documentId],
+        [req.params.documentId, req.tenantId],
       );
       res.json(rows);
     } catch (err) {
@@ -71,6 +73,7 @@ router.post(
         req.params.documentId,
         req.user.id,
         req.user.is_admin,
+        req.tenantId,
       );
       if (!doc) return res.status(404).json({ error: "Document not found" });
       if (doc._access !== "full")
@@ -88,7 +91,9 @@ router.post(
         rows: [att],
       } = await db.query(
         `INSERT INTO document_attachments (document_id,name,blob_path,blob_name,blob_size_bytes,mime_type,created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+         SELECT $1,$2,$3,$4,$5,$6,$7
+         WHERE EXISTS (SELECT 1 FROM documents WHERE id = $1 AND tenant_id = $8)
+         RETURNING *`,
         [
           req.params.documentId,
           name,
@@ -97,11 +102,13 @@ router.post(
           blob.blobSizeBytes,
           req.file.mimetype,
           req.user.id,
+          req.tenantId,
         ],
       );
+      if (!att) return res.status(404).json({ error: "Document not found" });
       await db.query(
         `INSERT INTO attachment_versions (attachment_id,version_number,label,blob_path,blob_name,blob_size_bytes,mime_type,created_by)
-       VALUES ($1,1,'Original upload',$2,$3,$4,$5,$6)`,
+         VALUES ($1,1,'Original upload',$2,$3,$4,$5,$6)`,
         [
           att.id,
           blob.blobPath,
@@ -137,14 +144,17 @@ router.post(
         req.params.documentId,
         req.user.id,
         req.user.is_admin,
+        req.tenantId,
       );
       if (!doc) return res.status(404).json({ error: "Document not found" });
       if (doc._access !== "full")
         return res.status(403).json({ error: "Full access required" });
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
       const { rows: attRows } = await db.query(
-        "SELECT * FROM document_attachments WHERE id=$1 AND document_id=$2",
-        [req.params.attId, req.params.documentId],
+        `SELECT a.* FROM document_attachments a
+         JOIN documents d ON d.id = a.document_id AND d.tenant_id = $3
+         WHERE a.id = $1 AND a.document_id = $2`,
+        [req.params.attId, req.params.documentId, req.tenantId],
       );
       if (!attRows.length)
         return res.status(404).json({ error: "Attachment not found" });
@@ -165,7 +175,7 @@ router.post(
       const label = req.body.label || `Version ${nextVer}`;
       await db.query(
         `INSERT INTO attachment_versions (attachment_id,version_number,label,blob_path,blob_name,blob_size_bytes,mime_type,created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
         [
           req.params.attId,
           nextVer,
@@ -178,13 +188,17 @@ router.post(
         ],
       );
       await db.query(
-        "UPDATE document_attachments SET blob_path=$1,blob_name=$2,blob_size_bytes=$3,mime_type=$4,updated_at=NOW() WHERE id=$5",
+        `UPDATE document_attachments
+         SET blob_path=$1,blob_name=$2,blob_size_bytes=$3,mime_type=$4,updated_at=NOW()
+         WHERE id=$5
+           AND document_id IN (SELECT id FROM documents WHERE tenant_id = $6)`,
         [
           blob.blobPath,
           blob.blobName,
           blob.blobSizeBytes,
           req.file.mimetype,
           req.params.attId,
+          req.tenantId,
         ],
       );
       await audit.log({
@@ -212,12 +226,15 @@ router.get(
         req.params.documentId,
         req.user.id,
         req.user.is_admin,
+        req.tenantId,
       );
       if (!doc) return res.status(404).json({ error: "Document not found" });
       if (!doc._access) return res.status(403).json({ error: "Access denied" });
       const { rows } = await db.query(
-        "SELECT * FROM document_attachments WHERE id=$1 AND document_id=$2",
-        [req.params.attId, req.params.documentId],
+        `SELECT a.* FROM document_attachments a
+         JOIN documents d ON d.id = a.document_id AND d.tenant_id = $3
+         WHERE a.id = $1 AND a.document_id = $2`,
+        [req.params.attId, req.params.documentId, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Attachment not found" });
@@ -255,12 +272,16 @@ router.get(
         req.params.documentId,
         req.user.id,
         req.user.is_admin,
+        req.tenantId,
       );
       if (!doc) return res.status(404).json({ error: "Document not found" });
       if (!doc._access) return res.status(403).json({ error: "Access denied" });
       const { rows } = await db.query(
-        `SELECT av.* FROM attachment_versions av JOIN document_attachments a ON a.id=av.attachment_id WHERE av.id=$1 AND a.document_id=$2`,
-        [req.params.verId, req.params.documentId],
+        `SELECT av.* FROM attachment_versions av
+         JOIN document_attachments a ON a.id = av.attachment_id
+         JOIN documents d ON d.id = a.document_id AND d.tenant_id = $3
+         WHERE av.id = $1 AND a.document_id = $2`,
+        [req.params.verId, req.params.documentId, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Version not found" });
@@ -294,13 +315,17 @@ router.delete(
         req.params.documentId,
         req.user.id,
         req.user.is_admin,
+        req.tenantId,
       );
       if (!doc) return res.status(404).json({ error: "Document not found" });
       if (doc._access !== "full")
         return res.status(403).json({ error: "Full access required" });
       const { rows } = await db.query(
-        "DELETE FROM document_attachments WHERE id=$1 AND document_id=$2 RETURNING *",
-        [req.params.attId, req.params.documentId],
+        `DELETE FROM document_attachments
+         WHERE id = $1 AND document_id = $2
+           AND document_id IN (SELECT id FROM documents WHERE tenant_id = $3)
+         RETURNING *`,
+        [req.params.attId, req.params.documentId, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Attachment not found" });

@@ -18,9 +18,11 @@ router.get("/", async (req, res, next) => {
               json_agg(json_build_object('id',d.id,'doc_number',d.doc_number,'name',d.name,'status',d.status)
                        ORDER BY d.doc_number) FILTER (WHERE d.id IS NOT NULL) AS documents
        FROM document_groups dg
-       LEFT JOIN documents d ON d.document_group_id = dg.id AND d.deleted_at IS NULL
+       LEFT JOIN documents d ON d.document_group_id = dg.id AND d.deleted_at IS NULL AND d.tenant_id = $1
+       WHERE dg.tenant_id = $1
        GROUP BY dg.id
        ORDER BY dg.name`,
+      [req.tenantId],
     );
     res.json(rows);
   } catch (err) {
@@ -38,11 +40,11 @@ router.get("/:id", [param("id").isUUID()], validate, async (req, res, next) => {
                 'doc_type',d.doc_type,'owner_name',u.display_name
               ) ORDER BY d.doc_number) FILTER (WHERE d.id IS NOT NULL) AS documents
        FROM document_groups dg
-       LEFT JOIN documents d ON d.document_group_id = dg.id AND d.deleted_at IS NULL
+       LEFT JOIN documents d ON d.document_group_id = dg.id AND d.deleted_at IS NULL AND d.tenant_id = $2
        LEFT JOIN users u ON u.id = d.owner_id
-       WHERE dg.id = $1
+       WHERE dg.id = $1 AND dg.tenant_id = $2
        GROUP BY dg.id`,
-      [req.params.id],
+      [req.params.id, req.tenantId],
     );
     if (!rows.length)
       return res.status(404).json({ error: "Document group not found" });
@@ -68,17 +70,17 @@ router.post(
 
       await db.transaction(async (client) => {
         const { rows } = await client.query(
-          `INSERT INTO document_groups (name, description, created_by)
-           VALUES ($1,$2,$3) RETURNING *`,
-          [name, description || null, req.user.id],
+          `INSERT INTO document_groups (tenant_id, name, description, created_by)
+           VALUES ($1,$2,$3,$4) RETURNING *`,
+          [req.tenantId, name, description || null, req.user.id],
         );
         const group = rows[0];
 
         // Link documents
         for (const docId of document_ids) {
           await client.query(
-            "UPDATE documents SET document_group_id = $1 WHERE id = $2 AND deleted_at IS NULL",
-            [group.id, docId],
+            "UPDATE documents SET document_group_id = $1 WHERE id = $2 AND deleted_at IS NULL AND tenant_id = $3",
+            [group.id, docId, req.tenantId],
           );
           await audit.log({
             user: req.user,
@@ -131,10 +133,10 @@ router.patch(
 
       if (!setClauses.length)
         return res.status(400).json({ error: "No fields to update" });
-      params.push(req.params.id);
+      params.push(req.params.id, req.tenantId);
 
       const { rows } = await db.query(
-        `UPDATE document_groups SET ${setClauses.join(",")} WHERE id = $${p} RETURNING *`,
+        `UPDATE document_groups SET ${setClauses.join(",")} WHERE id = $${p} AND tenant_id = $${p + 1} RETURNING *`,
         params,
       );
       if (!rows.length)
@@ -162,15 +164,15 @@ router.post(
   async (req, res, next) => {
     try {
       const { rows: grp } = await db.query(
-        "SELECT id FROM document_groups WHERE id = $1",
-        [req.params.id],
+        "SELECT id FROM document_groups WHERE id = $1 AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (!grp.length)
         return res.status(404).json({ error: "Document group not found" });
 
       const { rows } = await db.query(
-        "UPDATE documents SET document_group_id = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id, doc_number, name",
-        [req.params.id, req.body.document_id],
+        "UPDATE documents SET document_group_id = $1 WHERE id = $2 AND deleted_at IS NULL AND tenant_id = $3 RETURNING id, doc_number, name",
+        [req.params.id, req.body.document_id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Document not found" });
@@ -200,9 +202,9 @@ router.delete(
     try {
       const { rows } = await db.query(
         `UPDATE documents SET document_group_id = NULL
-         WHERE id = $1 AND document_group_id = $2 AND deleted_at IS NULL
+         WHERE id = $1 AND document_group_id = $2 AND deleted_at IS NULL AND tenant_id = $3
          RETURNING id, doc_number, name`,
-        [req.params.documentId, req.params.id],
+        [req.params.documentId, req.params.id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Document not in this group" });
@@ -230,14 +232,14 @@ router.delete(
   validate,
   async (req, res, next) => {
     try {
-      // Unlink all documents first
+      // Unlink all documents first (only this tenant's documents)
       await db.query(
-        "UPDATE documents SET document_group_id = NULL WHERE document_group_id = $1",
-        [req.params.id],
+        "UPDATE documents SET document_group_id = NULL WHERE document_group_id = $1 AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       const { rows } = await db.query(
-        "DELETE FROM document_groups WHERE id = $1 RETURNING *",
-        [req.params.id],
+        "DELETE FROM document_groups WHERE id = $1 AND tenant_id = $2 RETURNING *",
+        [req.params.id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Document group not found" });

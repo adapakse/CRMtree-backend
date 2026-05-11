@@ -123,9 +123,9 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
 
   // Utwórz log importu
   const { rows: logRows } = await db.query(`
-    INSERT INTO crm_import_logs (import_type, filename, rows_total, imported_by)
-    VALUES ('leads', $1, $2, $3) RETURNING id
-  `, [req.file.originalname, records.length, req.user.id]).catch(next);
+    INSERT INTO crm_import_logs (import_type, filename, rows_total, imported_by, tenant_id)
+    VALUES ('leads', $1, $2, $3, $4) RETURNING id
+  `, [req.file.originalname, records.length, req.user.id, req.tenantId]).catch(next);
 
   const importId = logRows[0].id;
   let imported = 0, skipped = 0;
@@ -164,8 +164,9 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
           (company, contact_name, contact_title, email, phone, source, stage,
            value_pln, annual_turnover_currency, probability, close_date, industry,
            assigned_to, tags, notes, hot, created_by,
-           online_pct, agent_name, agent_email, agent_phone, first_contact_date)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+           online_pct, agent_name, agent_email, agent_phone, first_contact_date,
+           tenant_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
       `, [
         company,
         nStr(row.contact_name || row.kontakt),
@@ -189,6 +190,7 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
         nStr(row.agent_email),
         nStr(row.agent_phone),
         nDate(row.first_contact_date || row.pierwszy_kontakt),
+        req.tenantId,
       ]);
       imported++;
     } catch (e) {
@@ -202,9 +204,9 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
     UPDATE crm_import_logs
     SET rows_imported=$1, rows_skipped=$2, rows_error=$3,
         error_details=$4, status='done', finished_at=now()
-    WHERE id=$5
+    WHERE id=$5 AND tenant_id=$6
   `, [imported, skipped - errors.length, errors.length,
-      errors.length ? JSON.stringify(errors.slice(0, 100)) : null, importId])
+      errors.length ? JSON.stringify(errors.slice(0, 100)) : null, importId, req.tenantId])
     .catch(() => {});
 
   await audit.log({
@@ -240,9 +242,9 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
   groups.forEach(g => { groupMap[g.name.toLowerCase()] = g.id; });
 
   const { rows: logRows } = await db.query(`
-    INSERT INTO crm_import_logs (import_type, filename, rows_total, imported_by)
-    VALUES ('partners', $1, $2, $3) RETURNING id
-  `, [req.file.originalname, records.length, req.user.id]).catch(next);
+    INSERT INTO crm_import_logs (import_type, filename, rows_total, imported_by, tenant_id)
+    VALUES ('partners', $1, $2, $3, $4) RETURNING id
+  `, [req.file.originalname, records.length, req.user.id, req.tenantId]).catch(next);
 
   const importId = logRows[0].id;
   let imported = 0, skipped = 0;
@@ -291,8 +293,8 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
            subdomain, language, partner_currency, country,
            billing_address, billing_zip, billing_city, billing_country, billing_email_address,
            admin_first_name, admin_last_name, admin_email,
-           created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46)
+           created_by, tenant_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47)
         ON CONFLICT DO NOTHING
       `, [
         company,
@@ -345,6 +347,7 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
         nStr(row.admin_last_name  || row.admin_nazwisko),
         nStr(row.admin_email),
         req.user.id,
+        req.tenantId,
       ]);
       imported++;
     } catch (e) {
@@ -357,9 +360,9 @@ router.post('/partners', upload.single('file'), async (req, res, next) => {
     UPDATE crm_import_logs
     SET rows_imported=$1, rows_skipped=$2, rows_error=$3,
         error_details=$4, status='done', finished_at=now()
-    WHERE id=$5
+    WHERE id=$5 AND tenant_id=$6
   `, [imported, skipped - errors.length, errors.length,
-      errors.length ? JSON.stringify(errors.slice(0, 100)) : null, importId])
+      errors.length ? JSON.stringify(errors.slice(0, 100)) : null, importId, req.tenantId])
     .catch(() => {});
 
   await audit.log({
@@ -421,9 +424,9 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
   users.forEach(u => { userMap[u.email.toLowerCase()] = u.id; });
 
   const { rows: logRows } = await db.query(
-    `INSERT INTO crm_import_logs (import_type, filename, rows_total, imported_by)
-     VALUES ('documents', $1, $2, $3) RETURNING id`,
-    [req.file.originalname, records.length, req.user.id]
+    `INSERT INTO crm_import_logs (import_type, filename, rows_total, imported_by, tenant_id)
+     VALUES ('documents', $1, $2, $3, $4) RETURNING id`,
+    [req.file.originalname, records.length, req.user.id, req.tenantId]
   ).catch(next);
 
   const importId = logRows[0].id;
@@ -489,8 +492,9 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
            creation_date, signing_date, expiration_date,
            created_by, owner_id,
            nip, country, contract_subject,
-           contact_name, contact_email, contact_phone)
-        VALUES ($1,$2,$3,$4::doc_status,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+           contact_name, contact_email, contact_phone,
+           tenant_id)
+        VALUES ($1,$2,$3,$4::doc_status,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
         RETURNING id
       `, [
         name,
@@ -510,6 +514,7 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
         nStr(row.contact_name || row.kontakt_imie_nazwisko),
         nStr(row.contact_email || row.kontakt_email),
         nStr(row.contact_phone || row.kontakt_telefon),
+        req.tenantId,
       ]);
 
       // Importuj tagi
@@ -517,9 +522,9 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
         const docId = docRows[0].id;
         for (const tag of parsedTags) {
           await db.query(
-            `INSERT INTO document_tags (document_id, key, value, created_by)
-             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-            [docId, tag.key, tag.value, req.user.id]
+            `INSERT INTO document_tags (document_id, key, value, created_by, tenant_id)
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+            [docId, tag.key, tag.value, req.user.id, req.tenantId]
           ).catch(() => {}); // ignoruj błędy pojedynczych tagów
         }
       }
@@ -535,9 +540,9 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
     `UPDATE crm_import_logs
      SET rows_imported=$1, rows_skipped=$2, rows_error=$3,
          error_details=$4, status='done', finished_at=now()
-     WHERE id=$5`,
+     WHERE id=$5 AND tenant_id=$6`,
     [imported, skipped - errors.length, errors.length,
-     errors.length ? JSON.stringify(errors.slice(0,100)) : null, importId]
+     errors.length ? JSON.stringify(errors.slice(0,100)) : null, importId, req.tenantId]
   ).catch(() => {});
 
   await audit.log({
@@ -559,12 +564,12 @@ router.post('/documents', upload.single('file'), async (req, res, next) => {
 // ── GET /api/crm/import/logs ──────────────────────────────────────
 router.get('/logs', async (req, res, next) => {
   try {
-    const params = [];
-    let where = '';
+    const params = [req.tenantId];
+    let where = 'WHERE l.tenant_id = $1';
     // Handlowiec widzi tylko swoje importy
     if (!req.isCrmManager) {
       params.push(req.user.id);
-      where = `WHERE l.imported_by = $${params.length}`;
+      where += ` AND l.imported_by = $${params.length}`;
     }
     const { rows } = await db.query(`
       SELECT l.*, u.display_name AS imported_by_name
@@ -580,7 +585,7 @@ router.get('/logs', async (req, res, next) => {
 
 // ── GET /api/crm/import/template/:type ───────────────────────────
 router.get('/template/:type', (req, res) => {
-  const bom = '\uFEFF'; // BOM dla Excel
+  const bom = '﻿'; // BOM dla Excel
   const templates = {
     leads: [
       'company,contact_name,contact_title[CEO|CFO|CTO|COO|VP|Director|Manager|Specialist|Owner|Other],email,phone,source[strona_www|polecenie|cold_call|linkedin|targi|partner|agent|kampania|inbound|inne],stage[new|qualification|presentation|offer|negotiation|closed_won|closed_lost],value_pln,annual_turnover_currency[PLN|EUR|USD|GBP|CHF],probability,close_date,first_contact_date[format:YYYY-MM-DD],industry[IT|Finance|Transport|Tourism|Healthcare|Retail|Manufacturing|Legal|Education|Other],assigned_to_email,notes,hot,tags,agent_name,agent_email,agent_phone,online_pct',
@@ -614,7 +619,7 @@ router.get('/template/:type', (req, res) => {
 router.get('/export/:type', async (req, res, next) => {
   try {
     const { type } = req.params;
-    const bom = '\uFEFF';
+    const bom = '﻿';
 
     // Helper: escape CSV cell (wrap in quotes if contains comma/quote/newline)
     const cell = v => {
@@ -632,13 +637,13 @@ router.get('/export/:type', async (req, res, next) => {
       // Header identical to import template (without bracket hints for data rows)
       const header = 'company,contact_name,contact_title,email,phone,source,stage,value_pln,annual_turnover_currency,probability,close_date,first_contact_date,industry,assigned_to_email,notes,hot,tags,agent_name,agent_email,agent_phone,online_pct';
 
-      const params = [];
+      const params = [req.tenantId];
       const scope = req.scopeFilter ? req.scopeFilter('l', 'assigned_to', params) : '';
       const { rows } = await db.query(`
         SELECT l.*, u.email AS assigned_to_email_val
         FROM crm_leads l
         LEFT JOIN users u ON u.id = l.assigned_to
-        WHERE l.converted_at IS NULL ${scope}
+        WHERE l.converted_at IS NULL AND l.tenant_id = $1 ${scope}
         ORDER BY l.company
       `, params);
 
@@ -669,8 +674,9 @@ router.get('/export/:type', async (req, res, next) => {
         FROM crm_partners p
         LEFT JOIN crm_partner_groups g ON g.id = p.group_id
         LEFT JOIN users mu ON mu.id = p.manager_id
+        WHERE p.tenant_id = $1
         ORDER BY p.company
-      `);
+      `, [req.tenantId]);
 
       const lines = [header];
       for (const r of rows) {

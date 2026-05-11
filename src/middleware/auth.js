@@ -182,7 +182,8 @@ async function requireAuth(req, res, next) {
     if (!rows.length || !rows[0].is_active) {
       return res.status(401).json({ error: "User not found or inactive" });
     }
-    req.user = rows[0];
+    req.user     = rows[0];
+    req.tenantId = rows[0].tenant_id ?? null;
     next();
   } catch (err) {
     if (err.name === "TokenExpiredError") {

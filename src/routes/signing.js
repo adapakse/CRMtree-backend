@@ -67,8 +67,8 @@ router.post(
   async (req, res, next) => {
     try {
       const { rows } = await db.query(
-        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL",
-        [req.params.id],
+        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Document not found" });
@@ -86,8 +86,8 @@ router.post(
       if (training) {
         const fakeEnvelopeId = `training_envelope_${uuidv4().replace(/-/g, '')}`;
         await db.query(
-          `UPDATE documents SET status = 'being_signed', updated_at = NOW() WHERE id = $1`,
-          [doc.id],
+          `UPDATE documents SET status = 'being_signed', updated_at = NOW() WHERE id = $1 AND tenant_id = $2`,
+          [doc.id, req.tenantId],
         );
         const signatoryName = req.body.signatories[0]?.name || req.body.signatories[0]?.email || 'Sygnatariusz';
         scheduleTrainingSignCompletion(doc.id, signatoryName, req.user?.id);

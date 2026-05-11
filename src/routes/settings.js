@@ -17,7 +17,9 @@ router.get("/", requireAuth, async (req, res, next) => {
               s.updated_at, u.display_name AS updated_by_name
        FROM app_settings s
        LEFT JOIN users u ON u.id = s.updated_by
-       ORDER BY category, key`
+       WHERE s.tenant_id = $1
+       ORDER BY category, key`,
+      [req.tenantId]
     );
 
     // Build flat map for easy consumption: { expiration_red_days: 90, ... }
@@ -60,8 +62,8 @@ router.put(
 
       // Validate all keys exist before touching the DB
       const { rows: existing } = await db.query(
-        `SELECT key, value_type FROM app_settings WHERE key = ANY($1)`,
-        [keys],
+        `SELECT key, value_type FROM app_settings WHERE tenant_id = $1 AND key = ANY($2)`,
+        [req.tenantId, keys],
       );
       const existingKeys = new Set(existing.map((r) => r.key));
       const unknown = keys.filter((k) => !existingKeys.has(k));
@@ -84,8 +86,9 @@ router.put(
         else strValue = String(rawValue ?? '');
 
         await db.query(
-          `UPDATE app_settings SET value = $1, updated_by = $2, updated_at = now() WHERE key = $3`,
-          [strValue, req.user?.id || null, key]
+          `UPDATE app_settings SET value = $1, updated_by = $2, updated_at = now()
+           WHERE tenant_id = $3 AND key = $4`,
+          [strValue, req.user?.id || null, req.tenantId, key]
         );
       }
 
@@ -95,7 +98,9 @@ router.put(
               s.updated_at, u.display_name AS updated_by_name
        FROM app_settings s
        LEFT JOIN users u ON u.id = s.updated_by
-       ORDER BY category, key`
+       WHERE s.tenant_id = $1
+       ORDER BY category, key`,
+      [req.tenantId]
     );
 
       const flat = {};
@@ -135,20 +140,20 @@ router.post("/tooltips", requireAuth, requireAdmin, async (req, res, next) => {
     if (!value?.trim()) return res.status(400).json({ error: "'value' (treść tooltip) jest wymagana" });
 
     await db.query(
-      `INSERT INTO app_settings (key, value, label, description, value_type, category, updated_by, updated_at)
-       VALUES ($1, $2, $3, '', 'string', 'tooltip', $4, now())
-       ON CONFLICT (key) DO UPDATE
+      `INSERT INTO app_settings (key, value, label, description, value_type, category, updated_by, updated_at, tenant_id)
+       VALUES ($1, $2, $3, '', 'string', 'tooltip', $4, now(), $5)
+       ON CONFLICT (tenant_id, key) DO UPDATE
          SET value = EXCLUDED.value, label = EXCLUDED.label,
              updated_by = EXCLUDED.updated_by, updated_at = now()`,
-      [key.trim(), value.trim(), label?.trim() || key.trim(), req.user?.id || null]
+      [key.trim(), value.trim(), label?.trim() || key.trim(), req.user?.id || null, req.tenantId]
     );
 
     const { rows } = await db.query(
       `SELECT key, value, label, description, value_type, category,
               s.updated_at, u.display_name AS updated_by_name
        FROM app_settings s LEFT JOIN users u ON u.id = s.updated_by
-       WHERE s.key = $1`,
-      [key.trim()]
+       WHERE s.tenant_id = $1 AND s.key = $2`,
+      [req.tenantId, key.trim()]
     );
     res.status(200).json(rows[0]);
   } catch (err) { next(err); }
@@ -159,8 +164,8 @@ router.post("/tooltips", requireAuth, requireAdmin, async (req, res, next) => {
 router.delete("/tooltips/:key", requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const { rowCount } = await db.query(
-      `DELETE FROM app_settings WHERE key = $1 AND category = 'tooltip'`,
-      [req.params.key]
+      `DELETE FROM app_settings WHERE tenant_id = $1 AND key = $2 AND category = 'tooltip'`,
+      [req.tenantId, req.params.key]
     );
     if (!rowCount) return res.status(404).json({ error: "Tooltip nie znaleziony" });
     res.status(204).end();
@@ -173,10 +178,12 @@ router.get("/groups", requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const { rows } = await db.query(
       `SELECT id, name, display_name, description, has_owner_restriction, is_active,
-              (SELECT COUNT(*) FROM user_group_roles ugr WHERE ugr.group_id = gp.id)::int AS member_count,
-              (SELECT COUNT(*) FROM documents d WHERE d.group_id = gp.id AND d.deleted_at IS NULL)::int AS document_count
+              (SELECT COUNT(*) FROM user_group_roles ugr WHERE ugr.group_id = gp.id AND ugr.tenant_id = $1)::int AS member_count,
+              (SELECT COUNT(*) FROM documents d WHERE d.group_id = gp.id AND d.deleted_at IS NULL AND d.tenant_id = $1)::int AS document_count
        FROM group_profiles gp
-       ORDER BY name`
+       WHERE gp.tenant_id = $1
+       ORDER BY name`,
+      [req.tenantId]
     );
     res.json(rows);
   } catch (err) { next(err); }
@@ -191,10 +198,10 @@ router.post("/groups", requireAuth, requireAdmin, injectAuditContext, async (req
     if (!display_name?.trim()) return res.status(400).json({ error: "Pole 'display_name' jest wymagane" });
 
     const { rows } = await db.query(
-      `INSERT INTO group_profiles (name, display_name, description, has_owner_restriction, is_active)
-       VALUES ($1, $2, $3, $4, true)
+      `INSERT INTO group_profiles (name, display_name, description, has_owner_restriction, is_active, tenant_id)
+       VALUES ($1, $2, $3, $4, true, $5)
        RETURNING *`,
-      [name.trim(), display_name.trim(), description?.trim() || null, has_owner_restriction === true]
+      [name.trim(), display_name.trim(), description?.trim() || null, has_owner_restriction === true, req.tenantId]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -209,7 +216,7 @@ router.patch("/groups/:id", requireAuth, requireAdmin, injectAuditContext, async
   try {
     const { display_name, description, has_owner_restriction, is_active } = req.body;
     const { rows: existing } = await db.query(
-      "SELECT * FROM group_profiles WHERE id = $1", [req.params.id]
+      "SELECT * FROM group_profiles WHERE id = $1 AND tenant_id = $2", [req.params.id, req.tenantId]
     );
     if (!existing.length) return res.status(404).json({ error: "Grupa nie znaleziona" });
 
@@ -219,7 +226,7 @@ router.patch("/groups/:id", requireAuth, requireAdmin, injectAuditContext, async
            description           = COALESCE($2, description),
            has_owner_restriction = COALESCE($3, has_owner_restriction),
            is_active             = COALESCE($4, is_active)
-       WHERE id = $5
+       WHERE id = $5 AND tenant_id = $6
        RETURNING *`,
       [
         display_name?.trim() ?? null,
@@ -227,6 +234,7 @@ router.patch("/groups/:id", requireAuth, requireAdmin, injectAuditContext, async
         has_owner_restriction ?? null,
         is_active ?? null,
         req.params.id,
+        req.tenantId,
       ]
     );
     res.json(rows[0]);
@@ -239,10 +247,10 @@ router.delete("/groups/:id", requireAuth, requireAdmin, async (req, res, next) =
   try {
     const { rows: existing } = await db.query(
       `SELECT gp.*,
-              (SELECT COUNT(*) FROM user_group_roles WHERE group_id = gp.id)::int AS member_count,
-              (SELECT COUNT(*) FROM documents WHERE group_id = gp.id AND deleted_at IS NULL)::int AS document_count
-       FROM group_profiles gp WHERE id = $1`,
-      [req.params.id]
+              (SELECT COUNT(*) FROM user_group_roles WHERE group_id = gp.id AND tenant_id = $2)::int AS member_count,
+              (SELECT COUNT(*) FROM documents WHERE group_id = gp.id AND deleted_at IS NULL AND tenant_id = $2)::int AS document_count
+       FROM group_profiles gp WHERE id = $1 AND tenant_id = $2`,
+      [req.params.id, req.tenantId]
     );
     if (!existing.length) return res.status(404).json({ error: "Grupa nie znaleziona" });
     const g = existing[0];
@@ -251,10 +259,9 @@ router.delete("/groups/:id", requireAuth, requireAdmin, async (req, res, next) =
         error: `Nie można usunąć grupy — ma ${g.member_count} użytkowników i ${g.document_count} dokumentów.`,
       });
     }
-    await db.query("DELETE FROM group_profiles WHERE id = $1", [req.params.id]);
+    await db.query("DELETE FROM group_profiles WHERE id = $1 AND tenant_id = $2", [req.params.id, req.tenantId]);
     res.status(204).end();
   } catch (err) { next(err); }
 });
 
 module.exports = router;
-

@@ -42,10 +42,10 @@ router.post(
       const { email, first_name, last_name, is_active = true, is_admin = false, crm_role = null } = req.body;
 
       const { rows } = await db.query(
-        `INSERT INTO users (email, first_name, last_name, is_active, is_admin, crm_role)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO users (email, first_name, last_name, is_active, is_admin, crm_role, tenant_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id, email, first_name, last_name, display_name, is_active, is_admin, crm_role, created_at`,
-        [email, first_name, last_name, is_active, is_admin, crm_role]
+        [email, first_name, last_name, is_active, is_admin, crm_role, req.tenantId]
       );
 
       await audit.log({
@@ -90,6 +90,10 @@ router.get(
       const params = [];
       let p = 1;
 
+      // tenant scoping
+      conditions.push(`u.tenant_id = $${p++}`);
+      params.push(req.tenantId);
+
       if (search) {
         conditions.push(
           `(u.email ILIKE $${p} OR u.first_name ILIKE $${p} OR u.last_name ILIKE $${p})`,
@@ -99,7 +103,7 @@ router.get(
       }
       if (group_id) {
         conditions.push(
-          `u.id IN (SELECT user_id FROM user_group_roles WHERE group_id = $${p++})`,
+          `u.id IN (SELECT user_id FROM user_group_roles WHERE group_id = $${p++} AND tenant_id = $1)`,
         );
         params.push(group_id);
       }
@@ -130,8 +134,8 @@ router.get(
                     'access_level', ugr.access_level
                   )) FILTER (WHERE ugr.group_id IS NOT NULL) AS roles
            FROM users u
-           LEFT JOIN user_group_roles ugr ON ugr.user_id = u.id
-           LEFT JOIN group_profiles gp ON gp.id = ugr.group_id
+           LEFT JOIN user_group_roles ugr ON ugr.user_id = u.id AND ugr.tenant_id = $1
+           LEFT JOIN group_profiles gp ON gp.id = ugr.group_id AND gp.tenant_id = $1
            ${where}
            GROUP BY u.id
            ORDER BY u.last_name, u.first_name
@@ -166,11 +170,11 @@ router.get("/:id", requireAdminOrSalesManager, [param("id").isUUID()], validate,
                 'access_level', ugr.access_level, 'assigned_at', ugr.assigned_at
               )) FILTER (WHERE ugr.group_id IS NOT NULL) AS roles
        FROM users u
-       LEFT JOIN user_group_roles ugr ON ugr.user_id = u.id
-       LEFT JOIN group_profiles gp ON gp.id = ugr.group_id
-       WHERE u.id = $1
+       LEFT JOIN user_group_roles ugr ON ugr.user_id = u.id AND ugr.tenant_id = $2
+       LEFT JOIN group_profiles gp ON gp.id = ugr.group_id AND gp.tenant_id = $2
+       WHERE u.id = $1 AND u.tenant_id = $2
        GROUP BY u.id`,
-      [req.params.id],
+      [req.params.id, req.tenantId],
     );
     if (!rows.length) return res.status(404).json({ error: "User not found" });
     res.json(rows[0]);
@@ -226,9 +230,10 @@ router.patch(
       if (!setClauses.length)
         return res.status(400).json({ error: "No fields to update" });
       params.push(req.params.id);
+      params.push(req.tenantId);
 
       const { rows } = await db.query(
-        `UPDATE users SET ${setClauses.join(",")} WHERE id = $${p} RETURNING *`,
+        `UPDATE users SET ${setClauses.join(",")} WHERE id = $${p} AND tenant_id = $${p + 1} RETURNING *`,
         params,
       );
 
@@ -279,18 +284,18 @@ router.post(
         return res.status(404).json({ error: "User not found" });
 
       const { rows: groupRows } = await db.query(
-        "SELECT id, name FROM group_profiles WHERE id = $1 AND is_active = TRUE",
-        [group_id],
+        "SELECT id, name FROM group_profiles WHERE id = $1 AND is_active = TRUE AND tenant_id = $2",
+        [group_id, req.tenantId],
       );
       if (!groupRows.length)
         return res.status(404).json({ error: "Group not found" });
 
       const { rows } = await db.query(
-        `INSERT INTO user_group_roles (user_id, group_id, access_level, assigned_by)
-         VALUES ($1,$2,$3::access_level,$4)
+        `INSERT INTO user_group_roles (user_id, group_id, access_level, assigned_by, tenant_id)
+         VALUES ($1,$2,$3::access_level,$4,$5)
          ON CONFLICT (user_id, group_id) DO UPDATE SET access_level = EXCLUDED.access_level, assigned_by = EXCLUDED.assigned_by
          RETURNING *`,
-        [req.params.id, group_id, access_level, req.user.id],
+        [req.params.id, group_id, access_level, req.user.id, req.tenantId],
       );
 
       await audit.log({
@@ -324,9 +329,9 @@ router.delete(
     try {
       const { rows } = await db.query(
         `DELETE FROM user_group_roles
-         WHERE id = $1 AND user_id = $2
-         RETURNING *, (SELECT name FROM group_profiles WHERE id = group_id) AS group_name`,
-        [req.params.roleId, req.params.id],
+         WHERE id = $1 AND user_id = $2 AND tenant_id = $3
+         RETURNING *, (SELECT name FROM group_profiles WHERE id = group_id AND tenant_id = $3) AS group_name`,
+        [req.params.roleId, req.params.id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Role assignment not found" });

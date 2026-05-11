@@ -40,8 +40,8 @@ router.get('/total',
         ? new Date(req.query.date_to)
         : new Date(year, 11, 31);
 
-      const params = [year];
-      let where = 'WHERE b.year = $1';
+      const params = [year, req.tenantId];
+      let where = 'WHERE b.year = $1 AND b.tenant_id = $2';
       if (userId) { params.push(userId); where += ` AND b.user_id = $${params.length}`; }
 
       const { rows } = await db.query(`
@@ -87,8 +87,8 @@ router.get('/',
         ? (req.query.user_id || null)
         : req.user.id;
 
-      const params = [year];
-      let where = 'WHERE b.year = $1';
+      const params = [year, req.tenantId];
+      let where = 'WHERE b.year = $1 AND b.tenant_id = $2';
       if (userId) { params.push(userId); where += ` AND b.user_id = $${params.length}`; }
 
       const { rows } = await db.query(`
@@ -128,8 +128,8 @@ router.post('/',
 
       // Spójność: na dany rok/user może być tylko jeden typ okresu
       const { rows: existing } = await db.query(
-        `SELECT DISTINCT period_type FROM crm_sales_budgets WHERE user_id=$1 AND year=$2 AND period_type != $3`,
-        [user_id, year, period_type]
+        `SELECT DISTINCT period_type FROM crm_sales_budgets WHERE user_id=$1 AND year=$2 AND period_type != $3 AND tenant_id=$4`,
+        [user_id, year, period_type, req.tenantId]
       );
       if (existing.length > 0) {
         return res.status(409).json({
@@ -140,12 +140,12 @@ router.post('/',
 
       const { rows } = await db.query(`
         INSERT INTO crm_sales_budgets
-          (user_id, year, period_type, period_number, amount, currency, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+          (user_id, year, period_type, period_number, amount, currency, created_by, tenant_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
         ON CONFLICT (user_id, year, period_type, period_number)
         DO UPDATE SET amount=$5, currency=$6, updated_at=NOW()
         RETURNING *
-      `, [user_id, year, period_type, period_number, amount, currency, req.user.id]);
+      `, [user_id, year, period_type, period_number, amount, currency, req.user.id, req.tenantId]);
 
       res.status(201).json(rows[0]);
     } catch (err) { next(err); }
@@ -164,8 +164,8 @@ router.delete('/by-user',
   async (req, res, next) => {
     try {
       await db.query(
-        'DELETE FROM crm_sales_budgets WHERE user_id=$1 AND year=$2',
-        [req.query.user_id, parseInt(req.query.year)]
+        'DELETE FROM crm_sales_budgets WHERE user_id=$1 AND year=$2 AND tenant_id=$3',
+        [req.query.user_id, parseInt(req.query.year), req.tenantId]
       );
       res.status(204).end();
     } catch (err) { next(err); }
@@ -179,7 +179,7 @@ router.delete('/:id',
   validate,
   async (req, res, next) => {
     try {
-      await db.query('DELETE FROM crm_sales_budgets WHERE id=$1', [parseInt(req.params.id)]);
+      await db.query('DELETE FROM crm_sales_budgets WHERE id=$1 AND tenant_id=$2', [parseInt(req.params.id), req.tenantId]);
       res.status(204).end();
     } catch (err) { next(err); }
   }

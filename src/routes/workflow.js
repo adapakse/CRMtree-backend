@@ -11,10 +11,10 @@ const { validate, injectAuditContext } = require("../middleware/errorHandler");
 
 router.use(requireAuth, injectAuditContext);
 
-async function loadDoc(id) {
+async function loadDoc(id, tenantId) {
   const { rows } = await db.query(
-    "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL",
-    [id],
+    "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+    [id, tenantId],
   );
   return rows[0] || null;
 }
@@ -24,7 +24,7 @@ async function loadDoc(id) {
 // ────────────────────────────────────────────────────────────
 router.get("/", async (req, res, next) => {
   try {
-    const doc = await loadDoc(req.params.documentId);
+    const doc = await loadDoc(req.params.documentId, req.tenantId);
     if (!doc) return res.status(404).json({ error: "Document not found" });
     await perms.assertCanRead(req.user.id, doc);
 
@@ -33,11 +33,12 @@ router.get("/", async (req, res, next) => {
               assigner.display_name AS assigner_name, assigner.email AS assigner_email,
               assignee.display_name AS assignee_name, assignee.email AS assignee_email
        FROM workflow_tasks wt
+       JOIN documents d ON d.id = wt.document_id AND d.tenant_id = $2
        LEFT JOIN users assigner ON assigner.id = wt.assigned_by
        LEFT JOIN users assignee ON assignee.id = wt.assigned_to
        WHERE wt.document_id = $1
        ORDER BY wt.created_at DESC`,
-      [doc.id],
+      [doc.id, req.tenantId],
     );
     res.json(rows);
   } catch (err) {
@@ -59,7 +60,7 @@ router.post(
   validate,
   async (req, res, next) => {
     try {
-      const doc = await loadDoc(req.params.documentId);
+      const doc = await loadDoc(req.params.documentId, req.tenantId);
       if (!doc) return res.status(404).json({ error: "Document not found" });
       await perms.assertCanFull(req.user.id, doc);
 
@@ -96,8 +97,8 @@ router.post(
         const statusMap = { edit: "being_edited", sign: "being_signed" };
         if (statusMap[task_type]) {
           await client.query(
-            `UPDATE documents SET status = $1::doc_status WHERE id = $2`,
-            [statusMap[task_type], doc.id],
+            `UPDATE documents SET status = $1::doc_status WHERE id = $2 AND tenant_id = $3`,
+            [statusMap[task_type], doc.id, req.tenantId],
           );
         }
 
@@ -151,12 +152,14 @@ router.patch(
   validate,
   async (req, res, next) => {
     try {
-      const doc = await loadDoc(req.params.documentId);
+      const doc = await loadDoc(req.params.documentId, req.tenantId);
       if (!doc) return res.status(404).json({ error: "Document not found" });
 
       const { rows: taskRows } = await db.query(
-        "SELECT * FROM workflow_tasks WHERE id = $1 AND document_id = $2",
-        [req.params.taskId, doc.id],
+        `SELECT wt.* FROM workflow_tasks wt
+         JOIN documents d ON d.id = wt.document_id AND d.tenant_id = $3
+         WHERE wt.id = $1 AND wt.document_id = $2`,
+        [req.params.taskId, doc.id, req.tenantId],
       );
       if (!taskRows.length)
         return res.status(404).json({ error: "Task not found" });
@@ -229,14 +232,16 @@ router.delete(
   validate,
   async (req, res, next) => {
     try {
-      const doc = await loadDoc(req.params.documentId);
+      const doc = await loadDoc(req.params.documentId, req.tenantId);
       if (!doc) return res.status(404).json({ error: "Document not found" });
       await perms.assertCanFull(req.user.id, doc);
 
       const { rows } = await db.query(
         `UPDATE workflow_tasks SET task_status = 'cancelled'::workflow_task_status
-       WHERE id = $1 AND document_id = $2 RETURNING *`,
-        [req.params.taskId, doc.id],
+         WHERE id = $1 AND document_id = $2
+           AND document_id IN (SELECT id FROM documents WHERE tenant_id = $3)
+         RETURNING *`,
+        [req.params.taskId, doc.id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Task not found" });
@@ -266,12 +271,12 @@ router.get("/all-tasks", async (req, res, next) => {
               assigner.display_name AS assigner_name,
               gp.name AS group_name
        FROM workflow_tasks wt
-       JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL
+       JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL AND d.tenant_id = $1
        LEFT JOIN users assignee ON assignee.id = wt.assigned_to
        LEFT JOIN users assigner ON assigner.id = wt.assigned_by
        LEFT JOIN group_profiles gp ON gp.id = d.group_id
        ORDER BY wt.created_at DESC`,
-      [],
+      [req.tenantId],
     );
     res.json(rows);
   } catch (err) {
@@ -292,12 +297,12 @@ router.get("/my-tasks", async (req, res, next) => {
               assigner.display_name AS assigner_name,
               gp.name AS group_name
        FROM workflow_tasks wt
-       JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL
+       JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL AND d.tenant_id = $2
        LEFT JOIN users assigner ON assigner.id = wt.assigned_by
        LEFT JOIN group_profiles gp ON gp.id = d.group_id
        WHERE wt.assigned_to = $1 AND wt.task_status IN ('pending','in_progress')
        ORDER BY wt.created_at DESC`,
-      [req.user.id],
+      [req.user.id, req.tenantId],
     );
     res.json(rows);
   } catch (err) {

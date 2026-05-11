@@ -27,16 +27,17 @@ router.get(
   async (req, res, next) => {
     try {
       const result = await audit.queryLogs({
-        dateFrom: req.query.date_from,
-        dateTo: req.query.date_to,
-        userId: req.query.user_id,
-        userEmail: req.query.user_email,
-        documentId: req.query.document_id,
+        tenantId:     req.tenantId,
+        dateFrom:     req.query.date_from,
+        dateTo:       req.query.date_to,
+        userId:       req.query.user_id,
+        userEmail:    req.query.user_email,
+        documentId:   req.query.document_id,
         documentName: req.query.document_name,
-        action: req.query.action,
-        search: req.query.search,
-        page: req.query.page || 1,
-        limit: req.query.limit || 50,
+        action:       req.query.action,
+        search:       req.query.search,
+        page:         req.query.page || 1,
+        limit:        req.query.limit || 50,
       });
       res.json(result);
     } catch (err) {

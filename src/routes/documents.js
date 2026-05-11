@@ -74,10 +74,10 @@ router.get(
       let conditions, params, p;
 
       if (req.user.is_admin) {
-        // Admins see everything
-        conditions = [`d.deleted_at IS NULL`];
-        params = [];
-        p = 1;
+        // Admins see everything (still scoped to tenant)
+        conditions = [`d.deleted_at IS NULL`, `d.tenant_id = $1`];
+        params = [req.tenantId];
+        p = 2;
       } else {
         // Build group-based visibility, then extend with task-based access
         const vis = await perms.buildVisibilityFilter(req.user.id);
@@ -94,6 +94,9 @@ router.get(
         conditions = [`d.deleted_at IS NULL`, extendedVis];
         params = [...vis.params, req.user.id];
         p = vis.nextParamAt + 1;
+        // tenant scope
+        conditions.push(`d.tenant_id = $${p++}`);
+        params.push(req.tenantId);
       }
 
       if (search) {
@@ -281,12 +284,13 @@ router.post(
       await db.transaction(async (client) => {
         const { rows } = await client.query(
           `INSERT INTO documents
-             (name, doc_type, gdpr_type, group_id, entities, owner_id,
+             (tenant_id, name, doc_type, gdpr_type, group_id, entities, owner_id,
               document_group_id, expiration_date, signing_date, created_by,
               nip, country, contract_subject, contact_name, contact_email, contact_phone)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
            RETURNING *`,
           [
+            req.tenantId,
             name,
             doc_type,
             gdpr_type,
@@ -317,13 +321,14 @@ router.post(
             1,
           );
           await client.query(
-            `UPDATE documents SET blob_path=$1, blob_name=$2, blob_size_bytes=$3, mime_type=$4 WHERE id=$5`,
+            `UPDATE documents SET blob_path=$1, blob_name=$2, blob_size_bytes=$3, mime_type=$4 WHERE id=$5 AND tenant_id=$6`,
             [
               blobResult.blobPath,
               blobResult.blobName,
               blobResult.blobSizeBytes,
               req.file.mimetype,
               doc.id,
+              req.tenantId,
             ],
           );
           await client.query(
@@ -373,8 +378,8 @@ router.post(
            FROM documents d
            LEFT JOIN group_profiles gp ON gp.id = d.group_id
            LEFT JOIN users u ON u.id = d.owner_id
-           WHERE d.id = $1`,
-          [doc.id],
+           WHERE d.id = $1 AND d.tenant_id = $2`,
+          [doc.id, req.tenantId],
         );
         res.status(201).json(full[0]);
       });
@@ -414,8 +419,8 @@ router.get("/:id", [param("id").isUUID()], validate, async (req, res, next) => {
        LEFT JOIN group_profiles gp  ON gp.id  = d.group_id
        LEFT JOIN users u            ON u.id   = d.owner_id
        LEFT JOIN document_groups dg ON dg.id  = d.document_group_id
-       WHERE d.id = $1 AND d.deleted_at IS NULL`,
-      [req.params.id],
+       WHERE d.id = $1 AND d.deleted_at IS NULL AND d.tenant_id = $2`,
+      [req.params.id, req.tenantId],
     );
     if (!rows.length)
       return res.status(404).json({ error: "Document not found" });
@@ -484,8 +489,8 @@ router.patch(
   async (req, res, next) => {
     try {
       const { rows: docRows } = await db.query(
-        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL",
-        [req.params.id],
+        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (!docRows.length)
         return res.status(404).json({ error: "Document not found" });
@@ -536,10 +541,10 @@ router.patch(
 
       if (setClauses.length === 0)
         return res.status(400).json({ error: "No fields to update" });
-      params.push(req.params.id);
+      params.push(req.params.id, req.tenantId);
 
       const { rows: updated } = await db.query(
-        `UPDATE documents SET ${setClauses.join(", ")} WHERE id = $${p} RETURNING *`,
+        `UPDATE documents SET ${setClauses.join(", ")} WHERE id = $${p} AND tenant_id = $${p + 1} RETURNING *`,
         params,
       );
 
@@ -573,8 +578,8 @@ router.delete(
   async (req, res, next) => {
     try {
       const { rows } = await db.query(
-        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL",
-        [req.params.id],
+        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Document not found" });
@@ -584,8 +589,8 @@ router.delete(
       await perms.assertCanFull(req.user.id, doc);
 
       await db.query(
-        `UPDATE documents SET deleted_at = NOW(), deleted_by = $1 WHERE id = $2`,
-        [req.user.id, doc.id],
+        `UPDATE documents SET deleted_at = NOW(), deleted_by = $1 WHERE id = $2 AND tenant_id = $3`,
+        [req.user.id, doc.id, req.tenantId],
       );
 
       await audit.log({
@@ -616,8 +621,8 @@ router.post(
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
       const { rows } = await db.query(
-        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL",
-        [req.params.id],
+        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Document not found" });
@@ -662,13 +667,14 @@ router.post(
           ],
         );
         await client.query(
-          `UPDATE documents SET blob_path=$1, blob_name=$2, blob_size_bytes=$3, mime_type=$4 WHERE id=$5`,
+          `UPDATE documents SET blob_path=$1, blob_name=$2, blob_size_bytes=$3, mime_type=$4 WHERE id=$5 AND tenant_id=$6`,
           [
             blobResult.blobPath,
             blobResult.blobName,
             blobResult.blobSizeBytes,
             req.file.mimetype,
             doc.id,
+            req.tenantId,
           ],
         );
         await audit.log({
@@ -698,8 +704,8 @@ router.get(
   async (req, res, next) => {
     try {
       const { rows } = await db.query(
-        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL",
-        [req.params.id],
+        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Document not found" });
@@ -742,8 +748,8 @@ router.get(
   async (req, res, next) => {
     try {
       const { rows } = await db.query(
-        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL",
-        [req.params.id],
+        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (!rows.length)
         return res.status(404).json({ error: "Document not found" });
@@ -793,8 +799,8 @@ router.get(
   async (req, res, next) => {
     try {
       const { rows: docRows } = await db.query(
-        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL",
-        [req.params.id],
+        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (!docRows.length)
         return res.status(404).json({ error: "Document not found" });
@@ -840,8 +846,8 @@ router.get(
   async (req, res, next) => {
     try {
       const { rows: docRows } = await db.query(
-        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL",
-        [req.params.id],
+        "SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2",
+        [req.params.id, req.tenantId],
       );
       if (!docRows.length)
         return res.status(404).json({ error: "Document not found" });
@@ -899,8 +905,8 @@ router.get(
         `SELECT d.*, ugr.access_level AS _access
          FROM documents d
          LEFT JOIN user_group_roles ugr ON ugr.group_id = d.group_id AND ugr.user_id = $2
-         WHERE d.id = $1 AND d.deleted_at IS NULL`,
-        [req.params.id, req.user.id],
+         WHERE d.id = $1 AND d.deleted_at IS NULL AND d.tenant_id = $3`,
+        [req.params.id, req.user.id, req.tenantId],
       );
       if (!docRows.length)
         return res.status(404).json({ error: "Document not found" });

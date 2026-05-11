@@ -174,12 +174,13 @@ app.get('/api/workflow/my-tasks', requireAuth, injectAuditContext, async (req, r
               assigner.display_name AS assigner_name,
               gp.name AS group_name, gp.display_name AS group_display
        FROM workflow_tasks wt
-       JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL
+       JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL AND d.tenant_id = $2
        LEFT JOIN users assigner ON assigner.id = wt.assigned_by
        LEFT JOIN group_profiles gp ON gp.id = d.group_id
        WHERE wt.assigned_to = $1 AND wt.task_status IN ('pending','in_progress')
+         AND wt.tenant_id = $2
        ORDER BY wt.created_at DESC`,
-      [req.user.id]
+      [req.user.id, req.tenantId]
     );
     res.json(rows);
   } catch (err) { next(err); }
@@ -200,12 +201,13 @@ app.get('/api/workflow/all-tasks', requireAuth, injectAuditContext, async (req, 
                assigner.display_name AS assigner_name,
                gp.name AS group_name, gp.display_name AS group_display
         FROM workflow_tasks wt
-        JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL
+        JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL AND d.tenant_id = $1
         LEFT JOIN users assignee ON assignee.id = wt.assigned_to
         LEFT JOIN users assigner ON assigner.id = wt.assigned_by
         LEFT JOIN group_profiles gp ON gp.id = d.group_id
+        WHERE wt.tenant_id = $1
         ORDER BY wt.created_at DESC`;
-      params = [];
+      params = [req.tenantId];
     } else {
       query = `
         SELECT wt.*,
@@ -214,15 +216,16 @@ app.get('/api/workflow/all-tasks', requireAuth, injectAuditContext, async (req, 
                assigner.display_name AS assigner_name,
                gp.name AS group_name, gp.display_name AS group_display
         FROM workflow_tasks wt
-        JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL
+        JOIN documents d ON d.id = wt.document_id AND d.deleted_at IS NULL AND d.tenant_id = $2
         LEFT JOIN users assignee ON assignee.id = wt.assigned_to
         LEFT JOIN users assigner ON assigner.id = wt.assigned_by
         LEFT JOIN group_profiles gp ON gp.id = d.group_id
-        WHERE d.group_id IN (
-          SELECT group_id FROM user_group_roles WHERE user_id = $1
-        )
+        WHERE wt.tenant_id = $2
+          AND d.group_id IN (
+            SELECT group_id FROM user_group_roles WHERE user_id = $1 AND tenant_id = $2
+          )
         ORDER BY wt.created_at DESC`;
-      params = [req.user.id];
+      params = [req.user.id, req.tenantId];
     }
 
     const { rows } = await db.query(query, params);
@@ -240,15 +243,17 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
       ? ''
       : `AND (
            d.group_id IN (
-             SELECT group_id FROM user_group_roles WHERE user_id = $1
+             SELECT group_id FROM user_group_roles WHERE user_id = $1 AND tenant_id = $2
            )
            OR d.id IN (
              SELECT document_id FROM workflow_tasks
              WHERE assigned_to = $1
+               AND tenant_id = $2
                AND task_status IN ('pending','in_progress')
            )
          )`;
-    const params = isAdmin ? [] : [req.user.id];
+    const params = isAdmin ? [req.tenantId] : [req.user.id, req.tenantId];
+    const tenantParam = isAdmin ? '$1' : '$2';
 
     const { rows } = await db.query(
       `SELECT d.id, d.doc_number, d.name, d.status, d.expiration_date,
@@ -257,6 +262,7 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
               (SELECT COUNT(*)
                FROM workflow_tasks wt
                WHERE wt.document_id = d.id
+                 AND wt.tenant_id = ${tenantParam}
                  AND wt.task_status IN ('pending','in_progress')) AS active_task_count,
               (SELECT json_agg(json_build_object(
                 'id',          wt.id,
@@ -272,11 +278,12 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
                LEFT JOIN users au ON au.id = wt.assigned_to
                LEFT JOIN users ab ON ab.id = wt.assigned_by
                WHERE wt.document_id = d.id
+                 AND wt.tenant_id = ${tenantParam}
                  AND wt.task_status IN ('pending','in_progress')) AS active_tasks
        FROM documents d
        LEFT JOIN users u ON u.id = d.owner_id
        LEFT JOIN group_profiles gp ON gp.id = d.group_id
-       WHERE d.deleted_at IS NULL
+       WHERE d.deleted_at IS NULL AND d.tenant_id = ${tenantParam}
        ${groupFilter}
        ORDER BY d.updated_at DESC`,
       params
