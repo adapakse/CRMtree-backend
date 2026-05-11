@@ -148,7 +148,7 @@ router.get('/me', requireAuth, async (req, res, next) => {
   try {
     const { rows } = await db.query(
       `SELECT u.id, u.email, u.first_name, u.last_name, u.display_name,
-              u.is_admin, u.crm_role, u.last_login_at,
+              u.is_admin, u.is_super_admin, u.tenant_id, u.crm_role, u.last_login_at,
               json_agg(json_build_object(
                 'group_id',          ugr.group_id,
                 'group_name',        gp.name,
@@ -160,7 +160,7 @@ router.get('/me', requireAuth, async (req, res, next) => {
        LEFT JOIN user_group_roles ugr ON ugr.user_id = u.id
        LEFT JOIN group_profiles gp    ON gp.id = ugr.group_id AND gp.is_active = TRUE
        WHERE u.id = $1
-       GROUP BY u.id, u.crm_role`,
+       GROUP BY u.id`,
       [req.user.id]
     );
     res.json(rows[0] || req.user);
