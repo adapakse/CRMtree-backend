@@ -188,4 +188,25 @@ function assertOwnership(record, req, ownerProp = 'assigned_to') {
   }
 }
 
-module.exports = { crmAuth, loadCrmScope, requireCrmManager, crmScope, assertOwnership };
+/**
+ * Middleware factory: blokuje endpoint jeśli dany moduł nie jest włączony dla tenanta.
+ * Tenanci bez wiersza w tenant_features (np. gold) mają dostęp do wszystkiego.
+ */
+function requireFeature(feature) {
+  return async (req, res, next) => {
+    try {
+      const tenantId = req.user?.tenant_id;
+      if (!tenantId) return next(); // super admin / gold — brak ograniczeń
+      const { rows } = await db.query(
+        'SELECT is_enabled FROM tenant_features WHERE tenant_id = $1 AND feature = $2',
+        [tenantId, feature]
+      );
+      if (rows.length && rows[0].is_enabled === false) {
+        return res.status(403).json({ error: `Moduł '${feature}' nie jest aktywny dla tego tenanta.` });
+      }
+      next();
+    } catch (err) { next(err); }
+  };
+}
+
+module.exports = { crmAuth, loadCrmScope, requireCrmManager, crmScope, assertOwnership, requireFeature };

@@ -156,11 +156,11 @@ function signRefreshToken(user) {
   return { token, hash };
 }
 
-async function saveRefreshToken(userId, hash) {
+async function saveRefreshToken(userId, tenantId, hash) {
   const expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000);
   await db.query(
-    "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1,$2,$3)",
-    [userId, hash, expiresAt]
+    "INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at) VALUES ($1,$2,$3,$4)",
+    [userId, tenantId, hash, expiresAt]
   );
 }
 

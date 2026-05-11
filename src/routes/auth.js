@@ -71,7 +71,7 @@ if (process.env.NODE_ENV !== 'development') {
 
         const accessToken                   = signAccessToken(user);
         const { token: refreshToken, hash } = signRefreshToken(user);
-        await saveRefreshToken(user.id, hash);
+        await saveRefreshToken(user.id, user.tenant_id, hash);
 
         await audit.log({
           user:      { id: user.id, email: user.email, display_name: user.display_name },
@@ -105,7 +105,8 @@ router.post('/refresh', injectAuditContext, async (req, res, next) => {
     const hash = crypto.createHash('sha256').update(refresh_token).digest('hex');
     const { rows } = await db.query(
       `SELECT rt.*, u.id AS uid, u.email, u.first_name, u.last_name,
-              u.display_name, u.is_admin, u.is_active, u.crm_role
+              u.display_name, u.is_admin, u.is_active, u.crm_role,
+              u.tenant_id, u.is_super_admin
        FROM refresh_tokens rt
        JOIN users u ON u.id = rt.user_id
        WHERE rt.token_hash = $1 AND rt.revoked = FALSE AND rt.expires_at > NOW()`,
@@ -117,10 +118,11 @@ router.post('/refresh', injectAuditContext, async (req, res, next) => {
 
     // Rotacja: unieważnij stary, wydaj nowy
     await db.query('UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1', [hash]);
-    const user       = { id: row.uid, email: row.email, display_name: row.display_name, is_admin: row.is_admin };
+    const user       = { id: row.uid, email: row.email, display_name: row.display_name,
+                         is_admin: row.is_admin, tenant_id: row.tenant_id, is_super_admin: row.is_super_admin };
     const newAccess  = signAccessToken(user);
     const { token: newRefresh, hash: newHash } = signRefreshToken(user);
-    await saveRefreshToken(user.id, newHash);
+    await saveRefreshToken(user.id, user.tenant_id, newHash);
 
     res.json({ access_token: newAccess, refresh_token: newRefresh });
   } catch (err) { next(err); }
@@ -173,7 +175,7 @@ router.post('/login', injectAuditContext, async (req, res, next) => {
 
     const accessToken              = signAccessToken(user);
     const { token: refreshToken, hash } = signRefreshToken(user);
-    await saveRefreshToken(user.id, hash);
+    await saveRefreshToken(user.id, user.tenant_id, hash);
     await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
 
     await audit.log({
@@ -359,7 +361,7 @@ if (process.env.NODE_ENV === 'development') {
       const user                            = rows[0];
       const accessToken                     = signAccessToken(user);
       const { token: refreshToken, hash }   = signRefreshToken(user);
-      await saveRefreshToken(user.id, hash);
+      await saveRefreshToken(user.id, user.tenant_id, hash);
 
       await audit.log({
         user:      { id: user.id, email: user.email, display_name: user.display_name },

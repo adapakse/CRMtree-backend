@@ -15,9 +15,12 @@
 const express = require('express');
 const db      = require('../config/database');
 const { requireAuth }                = require('../middleware/auth');
-const { crmAuth, requireCrmManager, loadCrmScope } = require('../middleware/crm-rbac');
+const { crmAuth, requireCrmManager, loadCrmScope, requireFeature } = require('../middleware/crm-rbac');
 
 const router = express.Router();
+
+// Wszystkie endpointy tego routera wymagają aktywnej flagi dwh_integration
+router.use(requireAuth, crmAuth, requireFeature('dwh_integration'));
 
 // ── Wspólne aliasy kolumn DWH → nazwy używane przez frontend ─────────────────
 // Zapytania SELECT-ują pod nazwami kompatybilnymi z poprzednią tabelą
