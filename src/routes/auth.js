@@ -6,6 +6,7 @@ const crypto   = require('crypto');
 const db       = require('../config/database');
 const audit    = require('../services/auditService');
 const logger   = require('../utils/logger');   // ← DODANY (brakowało)
+const bcrypt   = require('bcryptjs');
 const { requireAuth, signAccessToken, signRefreshToken, saveRefreshToken } = require('../middleware/auth');
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
@@ -143,19 +144,107 @@ router.post('/logout', requireAuth, injectAuditContext, async (req, res, next) =
   } catch (err) { next(err); }
 });
 
+// ─── POST /api/auth/login — email + password ────────────────────────────────
+router.post('/login', injectAuditContext, async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'email i password są wymagane' });
+    }
+
+    const { rows } = await db.query(
+      `SELECT id, email, first_name, last_name, display_name,
+              is_admin, is_active, crm_role, tenant_id, is_super_admin,
+              password_hash, must_change_password
+       FROM users WHERE lower(email) = lower($1) LIMIT 1`,
+      [email.trim()]
+    );
+
+    if (!rows.length) {
+      return res.status(401).json({ error: 'Nieprawidłowy email lub hasło' });
+    }
+    const user = rows[0];
+
+    if (!user.is_active)      return res.status(401).json({ error: 'Konto jest nieaktywne' });
+    if (!user.password_hash)  return res.status(401).json({ error: 'To konto używa logowania SSO — zaloguj się przez Google Workspace' });
+
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Nieprawidłowy email lub hasło' });
+
+    const accessToken              = signAccessToken(user);
+    const { token: refreshToken, hash } = signRefreshToken(user);
+    await saveRefreshToken(user.id, hash);
+    await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+
+    await audit.log({
+      user,
+      action:    'user_login',
+      metadata:  { method: 'password' },
+      ipAddress: req.auditContext?.ipAddress,
+    });
+
+    logger.info('Password login', { email: user.email, userId: user.id });
+    res.json({
+      access_token:        accessToken,
+      refresh_token:       refreshToken,
+      must_change_password: user.must_change_password,
+    });
+  } catch (err) { next(err); }
+});
+
+// ─── POST /api/auth/change-password ─────────────────────────────────────────
+router.post('/change-password', requireAuth, async (req, res, next) => {
+  try {
+    const { current_password, new_password } = req.body;
+    if (!new_password || new_password.length < 8) {
+      return res.status(400).json({ error: 'Nowe hasło musi mieć minimum 8 znaków' });
+    }
+
+    const { rows } = await db.query(
+      'SELECT password_hash, must_change_password FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    const u = rows[0];
+
+    // Jeśli user ma już hasło i nie jest w trybie must_change — wymagaj starego
+    if (u.password_hash && !u.must_change_password) {
+      if (!current_password) {
+        return res.status(400).json({ error: 'Podaj aktualne hasło' });
+      }
+      const ok = await bcrypt.compare(current_password, u.password_hash);
+      if (!ok) return res.status(401).json({ error: 'Nieprawidłowe aktualne hasło' });
+    }
+
+    const newHash = await bcrypt.hash(new_password, 12);
+    await db.query(
+      'UPDATE users SET password_hash = $1, must_change_password = false WHERE id = $2',
+      [newHash, req.user.id]
+    );
+
+    logger.info('Password changed', { userId: req.user.id });
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 // ─── GET /api/auth/me — dane zalogowanego użytkownika ───────────────────────
 router.get('/me', requireAuth, async (req, res, next) => {
   try {
     const { rows } = await db.query(
       `SELECT u.id, u.email, u.first_name, u.last_name, u.display_name,
               u.is_admin, u.is_super_admin, u.tenant_id, u.crm_role, u.last_login_at,
-              json_agg(json_build_object(
+              u.must_change_password,
+              json_agg(DISTINCT jsonb_build_object(
                 'group_id',          ugr.group_id,
                 'group_name',        gp.name,
                 'group_display',     gp.display_name,
                 'access_level',      ugr.access_level,
                 'owner_restriction', gp.has_owner_restriction
-              )) FILTER (WHERE ugr.group_id IS NOT NULL) AS roles
+              )) FILTER (WHERE ugr.group_id IS NOT NULL) AS roles,
+              COALESCE(
+                (SELECT jsonb_object_agg(feature, is_enabled)
+                 FROM tenant_features WHERE tenant_id = u.tenant_id),
+                '{}'::jsonb
+              ) AS tenant_features
        FROM users u
        LEFT JOIN user_group_roles ugr ON ugr.user_id = u.id
        LEFT JOIN group_profiles gp    ON gp.id = ugr.group_id AND gp.is_active = TRUE
