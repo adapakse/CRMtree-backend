@@ -352,7 +352,7 @@ if (process.env.NODE_ENV === 'development') {
       if (!email) return res.status(400).json({ error: 'email required' });
 
       const { rows } = await db.query(
-        `SELECT id, email, display_name, is_admin, is_active, crm_role
+        `SELECT id, email, display_name, is_admin, is_active, crm_role, tenant_id
          FROM users WHERE lower(email) = $1 AND is_active = true LIMIT 1`,
         [email]
       );
