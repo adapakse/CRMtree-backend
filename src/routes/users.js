@@ -2,6 +2,7 @@
 
 const router = require("express").Router();
 const { body, query, param } = require("express-validator");
+const bcrypt = require("bcryptjs");
 const db = require("../config/database");
 const audit = require("../services/auditService");
 const { requireAuth, requireAdmin } = require("../middleware/auth");
@@ -311,6 +312,45 @@ router.post(
         ipAddress: req.auditContext?.ipAddress,
       });
       res.status(201).json(rows[0]);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ────────────────────────────────────────────────────────────
+// POST /api/admin/users/:id/set-password — admin sets password
+// ────────────────────────────────────────────────────────────
+router.post(
+  "/:id/set-password",
+  requireAdminOnly,
+  [
+    param("id").isUUID('all'),
+    body("password").isString().isLength({ min: 8 }).withMessage("Minimum 8 znaków"),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        "SELECT id FROM users WHERE id = $1 AND tenant_id = $2",
+        [req.params.id, req.tenantId],
+      );
+      if (!rows.length) return res.status(404).json({ error: "User not found" });
+
+      const hash = await bcrypt.hash(req.body.password, 12);
+      await db.query(
+        "UPDATE users SET password_hash = $1, must_change_password = false WHERE id = $2",
+        [hash, req.params.id],
+      );
+
+      await audit.log({
+        user: req.user,
+        action: "user_password_set",
+        metadata: { target_user_id: req.params.id },
+        ipAddress: req.auditContext?.ipAddress,
+      });
+
+      res.json({ ok: true });
     } catch (err) {
       next(err);
     }
