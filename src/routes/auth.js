@@ -348,6 +348,11 @@ if (process.env.NODE_ENV === 'development') {
   // POST /api/auth/dev-login
   router.post('/dev-login', injectAuditContext, async (req, res, next) => {
     try {
+      const origin = req.headers.origin || req.headers.referer || '';
+      if (origin.includes('app.crmtree.pl')) {
+        return res.status(403).json({ error: 'Dev login not available on this domain' });
+      }
+
       const email = (req.body.email || '').trim().toLowerCase();
       if (!email) return res.status(400).json({ error: 'email required' });
 
