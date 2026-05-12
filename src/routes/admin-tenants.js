@@ -40,15 +40,12 @@ router.get('/', async (req, res, next) => {
         COUNT(DISTINCT u.id) FILTER (WHERE u.is_active = true) AS user_count,
         COUNT(DISTINCT u.id) AS total_users,
         COALESCE(
-          JSON_AGG(
-            JSON_BUILD_OBJECT('feature', tf.feature, 'is_enabled', tf.is_enabled)
-            ORDER BY tf.feature
-          ) FILTER (WHERE tf.tenant_id IS NOT NULL),
+          (SELECT JSON_AGG(JSON_BUILD_OBJECT('feature', tf.feature, 'is_enabled', tf.is_enabled) ORDER BY tf.feature)
+           FROM tenant_features tf WHERE tf.tenant_id = t.id),
           '[]'
         ) AS features
       FROM tenants t
       LEFT JOIN users u ON u.tenant_id = t.id
-      LEFT JOIN tenant_features tf ON tf.tenant_id = t.id
       GROUP BY t.id
       ORDER BY t.created_at DESC
     `);
