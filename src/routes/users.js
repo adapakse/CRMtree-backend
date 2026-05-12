@@ -318,6 +318,40 @@ router.post(
 );
 
 // ────────────────────────────────────────────────────────────
+// DELETE /api/admin/users/:id — delete user
+// ────────────────────────────────────────────────────────────
+router.delete(
+  "/:id",
+  requireAdminOnly,
+  [param("id").isUUID()],
+  validate,
+  async (req, res, next) => {
+    try {
+      if (req.params.id === req.user.id)
+        return res.status(400).json({ error: "Cannot delete your own account" });
+
+      const { rows } = await db.query(
+        "DELETE FROM users WHERE id = $1 AND tenant_id = $2 RETURNING id, email, display_name",
+        [req.params.id, req.tenantId],
+      );
+      if (!rows.length)
+        return res.status(404).json({ error: "User not found" });
+
+      await audit.log({
+        user: req.user,
+        action: "user_deleted",
+        beforeState: rows[0],
+        metadata: { target_user_id: req.params.id },
+        ipAddress: req.auditContext?.ipAddress,
+      });
+      res.json({ message: "User deleted", id: req.params.id });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ────────────────────────────────────────────────────────────
 // DELETE /api/admin/users/:id/roles/:roleId — remove role
 // ────────────────────────────────────────────────────────────
 router.delete(
