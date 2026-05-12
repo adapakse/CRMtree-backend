@@ -3,6 +3,9 @@
 const router = require("express").Router();
 const { body, query, param } = require("express-validator");
 const bcrypt = require("bcryptjs");
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isAnyUUID = (field) => field.matches(UUID_RE).withMessage('Invalid UUID');
 const db = require("../config/database");
 const audit = require("../services/auditService");
 const { requireAuth, requireAdmin } = require("../middleware/auth");
@@ -76,7 +79,7 @@ router.get(
   requireAdminOrSalesManager,
   [
     query('search').optional().isString().trim(),
-    query('group_id').optional().isUUID('all'),
+    isAnyUUID(query('group_id').optional()),
     query('is_active').optional().isBoolean().toBoolean(),
     // ★ filtr po roli CRM
     query('crm_role').optional().isIn(['salesperson', 'sales_manager']),
@@ -162,7 +165,7 @@ router.get(
 // ────────────────────────────────────────────────────────────
 // GET /api/admin/users/:id
 // ────────────────────────────────────────────────────────────
-router.get("/:id", requireAdminOrSalesManager, [param("id").isUUID('all')], validate, async (req, res, next) => {
+router.get("/:id", requireAdminOrSalesManager, [isAnyUUID(param("id"))], validate, async (req, res, next) => {
   try {
     const { rows } = await db.query(
       `SELECT u.*, json_agg(json_build_object(
@@ -191,7 +194,7 @@ router.patch(
   "/:id",
   requireAdminOrSalesManager,
   [
-    param('id').isUUID('all'),
+    isAnyUUID(param('id')),
     body('email').optional().isEmail().normalizeEmail(),
     body('first_name').optional().isString().trim().isLength({ max: 100 }),
     body('last_name').optional().isString().trim().isLength({ max: 100 }),
@@ -268,8 +271,8 @@ router.post(
   "/:id/roles",
   requireAdminOrSalesManager,
   [
-    param("id").isUUID('all'),
-    body("group_id").notEmpty().isUUID('all'),
+    isAnyUUID(param("id")),
+    isAnyUUID(body("group_id").notEmpty()),
     body("access_level").notEmpty().isIn(["read", "full"]),
   ],
   validate,
@@ -325,7 +328,7 @@ router.post(
   "/:id/set-password",
   requireAdminOnly,
   [
-    param("id").isUUID('all'),
+    isAnyUUID(param("id")),
     body("password").isString().isLength({ min: 8 }).withMessage("Minimum 8 znaków"),
   ],
   validate,
@@ -363,7 +366,7 @@ router.post(
 router.delete(
   "/:id",
   requireAdminOnly,
-  [param("id").isUUID('all')],
+  [isAnyUUID(param("id"))],
   validate,
   async (req, res, next) => {
     try {
@@ -397,7 +400,7 @@ router.delete(
 router.delete(
   "/:id/roles/:roleId",
   requireAdminOnly,
-  [param("id").isUUID('all'), param("roleId").isUUID('all')],
+  [isAnyUUID(param("id")), isAnyUUID(param("roleId"))],
   validate,
   async (req, res, next) => {
     try {
