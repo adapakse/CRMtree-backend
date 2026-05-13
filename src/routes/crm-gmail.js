@@ -21,7 +21,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // Resolves partner by UUID (crm_partners.id) or integer (dwh_partner_id).
 // Returns { id: uuid, company } or null.
-async function resolvePartner(rawId, tenantId) {
+async function resolvePartner(rawId, tenantId, dwhPrefix = 'crmtree_gold') {
   if (UUID_RE.test(String(rawId))) {
     const { rows } = await pool.query(
       "SELECT id, company FROM crm_partners WHERE id = $1 AND tenant_id = $2", [rawId, tenantId]
@@ -37,7 +37,7 @@ async function resolvePartner(rawId, tenantId) {
   // Not in crm_partners yet — lazy-create from DWH
   const dm = await pool.query(
     `SELECT COALESCE(NULLIF(trim(company_name),''), NULLIF(trim(name),''), partner_id::text) AS company
-     FROM dwh.partner WHERE partner_id = $1`, [num]
+     FROM dwh.${dwhPrefix}_partner WHERE partner_id = $1`, [num]
   );
   if (!dm.rows.length) return null;
   const ins = await pool.query(
@@ -382,7 +382,7 @@ async function sendPartnerHandler(req, res) {
       return res.status(400).json({ error: "Pola 'to' i 'subject' są wymagane" });
     }
 
-    const partner = await resolvePartner(req.params.partnerId, req.tenantId);
+    const partner = await resolvePartner(req.params.partnerId, req.tenantId, req.dwhPrefix);
     if (!partner) return res.status(404).json({ error: "Partner nie znaleziony" });
 
     const training = await isTrainingMode();
@@ -549,7 +549,7 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
 
 router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const resolved  = await resolvePartner(req.params.partnerId, req.tenantId);
+    const resolved  = await resolvePartner(req.params.partnerId, req.tenantId, req.dwhPrefix);
     const partnerId = resolved?.id ?? req.params.partnerId;
     const messages  = await gmailService.getThread(req.user.id, req.params.threadId);
 

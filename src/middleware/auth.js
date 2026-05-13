@@ -184,6 +184,15 @@ async function requireAuth(req, res, next) {
     }
     req.user     = rows[0];
     req.tenantId = rows[0].tenant_id ?? null;
+    if (req.tenantId) {
+      const { rows: tRows } = await db.query(
+        `SELECT dwh_schema_prefix FROM tenants WHERE id = $1`,
+        [req.tenantId]
+      );
+      req.dwhPrefix = tRows[0]?.dwh_schema_prefix ?? 'crmtree_gold';
+    } else {
+      req.dwhPrefix = 'crmtree_gold';
+    }
     next();
   } catch (err) {
     if (err.name === "TokenExpiredError") {

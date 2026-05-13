@@ -34,11 +34,12 @@ const DWH_FIN_SELECT = `
   0                                             AS pax_count`;
 
 // JOIN partnerów CRM przez klucz DWH ($1 zawsze = tenantId)
-const DWH_JOIN_PARTNERS = `
+// Budowany dynamicznie na podstawie req.dwhPrefix (per-tenant DWH tables)
+const makeDwhJoin = (prefix) => `
   LEFT JOIN crm_partners p ON p.dwh_partner_id = s.partner_id AND p.tenant_id = $1
   LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
   LEFT JOIN crm_partner_groups g ON g.id = p.group_id AND g.tenant_id = $1
-  LEFT JOIN dwh.partner dm ON dm.partner_id = s.partner_id`;
+  LEFT JOIN dwh.${prefix}_partner dm ON dm.partner_id = s.partner_id`;
 
 // Zawsze wykluczaj konta testowe z DWH
 const EXCLUDE_TEST = "COALESCE(dm.is_test_account, false) = false";
@@ -54,15 +55,16 @@ function addPeriodFilters(where, params, pfrom, pto, alias = 's') {
 // ─────────────────────────────────────────────────────────
 router.get('/partners', requireAuth, crmAuth, async (req, res, next) => {
   try {
+    const pfx = req.dwhPrefix;
     const { rows } = await db.query(
       `SELECT DISTINCT
          COALESCE(p.company, dm.company_name, dm.name, 'Partner ' || s.partner_id::text) AS partner_name,
          p.id                                 AS partner_id,
          s.partner_id                         AS dwh_partner_id,
          u.display_name                       AS salesperson_name
-       FROM dwh.sales s
+       FROM dwh.${pfx}_sales s
        LEFT JOIN crm_partners p ON p.dwh_partner_id = s.partner_id AND p.tenant_id = $1
-       LEFT JOIN dwh.partner dm ON dm.partner_id = s.partner_id
+       LEFT JOIN dwh.${pfx}_partner dm ON dm.partner_id = s.partner_id
        LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
        WHERE COALESCE(dm.is_test_account, false) = false
        ORDER BY partner_name`,
@@ -78,6 +80,7 @@ router.get('/partners', requireAuth, crmAuth, async (req, res, next) => {
 // ─────────────────────────────────────────────────────────
 router.get('/summary', requireAuth, crmAuth, async (req, res, next) => {
   try {
+    const pfx = req.dwhPrefix;
     const { service_category, partner_id } = req.query;
     const where = [], params = [];
     addPeriodFilters(where, params, req.query.period_from, req.query.period_to);
@@ -88,8 +91,8 @@ router.get('/summary', requireAuth, crmAuth, async (req, res, next) => {
     const { rows } = await db.query(
       `SELECT TO_CHAR(s.sale_date, 'YYYY-MM') AS period,
               ${DWH_FIN_SELECT}
-       FROM dwh.sales s
-       LEFT JOIN dwh.partner dm ON dm.partner_id = s.partner_id
+       FROM dwh.${pfx}_sales s
+       LEFT JOIN dwh.${pfx}_partner dm ON dm.partner_id = s.partner_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        GROUP BY TO_CHAR(s.sale_date, 'YYYY-MM')
        ORDER BY period DESC
@@ -106,8 +109,9 @@ router.get('/summary', requireAuth, crmAuth, async (req, res, next) => {
 // ─────────────────────────────────────────────────────────
 router.get('/by-partner', requireAuth, crmAuth, loadCrmScope, async (req, res, next) => {
   try {
+    const JOIN = makeDwhJoin(req.dwhPrefix);
     const { service_category, salesperson_name } = req.query;
-    const where = [], params = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN_PARTNERS)
+    const where = [], params = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN)
 
     addPeriodFilters(where, params, req.query.period_from, req.query.period_to);
     if (service_category)  { params.push(service_category);  where.push(`s.service_category = $${params.length}`); }
@@ -128,8 +132,8 @@ router.get('/by-partner', requireAuth, crmAuth, loadCrmScope, async (req, res, n
          u.display_name AS salesperson_name,
          u.id           AS salesperson_id,
          ${DWH_FIN_SELECT}
-       FROM dwh.sales s
-       ${DWH_JOIN_PARTNERS}
+       FROM dwh.${req.dwhPrefix}_sales s
+       ${JOIN}
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        GROUP BY p.company, dm.company_name, dm.name, p.id, s.partner_id, u.display_name, u.id
        ORDER BY SUM(s.gross_sales_value_pln) DESC`,
@@ -145,8 +149,9 @@ router.get('/by-partner', requireAuth, crmAuth, loadCrmScope, async (req, res, n
 // ─────────────────────────────────────────────────────────
 router.get('/by-salesperson', requireAuth, crmAuth, loadCrmScope, async (req, res, next) => {
   try {
+    const JOIN = makeDwhJoin(req.dwhPrefix);
     const { service_category } = req.query;
-    const where = [], params = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN_PARTNERS)
+    const where = [], params = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN)
 
     addPeriodFilters(where, params, req.query.period_from, req.query.period_to);
     if (service_category) { params.push(service_category); where.push(`s.service_category = $${params.length}`); }
@@ -164,8 +169,8 @@ router.get('/by-salesperson', requireAuth, crmAuth, loadCrmScope, async (req, re
          u.id AS salesperson_id,
          COUNT(DISTINCT s.partner_id)::int              AS partners_count,
          ${DWH_FIN_SELECT}
-       FROM dwh.sales s
-       ${DWH_JOIN_PARTNERS}
+       FROM dwh.${req.dwhPrefix}_sales s
+       ${JOIN}
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        GROUP BY u.display_name, u.id
        ORDER BY SUM(s.gross_sales_value_pln) DESC`,
@@ -181,6 +186,7 @@ router.get('/by-salesperson', requireAuth, crmAuth, loadCrmScope, async (req, re
 // ─────────────────────────────────────────────────────────
 router.get('/by-product', requireAuth, crmAuth, async (req, res, next) => {
   try {
+    const pfx = req.dwhPrefix;
     const { partner_id } = req.query;
     const where = [], params = [];
     addPeriodFilters(where, params, req.query.period_from, req.query.period_to);
@@ -189,8 +195,8 @@ router.get('/by-product', requireAuth, crmAuth, async (req, res, next) => {
 
     const { rows } = await db.query(
       `SELECT s.service_category AS product_type, ${DWH_FIN_SELECT}
-       FROM dwh.sales s
-       LEFT JOIN dwh.partner dm ON dm.partner_id = s.partner_id
+       FROM dwh.${pfx}_sales s
+       LEFT JOIN dwh.${pfx}_partner dm ON dm.partner_id = s.partner_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        GROUP BY s.service_category
        ORDER BY SUM(s.gross_sales_value_pln) DESC`,
@@ -205,8 +211,9 @@ router.get('/by-product', requireAuth, crmAuth, async (req, res, next) => {
 // ─────────────────────────────────────────────────────────
 router.get('/', requireAuth, crmAuth, async (req, res, next) => {
   try {
+    const JOIN = makeDwhJoin(req.dwhPrefix);
     const { service_category, partner_id } = req.query;
-    const where = [], params = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN_PARTNERS)
+    const where = [], params = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN)
     addPeriodFilters(where, params, req.query.period_from, req.query.period_to);
     if (service_category) { params.push(service_category);  where.push(`s.service_category = $${params.length}`); }
     if (partner_id)       { params.push(parseInt(partner_id)); where.push(`s.partner_id = $${params.length}`); }
@@ -229,8 +236,8 @@ router.get('/', requireAuth, crmAuth, async (req, res, next) => {
          p.id           AS partner_id,
          u.display_name AS salesperson_name,
          u.id           AS salesperson_id
-       FROM dwh.sales s
-       ${DWH_JOIN_PARTNERS}
+       FROM dwh.${req.dwhPrefix}_sales s
+       ${JOIN}
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY s.sale_date DESC, s.partner_id, s.service_category
        LIMIT $${params.length}`,
@@ -244,12 +251,14 @@ router.get('/', requireAuth, crmAuth, async (req, res, next) => {
 // Kompleksowy raport partnerów: KPI, trend, per partner, per produkt, per handlowiec
 router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next) => {
   try {
+    const JOIN = makeDwhJoin(req.dwhPrefix);
+    const pfx  = req.dwhPrefix;
     const { service_category, rep_id, partner_id, partner_name, group_name } = req.query;
     const pfrom = req.query.period_from || '';
     const pto   = req.query.period_to   || '';
 
     function buildConditions() {
-      const w = [], p = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN_PARTNERS)
+      const w = [], p = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN)
       addPeriodFilters(w, p, pfrom, pto);
       if (service_category) { p.push(service_category);   w.push(`s.service_category = $${p.length}`); }
       if (!req.isCrmManager && !req.crmGlobalRead) {
@@ -265,7 +274,6 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
     }
 
     const base = buildConditions();
-    const JOIN = DWH_JOIN_PARTNERS;
 
     const FIN = `
       SUM(s.gross_sales_value_pln)::numeric(14,2)  AS gross_turnover_pln,
@@ -283,7 +291,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
           ROUND(100.0 * SUM(s.gross_margin_value_pln) / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS margin_pct,
           ROUND(100.0 * SUM(s.gross_fee_value_pln)    / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS fee_rate_pct,
           COUNT(DISTINCT s.partner_id)::int AS partners_count
-        FROM dwh.sales s ${JOIN}
+        FROM dwh.${pfx}_sales s ${JOIN}
         ${base.where}
       `, base.params),
 
@@ -294,7 +302,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
                SUM(s.net_sales_value_pln)::numeric(14,2)    AS net_turnover_pln,
                SUM(s.gross_margin_value_pln)::numeric(14,2) AS revenue_pln,
                SUM(s.number_of_products)::int               AS transactions_count
-        FROM dwh.sales s ${JOIN}
+        FROM dwh.${pfx}_sales s ${JOIN}
         ${base.where}
         GROUP BY TO_CHAR(s.sale_date, 'YYYY-MM')
         ORDER BY period ASC
@@ -307,7 +315,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
                s.partner_id AS dwh_partner_id,
                u.display_name AS salesperson_name, u.id AS salesperson_id,
                ${FIN}
-        FROM dwh.sales s ${JOIN}
+        FROM dwh.${pfx}_sales s ${JOIN}
         ${base.where}
         GROUP BY p.company, dm.company_name, dm.name, p.id, s.partner_id, u.display_name, u.id
         ORDER BY SUM(s.gross_sales_value_pln) DESC
@@ -316,7 +324,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
       // Per kategoria (product_type)
       db.query(`
         SELECT s.service_category AS product_type, ${FIN}
-        FROM dwh.sales s ${JOIN}
+        FROM dwh.${pfx}_sales s ${JOIN}
         ${base.where}
         GROUP BY s.service_category
         ORDER BY SUM(s.gross_sales_value_pln) DESC
@@ -329,7 +337,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
                    u.id AS salesperson_id,
                    COUNT(DISTINCT s.partner_id)::int AS partners_count,
                    ${FIN}
-            FROM dwh.sales s ${JOIN}
+            FROM dwh.${pfx}_sales s ${JOIN}
             ${base.where}
             GROUP BY u.display_name, u.id
             ORDER BY SUM(s.gross_sales_value_pln) DESC
@@ -353,7 +361,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
       const prevPFrom = prevFromDate.toISOString().substring(0, 7);
       const prevPTo   = prevToDate.toISOString().substring(0, 7);
 
-      const prevW = [], prevP = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN_PARTNERS)
+      const prevW = [], prevP = [req.tenantId]; // $1 = tenantId (required by DWH_JOIN)
       addPeriodFilters(prevW, prevP, prevPFrom, prevPTo);
       if (service_category) { prevP.push(service_category); prevW.push(`s.service_category = $${prevP.length}`); }
       if (!req.isCrmManager && !req.crmGlobalRead) { prevP.push(req.user.id);  prevW.push(`p.manager_id = $${prevP.length}`); }
@@ -367,7 +375,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
       const prevRes = await db.query(`
         SELECT ${FIN},
           ROUND(100.0 * SUM(s.gross_margin_value_pln) / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS margin_pct
-        FROM dwh.sales s ${JOIN}
+        FROM dwh.${pfx}_sales s ${JOIN}
         ${prevWhere}
       `, prevP);
       prevKpi = prevRes.rows[0] || null;

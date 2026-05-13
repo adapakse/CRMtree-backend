@@ -91,7 +91,7 @@ router.get("/onboarding", requireAuth, crmAuth, async (req, res) => {
              (SELECT COUNT(*) FROM crm_onboarding_tasks t WHERE t.partner_id = p.id)::int AS task_count,
              (SELECT COUNT(*) FROM crm_onboarding_tasks t WHERE t.partner_id = p.id AND t.done = true)::int AS done_count
       FROM crm_partners p
-      LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
+      LEFT JOIN dwh.${req.dwhPrefix}_partner dm ON dm.partner_id = p.dwh_partner_id
       LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
       ${where}
       ORDER BY p.created_at DESC
@@ -241,7 +241,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
 
     const countQ = await pool.query(
       `SELECT COUNT(*)
-       FROM dwh.partner dm
+       FROM dwh.${req.dwhPrefix}_partner dm
        FULL OUTER JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        ${whereSql}`,
@@ -274,7 +274,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type = 'email' AND is_read = false)::int AS new_email_count,
               (SELECT MAX(updated_at) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at,
               (SELECT COUNT(*) FROM crm_partner_documents WHERE partner_id = p.id AND tenant_id = p.tenant_id)::int AS doc_count
-       FROM dwh.partner dm
+       FROM dwh.${req.dwhPrefix}_partner dm
        FULL OUTER JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
        LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
@@ -371,7 +371,7 @@ router.get("/group-names", requireAuth, crmAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT DISTINCT COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name
-       FROM dwh.partner dm
+       FROM dwh.${req.dwhPrefix}_partner dm
        LEFT JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        WHERE COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) IS NOT NULL
@@ -388,7 +388,7 @@ router.get("/group-names", requireAuth, crmAuth, async (req, res) => {
 // SZCZEGÓŁY PARTNERA
 // ═══════════════════════════════════════════════════════════════════════════════
 // Lazy-create crm_partner dla danego dwh_partner_id (zwraca crm_partners.id)
-async function ensureCrmPartner(dwhPartnerId, pool, tenantId) {
+async function ensureCrmPartner(dwhPartnerId, pool, tenantId, dwhPrefix) {
   // 1. Szukaj po dwh_partner_id (partnerzy z DWH)
   const byDwh = await pool.query(
     `SELECT id FROM crm_partners WHERE dwh_partner_id = $1 AND tenant_id = $2`, [dwhPartnerId, tenantId]
@@ -409,7 +409,7 @@ async function ensureCrmPartner(dwhPartnerId, pool, tenantId) {
   // 3. Spróbuj lazy-create z DWH
   const dm = await pool.query(
     `SELECT COALESCE(NULLIF(trim(company_name),''), NULLIF(trim(name),''), partner_id::text) AS company
-     FROM dwh.partner WHERE partner_id = $1`, [dwhPartnerId]
+     FROM dwh.${dwhPrefix}_partner WHERE partner_id = $1`, [dwhPartnerId]
   );
   if (!dm.rows.length) return null;
   const ins = await pool.query(
@@ -424,19 +424,19 @@ async function ensureCrmPartner(dwhPartnerId, pool, tenantId) {
 
 // Rozwiązuje partnera po UUID (onboarding) lub integer (DWH)
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-async function resolveCrmPartnerId(rawId, pool, tenantId) {
+async function resolveCrmPartnerId(rawId, pool, tenantId, dwhPrefix) {
   if (UUID_RE.test(rawId)) {
     const r = await pool.query("SELECT id FROM crm_partners WHERE id = $1 AND tenant_id = $2", [rawId, tenantId]);
     return r.rows[0]?.id ?? null;
   }
   const num = parseInt(rawId);
   if (isNaN(num)) return null;
-  return ensureCrmPartner(num, pool, tenantId);
+  return ensureCrmPartner(num, pool, tenantId, dwhPrefix);
 }
 
 router.get("/:id", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: 'Nie znaleziono' });
 
     const partnerQ = await pool.query(
@@ -505,7 +505,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               u.display_name AS manager_name,
               COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name
        FROM crm_partners p
-       LEFT JOIN dwh.partner dm ON dm.partner_id = p.dwh_partner_id
+       LEFT JOIN dwh.${req.dwhPrefix}_partner dm ON dm.partner_id = p.dwh_partner_id
        LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $2
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
        WHERE p.id = $1 AND p.tenant_id = $2`,
@@ -662,7 +662,7 @@ router.post("/", requireAuth, crmAuth, async (req, res) => {
 router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
   try {
     // Znajdź crm_partner po UUID lub dwh_partner_id (integer)
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: 'Partner nie znaleziony' });
     const id = crmId;
 
@@ -830,7 +830,7 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
 router.delete("/:id", requireAuth, crmAuth, async (req, res) => {
   if (!assertManager(req, res)) return;
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     await pool.query("DELETE FROM crm_partners WHERE id = $1 AND tenant_id = $2", [crmId, req.tenantId]);
     res.json({ ok: true });
@@ -845,7 +845,7 @@ router.delete("/:id", requireAuth, crmAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.json([]);
     const r = await pool.query(
       `SELECT a.*, u.display_name AS created_by_name
@@ -865,7 +865,7 @@ router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
 // Przy typie 'meeting' automatycznie tworzy event w Google Calendar.
 router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
   try {
-    const partnerId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const partnerId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!partnerId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const {
       type = "note", title, body,
@@ -989,7 +989,7 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
 
 router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const partnerId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const partnerId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!partnerId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const actId     = parseInt(req.params.actId);
 
@@ -1060,7 +1060,7 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
 
 router.delete("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const u = req.user;
     const actQ = await pool.query(
@@ -1085,7 +1085,7 @@ router.delete("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =
 // ── PATCH /:id/activities/:actId/read ───────────────────────────────
 router.patch("/:id/activities/:actId/read", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId  = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId  = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const actId  = parseInt(req.params.actId);
     const isRead = req.body.is_read !== undefined ? !!req.body.is_read : true;
@@ -1105,7 +1105,7 @@ router.patch("/:id/activities/:actId/read", requireAuth, crmAuth, async (req, re
 // ═══════════════════════════════════════════════════════════════════════════════
 router.get("/:id/history", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
 
     const { rows: pRows } = await pool.query(
@@ -1136,7 +1136,7 @@ router.get("/:id/history", requireAuth, crmAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 router.get("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.json([]);
     const r = await pool.query(
       `SELECT t.*, u.display_name AS assigned_to_name, d.display_name AS done_by_name
@@ -1155,7 +1155,7 @@ router.get("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
 
 router.post("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const { step = 0, title, body, type = "task", assigned_to, due_date, due_time } = req.body;
     if (!title) return res.status(400).json({ error: "title jest wymagane" });
@@ -1177,7 +1177,7 @@ router.post("/:id/onboarding-tasks", requireAuth, crmAuth, async (req, res) => {
 
 router.patch("/:id/onboarding-tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const { taskId } = req.params;
     const id = crmId;
@@ -1225,7 +1225,7 @@ router.patch("/:id/onboarding-tasks/:taskId", requireAuth, crmAuth, async (req, 
 
 router.delete("/:id/onboarding-tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     await pool.query(
       "DELETE FROM crm_onboarding_tasks WHERE id = $1 AND partner_id = $2 AND tenant_id = $3",
@@ -1241,7 +1241,7 @@ router.delete("/:id/onboarding-tasks/:taskId", requireAuth, crmAuth, async (req,
 // ONBOARDING TASKS — /tasks (oryginalne endpointy — zachowane dla backcompatibility)
 router.get("/:id/tasks", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.json([]);
     const r = await pool.query(
       `SELECT t.*, u.display_name AS assigned_to_name, d.display_name AS done_by_name
@@ -1260,7 +1260,7 @@ router.get("/:id/tasks", requireAuth, crmAuth, async (req, res) => {
 
 router.post("/:id/tasks", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const { step = 0, title, body, type = "task", assigned_to, due_date, due_time } = req.body;
     if (!title) return res.status(400).json({ error: "title jest wymagane" });
@@ -1282,7 +1282,7 @@ router.post("/:id/tasks", requireAuth, crmAuth, async (req, res) => {
 
 router.patch("/:id/tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const { taskId } = req.params;
     const id = crmId;
@@ -1331,7 +1331,7 @@ router.patch("/:id/tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
 
 router.delete("/:id/tasks/:taskId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     await pool.query(
       "DELETE FROM crm_onboarding_tasks WHERE id = $1 AND partner_id = $2 AND tenant_id = $3",
@@ -1353,7 +1353,7 @@ router.post("/:id/onboarding-step", requireAuth, crmAuth, async (req, res) => {
     if (!allowed) return res.status(403).json({ error: "Brak uprawnień" });
   }
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Nie znaleziono" });
     const { step } = req.body;
     const isFinishing = step >= 4;
@@ -1377,7 +1377,7 @@ router.post("/:id/onboarding-step", requireAuth, crmAuth, async (req, res) => {
 // ── PATCH /:id/onboarding — alias wywoływany przez frontend (crm-api.service.ts)
 router.patch("/:id/onboarding", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Nie znaleziono partnera" });
     const { step } = req.body;
     if (step === undefined || step === null) {
@@ -1412,7 +1412,7 @@ router.patch("/:id/onboarding", requireAuth, crmAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 router.get("/:id/documents", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const r = await pool.query(
       `SELECT pd.*, d.name AS document_title, d.status AS document_status,
@@ -1432,7 +1432,7 @@ router.get("/:id/documents", requireAuth, crmAuth, async (req, res) => {
 
 router.post("/:id/documents", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const { document_id, doc_role } = req.body;
     const r = await pool.query(
@@ -1451,7 +1451,7 @@ router.post("/:id/documents", requireAuth, crmAuth, async (req, res) => {
 
 router.delete("/:id/documents/:docId", requireAuth, crmAuth, async (req, res) => {
   try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId);
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     await pool.query(
       "DELETE FROM crm_partner_documents WHERE partner_id = $1 AND document_id = $2 AND tenant_id = $3",
