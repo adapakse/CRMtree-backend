@@ -79,8 +79,8 @@ router.post(
       await db.transaction(async (client) => {
         const { rows } = await client.query(
           `INSERT INTO workflow_tasks
-             (document_id, assigned_by, assigned_to, task_type, message, due_date, task_status)
-           VALUES ($1,$2,$3,$4,$5,$6,'pending')
+             (document_id, assigned_by, assigned_to, task_type, message, due_date, task_status, tenant_id)
+           VALUES ($1,$2,$3,$4,$5,$6,'pending',$7)
            RETURNING *`,
           [
             doc.id,
@@ -89,6 +89,7 @@ router.post(
             task_type,
             message || null,
             due_date || null,
+            req.tenantId,
           ],
         );
         taskRow = rows[0];
@@ -118,8 +119,8 @@ router.post(
         });
       });
 
-      // Send email notification to assignee
-      await emailSvc.sendWorkflowAssignment({
+      // Fire-and-forget — email failures must not block the API response
+      emailSvc.sendWorkflowAssignment({
         to: assignee.email,
         assigneeName: assignee.display_name,
         assignerName: req.user.display_name,
@@ -127,7 +128,7 @@ router.post(
         taskType: task_type,
         message,
         dueDate: due_date,
-      });
+      }).catch(err => logger.error("Workflow assignment email failed", { error: err.message }));
 
       res.status(201).json(taskRow);
     } catch (err) {

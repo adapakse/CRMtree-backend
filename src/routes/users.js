@@ -213,8 +213,11 @@ router.patch(
       if (!before.length)
         return res.status(404).json({ error: "User not found" });
 
-      // Sales Manager nie może zmieniać is_admin ani przypisywać innych sales_manager
+      // Sales Manager nie może modyfikować kont adminów ani przypisywać sales_manager
       if (!req.user?.is_admin) {
+        if (before[0].is_admin) {
+          return res.status(403).json({ error: 'Cannot modify admin accounts' });
+        }
         delete req.body.is_admin;
         if (req.body.crm_role === 'sales_manager' && before[0].crm_role !== 'sales_manager') {
           return res.status(403).json({ error: 'Only admin can assign sales_manager role' });

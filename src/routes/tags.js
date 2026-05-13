@@ -54,11 +54,11 @@ router.post(
 
       const { key, value } = req.body;
       const { rows } = await db.query(
-        `INSERT INTO document_tags (document_id, key, value, created_by)
-         VALUES ($1,$2,$3,$4)
+        `INSERT INTO document_tags (document_id, key, value, created_by, tenant_id)
+         VALUES ($1,$2,$3,$4,$5)
          ON CONFLICT (document_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
          RETURNING *`,
-        [doc.id, key, value, req.user.id],
+        [doc.id, key, value, req.user.id, req.tenantId],
       );
       await audit.log({
         user: req.user,

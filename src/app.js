@@ -192,7 +192,7 @@ app.get('/api/workflow/my-tasks', requireAuth, injectAuditContext, async (req, r
 app.get('/api/workflow/all-tasks', requireAuth, injectAuditContext, async (req, res, next) => {
   try {
     const db = require('./config/database');
-    const isAdmin = req.user.role === 'admin';
+    const isAdmin = req.user.is_admin;
 
     let query, params;
     if (isAdmin) {
@@ -241,6 +241,10 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
     const db = require('./config/database');
     const isAdmin = req.user.is_admin;
 
+    // Always pass [userId, tenantId] so $1=userId and $2=tenantId are stable.
+    // For admins groupFilter is empty, so $1 goes unused but params stay consistent.
+    const params = [req.user.id, req.tenantId];
+
     const groupFilter = isAdmin
       ? ''
       : `AND (
@@ -254,8 +258,6 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
                AND task_status IN ('pending','in_progress')
            )
          )`;
-    const params = isAdmin ? [req.tenantId] : [req.user.id, req.tenantId];
-    const tenantParam = isAdmin ? '$1' : '$2';
 
     const { rows } = await db.query(
       `SELECT d.id, d.doc_number, d.name, d.status, d.expiration_date,
@@ -264,7 +266,7 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
               (SELECT COUNT(*)
                FROM workflow_tasks wt
                WHERE wt.document_id = d.id
-                 AND wt.tenant_id = ${tenantParam}
+                 AND wt.tenant_id = $2
                  AND wt.task_status IN ('pending','in_progress')) AS active_task_count,
               (SELECT json_agg(json_build_object(
                 'id',          wt.id,
@@ -280,12 +282,12 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
                LEFT JOIN users au ON au.id = wt.assigned_to
                LEFT JOIN users ab ON ab.id = wt.assigned_by
                WHERE wt.document_id = d.id
-                 AND wt.tenant_id = ${tenantParam}
+                 AND wt.tenant_id = $2
                  AND wt.task_status IN ('pending','in_progress')) AS active_tasks
        FROM documents d
        LEFT JOIN users u ON u.id = d.owner_id
        LEFT JOIN group_profiles gp ON gp.id = d.group_id
-       WHERE d.deleted_at IS NULL AND d.tenant_id = ${tenantParam}
+       WHERE d.deleted_at IS NULL AND d.tenant_id = $2
        ${groupFilter}
        ORDER BY d.updated_at DESC`,
       params

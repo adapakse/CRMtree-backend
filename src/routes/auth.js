@@ -7,7 +7,7 @@ const db       = require('../config/database');
 const audit    = require('../services/auditService');
 const logger   = require('../utils/logger');   // ← DODANY (brakowało)
 const bcrypt   = require('bcryptjs');
-const { requireAuth, signAccessToken, signRefreshToken, saveRefreshToken } = require('../middleware/auth');
+const { requireAuth, requireAdmin, signAccessToken, signRefreshToken, saveRefreshToken } = require('../middleware/auth');
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
 
@@ -381,8 +381,8 @@ if (process.env.NODE_ENV === 'development') {
   });
 }
 
-// Endpoint diagnostyczny SAML
-router.get('/saml-diag', (req, res) => {
+// Endpoint diagnostyczny SAML — wymaga uwierzytelnienia jako admin
+router.get('/saml-diag', requireAuth, requireAdmin, (req, res) => {
   const cert     = config.saml?.idpCert;
   const rawCert  = cert ? cert.replace(/\s+/g, '') : '';
   const passport = require('passport');

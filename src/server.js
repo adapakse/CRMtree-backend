@@ -8,6 +8,12 @@ const pubsubPoller = require("./services/pubsubPoller");
 const { migrate }  = require("./db/migrate");
 
 async function start() {
+  // ─── Startup security checks ──────────────────────────────
+  if (config.isProd && config.jwt.secret.startsWith('dev_secret')) {
+    logger.error('FATAL: Production running with default dev JWT secret — set JWT_SECRET env var');
+    process.exit(1);
+  }
+
   // ─── Run migrations before accepting traffic ──────────────
   try {
     logger.info("Running DB migrations…");

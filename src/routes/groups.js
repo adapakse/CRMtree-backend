@@ -194,7 +194,7 @@ router.delete(
         "SELECT COUNT(*) FROM documents WHERE group_id = $1 AND deleted_at IS NULL AND tenant_id = $2",
         [req.params.id, req.tenantId],
       );
-      if (parseInt(docCheck.rows[0].count) > 0) {
+      if (parseInt(docCheck[0].count) > 0) {
         return res.status(409).json({
           error:
             "Cannot delete group with active documents. Reassign documents first.",

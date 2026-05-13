@@ -1,57 +1,69 @@
 "use strict";
 
 const request = require("supertest");
-const app = require("../../app");
-const db = require("../../config/database");
+const app = require("../app");
+const db = require("../config/database");
 
 // ─── Setup / Teardown ─────────────────────────────────────
-let adminToken, userToken, adminId, userId, groupId, documentId;
+const TEST_TENANT_SLUG = 'zz-docs-test';
+let tenantId, adminToken, userToken, adminId, userId, groupId, documentId;
 
 beforeAll(async () => {
-  // Clean slate
-  await db.query(`DELETE FROM audit_logs`);
-  await db.query(`DELETE FROM workflow_tasks`);
-  await db.query(`DELETE FROM document_tags`);
-  await db.query(`DELETE FROM document_versions`);
-  await db.query(`DELETE FROM documents`);
-  await db.query(`DELETE FROM user_group_roles`);
+  // Get or create test tenant
+  const { rows: [tenant] } = await db.query(
+    `INSERT INTO tenants (name, slug, is_active) VALUES ('Documents Test Tenant', $1, TRUE)
+     ON CONFLICT (slug) DO UPDATE SET is_active = TRUE RETURNING id`,
+    [TEST_TENANT_SLUG],
+  );
+  tenantId = tenant.id;
+
+  // Clean slate for this tenant
+  await db.query(`DELETE FROM audit_logs         WHERE tenant_id = $1`, [tenantId]);
+  await db.query(`DELETE FROM workflow_tasks      WHERE tenant_id = $1`, [tenantId]);
+  await db.query(`DELETE FROM document_tags       WHERE tenant_id = $1`, [tenantId]);
+  await db.query(`DELETE FROM document_versions   WHERE tenant_id = $1`, [tenantId]);
+  await db.query(`DELETE FROM documents           WHERE tenant_id = $1`, [tenantId]);
+  await db.query(`DELETE FROM user_group_roles    WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM users WHERE email LIKE '%@test.worktrips.com'`);
-  await db.query(`DELETE FROM group_profiles WHERE name LIKE 'Test%'`);
+  await db.query(`DELETE FROM group_profiles WHERE tenant_id = $1`, [tenantId]);
 
   // Create test admin
   const { rows: adminRows } = await db.query(
-    `INSERT INTO users (email, first_name, last_name, is_admin)
-     VALUES ('admin@test.worktrips.com','Admin','User',TRUE) RETURNING *`,
+    `INSERT INTO users (email, first_name, last_name, is_admin, tenant_id)
+     VALUES ('admin@test.worktrips.com','Admin','User',TRUE,$1) RETURNING *`,
+    [tenantId],
   );
   adminId = adminRows[0].id;
 
   // Create test regular user
   const { rows: userRows } = await db.query(
-    `INSERT INTO users (email, first_name, last_name, is_admin)
-     VALUES ('user@test.worktrips.com','Regular','User',FALSE) RETURNING *`,
+    `INSERT INTO users (email, first_name, last_name, is_admin, tenant_id)
+     VALUES ('user@test.worktrips.com','Regular','User',FALSE,$1) RETURNING *`,
+    [tenantId],
   );
   userId = userRows[0].id;
 
   // Create test group
   const { rows: groupRows } = await db.query(
-    `INSERT INTO group_profiles (name, display_name) VALUES ('TestGroup','Test Group') RETURNING *`,
+    `INSERT INTO group_profiles (name, display_name, tenant_id) VALUES ('TestGroup','Test Group',$1) RETURNING *`,
+    [tenantId],
   );
   groupId = groupRows[0].id;
 
   // Assign full access to regular user
   await db.query(
-    `INSERT INTO user_group_roles (user_id, group_id, access_level) VALUES ($1,$2,'full')`,
-    [userId, groupId],
+    `INSERT INTO user_group_roles (user_id, group_id, access_level, tenant_id) VALUES ($1,$2,'full',$3)`,
+    [userId, groupId, tenantId],
   );
 
   // Generate tokens directly
-  const { signAccessToken } = require("../../middleware/auth");
+  const { signAccessToken } = require("../middleware/auth");
   adminToken = signAccessToken(adminRows[0]);
-  userToken = signAccessToken(userRows[0]);
+  userToken  = signAccessToken(userRows[0]);
 });
 
 afterAll(async () => {
-  await db.pool.end();
+  // Pool closed by --forceExit; individual files must not close it
 });
 
 // ─── Documents ────────────────────────────────────────────
@@ -181,9 +193,10 @@ describe("Documents API", () => {
   test("GET /api/documents/:id — 403 for unauthorized user", async () => {
     // Create user with no roles
     const { rows } = await db.query(
-      `INSERT INTO users (email,first_name,last_name) VALUES ('nogroup@test.worktrips.com','No','Group') RETURNING *`,
+      `INSERT INTO users (email,first_name,last_name,tenant_id) VALUES ('nogroup@test.worktrips.com','No','Group',$1) RETURNING *`,
+      [tenantId],
     );
-    const { signAccessToken } = require("../../middleware/auth");
+    const { signAccessToken } = require("../middleware/auth");
     const noGroupToken = signAccessToken(rows[0]);
 
     const res = await request(app)
