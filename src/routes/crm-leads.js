@@ -514,8 +514,11 @@ router.get('/report',
     try {
       // Kursy walut z app_settings (pkt 10/11)
       const { rows: rateRows } = await db.query(
-        `SELECT key, value::numeric AS rate FROM app_settings
-         WHERE key IN ('exchange_rate_eur','exchange_rate_usd','exchange_rate_gbp','exchange_rate_chf')`
+        `SELECT DISTINCT ON (key) key, value::numeric AS rate FROM app_settings
+         WHERE key IN ('exchange_rate_eur','exchange_rate_usd','exchange_rate_gbp','exchange_rate_chf')
+           AND (tenant_id = $1 OR tenant_id IS NULL)
+         ORDER BY key, (tenant_id IS NOT NULL) DESC`,
+        [req.tenantId]
       );
       const rates = { EUR: 4.25, USD: 3.90, GBP: 4.90, CHF: 4.20 };
       for (const r of rateRows) {

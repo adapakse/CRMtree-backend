@@ -369,7 +369,7 @@ if (process.env.NODE_ENV === 'development') {
       await saveRefreshToken(user.id, user.tenant_id, hash);
 
       await audit.log({
-        user:      { id: user.id, email: user.email, display_name: user.display_name },
+        user:      { id: user.id, email: user.email, display_name: user.display_name, tenant_id: user.tenant_id },
         action:    'user_login',
         metadata:  { method: 'dev_bypass' },
         ipAddress: req.auditContext?.ipAddress,
