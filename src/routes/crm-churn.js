@@ -173,11 +173,8 @@ router.get('/', loadCrmScope, async (req, res, next) => {
       filters.push(`risk_level = $${params.length}`);
     }
     if (req.query.partner_id) {
-      const pid = parseInt(req.query.partner_id, 10);
-      if (!isNaN(pid)) {
-        params.push(pid);
-        filters.push(`partner_id = $${params.length}`);
-      }
+      params.push(req.query.partner_id);
+      filters.push(`partner_id::text = $${params.length}`);
     }
 
     const cte = buildChurnCte(pfx, s);
