@@ -247,12 +247,113 @@ router.get('/', requireAuth, crmAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─── Health Score ──────────────────────────────────────────────────────────────
+const HEALTH_DEFAULTS = {
+  act_t1_max_days: 20, act_t1_pts: 10,
+  act_t2_min_days: 5,  act_t2_max_days: 10, act_t2_pts: 20,
+  act_t3_min_orders: 2, act_t4_min_orders: 5,
+  act_t3_pts: 30,      act_t4_pts: 50,
+  rev_t1_pct: 20, rev_t1_pts: 20,
+  rev_t2_pct: 30, rev_t2_pts: 30,
+  rev_t3_pct: 41, rev_t3_pts: 40,
+  rev_t4_pct: 51, rev_t4_pts: 50,
+  good_min: 61,   warn_min: 21,
+};
+
+async function loadHealthSettings(tenantId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT key, value FROM app_settings WHERE key LIKE 'health_%' AND tenant_id = $1`,
+      [tenantId]
+    );
+    const s = { ...HEALTH_DEFAULTS };
+    for (const r of rows) {
+      const k = r.key.replace('health_', '');
+      if (k in s) { const v = parseFloat(r.value); if (!isNaN(v)) s[k] = v; }
+    }
+    return s;
+  } catch { return { ...HEALTH_DEFAULTS }; }
+}
+
+function buildHealthQuery(pfx, hs) {
+  return `
+    WITH
+    m1 AS (
+      SELECT partner_id, SUM(gross_sales_value_pln) AS sales
+      FROM dwh.${pfx}_sales
+      WHERE TO_CHAR(sale_date,'YYYY-MM') = TO_CHAR(CURRENT_DATE - INTERVAL '1 month','YYYY-MM')
+      GROUP BY partner_id
+    ),
+    m2 AS (
+      SELECT partner_id, SUM(gross_sales_value_pln) AS sales
+      FROM dwh.${pfx}_sales
+      WHERE TO_CHAR(sale_date,'YYYY-MM') = TO_CHAR(CURRENT_DATE - INTERVAL '2 months','YYYY-MM')
+      GROUP BY partner_id
+    ),
+    recent AS (
+      SELECT partner_id,
+             COUNT(*)::int   AS orders_cnt,
+             MAX(sale_date)::date AS last_date
+      FROM dwh.${pfx}_sales
+      WHERE sale_date >= CURRENT_DATE - ${hs.act_t1_max_days}
+      GROUP BY partner_id
+    ),
+    scored AS (
+      SELECT
+        s.partner_id,
+        CASE
+          WHEN COALESCE(r.orders_cnt, 0) > ${hs.act_t4_min_orders}
+            THEN ${hs.act_t4_pts}
+          WHEN COALESCE(r.orders_cnt, 0) BETWEEN ${hs.act_t3_min_orders} AND ${hs.act_t4_min_orders}
+            THEN ${hs.act_t3_pts}
+          WHEN COALESCE(r.orders_cnt, 0) = 1
+               AND r.last_date BETWEEN (CURRENT_DATE - ${hs.act_t2_max_days})
+                                   AND (CURRENT_DATE - ${hs.act_t2_min_days})
+            THEN ${hs.act_t2_pts}
+          WHEN r.last_date >= (CURRENT_DATE - ${hs.act_t1_max_days})
+            THEN ${hs.act_t1_pts}
+          ELSE 0
+        END AS activity_score,
+        CASE
+          WHEN m2.sales > 0
+           AND (COALESCE(m1.sales,0) - m2.sales) / m2.sales * 100 >= ${hs.rev_t4_pct}
+            THEN ${hs.rev_t4_pts}
+          WHEN m2.sales > 0
+           AND (COALESCE(m1.sales,0) - m2.sales) / m2.sales * 100 >= ${hs.rev_t3_pct}
+            THEN ${hs.rev_t3_pts}
+          WHEN m2.sales > 0
+           AND (COALESCE(m1.sales,0) - m2.sales) / m2.sales * 100 >= ${hs.rev_t2_pct}
+            THEN ${hs.rev_t2_pts}
+          WHEN m2.sales > 0
+           AND (COALESCE(m1.sales,0) - m2.sales) / m2.sales * 100 >= ${hs.rev_t1_pct}
+            THEN ${hs.rev_t1_pts}
+          ELSE 0
+        END AS growth_score
+      FROM (SELECT DISTINCT partner_id FROM dwh.${pfx}_sales) s
+      LEFT JOIN recent r ON r.partner_id = s.partner_id
+      LEFT JOIN m1 ON m1.partner_id = s.partner_id
+      LEFT JOIN m2 ON m2.partner_id = s.partner_id
+    )
+    SELECT partner_id,
+           activity_score::int,
+           growth_score::int,
+           (activity_score + growth_score)::int AS health_score,
+           CASE
+             WHEN (activity_score + growth_score) >= ${hs.good_min} THEN 'good'
+             WHEN (activity_score + growth_score) >= ${hs.warn_min} THEN 'warning'
+             ELSE 'risk'
+           END AS health_level
+    FROM scored
+  `;
+}
+
 // ── GET /api/crm/sales-data/report  ──────────────────────────────────────────
 // Kompleksowy raport partnerów: KPI, trend, per partner, per produkt, per handlowiec
 router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next) => {
   try {
     const JOIN = makeDwhJoin(req.dwhPrefix);
     const pfx  = req.dwhPrefix;
+    const hs   = await loadHealthSettings(req.tenantId);
     const { service_category, rep_id, partner_id, partner_name, group_name } = req.query;
     const pfrom = req.query.period_from || '';
     const pto   = req.query.period_to   || '';
@@ -283,7 +384,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
       SUM(s.number_of_products)::int               AS transactions_count,
       0                                            AS pax_count`;
 
-    const [kpiRes, trendRes, byPartnerRes, byProductRes, byRepRes] = await Promise.all([
+    const [kpiRes, trendRes, byPartnerRes, byProductRes, byRepRes, healthRes] = await Promise.all([
 
       // KPI zbiorcze
       db.query(`
@@ -343,7 +444,25 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
             ORDER BY SUM(s.gross_sales_value_pln) DESC
           `, base.params)
         : Promise.resolve({ rows: [] }),
+
+      // Health score (current state, not period-filtered)
+      req.dwhPrefix
+        ? db.query(buildHealthQuery(req.dwhPrefix, hs), [])
+        : Promise.resolve({ rows: [] }),
     ]);
+
+    // Health score map — merged into by_partner rows
+    const healthMap = new Map(healthRes.rows.map(r => [r.partner_id, r]));
+    const byPartnerWithHealth = byPartnerRes.rows.map(p => {
+      const h = healthMap.get(p.dwh_partner_id) || {};
+      return {
+        ...p,
+        activity_score: h.activity_score ?? 0,
+        growth_score:   h.growth_score   ?? 0,
+        health_score:   h.health_score   ?? 0,
+        health_level:   h.health_level   ?? 'risk',
+      };
+    });
 
     // Poprzedni równoważny okres (do porównania) — arytmetyka miesięczna
     let prevKpi = null;
@@ -382,14 +501,15 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
     }
 
     res.json({
-      kpi:        kpiRes.rows[0] || {},
-      prev_kpi:   prevKpi,
-      trend:      trendRes.rows,
-      by_partner: byPartnerRes.rows,
-      by_product: byProductRes.rows,
-      by_rep:     byRepRes.rows,
-      period_from: pfrom,
-      period_to:   pto,
+      kpi:             kpiRes.rows[0] || {},
+      prev_kpi:        prevKpi,
+      trend:           trendRes.rows,
+      by_partner:      byPartnerWithHealth,
+      by_product:      byProductRes.rows,
+      by_rep:          byRepRes.rows,
+      period_from:     pfrom,
+      period_to:       pto,
+      health_settings: hs,
     });
   } catch (err) { next(err); }
 });
