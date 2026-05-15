@@ -6,6 +6,7 @@ const logger       = require("./utils/logger");
 const db           = require("./config/database");
 const pubsubPoller = require("./services/pubsubPoller");
 const { migrate }  = require("./db/migrate");
+const { startDailyScoresJob } = require("./jobs/daily-scores");
 
 async function start() {
   // ─── Startup security checks ──────────────────────────────
@@ -32,6 +33,7 @@ async function start() {
       appUrl: config.appUrl,
     });
     pubsubPoller.start();
+    startDailyScoresJob();
   });
 
   // ─── Graceful shutdown ────────────────────────────────────
