@@ -1,10 +1,11 @@
 pipeline {
   agent any
   environment {
-    ACR      = 'crmtreeregistry.azurecr.io'
-    ACR_USER = 'crmtreeregistry'
-    RG       = 'rg-crmtree-prod'
-    TAG      = "${env.BUILD_NUMBER}"
+    ACR             = 'crmtreeregistry.azurecr.io'
+    ACR_USER        = 'crmtreeregistry'
+    RG              = 'rg-crmtree-prod'
+    TAG             = "${env.BUILD_NUMBER}"
+    DOCKER_BUILDKIT = '0'
   }
   stages {
     stage('Checkout') {
