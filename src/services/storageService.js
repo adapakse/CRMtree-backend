@@ -37,6 +37,16 @@ function getContainerClient() {
   return getClient().getContainerClient(config.storage.container);
 }
 
+// W trybie dev (Azurite) auto-tworzy kontener jeśli nie istnieje.
+// Na produkcji kontener zarządza infrastruktura — bez zbędnego API call.
+async function ensureContainerClient() {
+  const container = getContainerClient();
+  if (config.isDev) {
+    await container.createIfNotExists();
+  }
+  return container;
+}
+
 /**
  * Upload a file buffer to Azure Blob Storage.
  * @returns {{ blobPath, blobName, blobSizeBytes }}
@@ -50,7 +60,7 @@ async function uploadDocument(
 ) {
   const ext = path.extname(originalName);
   const blobName = `documents/${documentId}/v${versionNumber}_${uuidv4()}${ext}`;
-  const container = getContainerClient();
+  const container = await ensureContainerClient();
 
   const blockBlobClient = container.getBlockBlobClient(blobName);
   await blockBlobClient.upload(buffer, buffer.length, {
@@ -154,7 +164,7 @@ async function deleteBlob(blobPath) {
  * @param {string} mimeType
  */
 async function uploadBuffer(blobPath, buffer, mimeType = "application/octet-stream") {
-  const container = getContainerClient();
+  const container = await ensureContainerClient();
   const blockBlobClient = container.getBlockBlobClient(blobPath);
   await blockBlobClient.upload(buffer, buffer.length, {
     blobHTTPHeaders: { blobContentType: mimeType },

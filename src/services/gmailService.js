@@ -223,22 +223,49 @@ async function buildSignatureHtml(userId) {
   return html;
 }
 
+// ── Helpers RFC 2047 / RFC 2045 ──────────────────────────────────────────────
+
+// RFC 2047: enkoduje display name gdy zawiera znaki spoza ASCII
+function encodeRfc2047(str) {
+  if (!str || !/[^\x00-\x7F]/.test(str)) return str;
+  return `=?UTF-8?B?${Buffer.from(str, "utf8").toString("base64")}?=`;
+}
+
+// RFC 2045: base64 body musi być zawijane co max 76 znaków
+function wrapBase64(b64) {
+  return b64.match(/.{1,76}/g).join("\r\n");
+}
+
 // ── Wyślij email ──────────────────────────────────────────────────────────────
 async function sendEmail({ userId, to, cc, subject, body, threadId, attachments = [], inReplyTo = null, references = null }) {
   const oauth2 = await getAuthForUser(userId);
   const gmail  = google.gmail({ version: "v1", auth: oauth2 });
 
+  // Pobierz dane nadawcy do nagłówka From (RFC 2047 dla polskich znaków)
+  const { rows: userRows } = await pool.query(
+    "SELECT display_name, email FROM users WHERE id = $1",
+    [userId],
+  );
+  const senderName  = userRows[0]?.display_name || "";
+  const senderEmail = userRows[0]?.email || "";
+  const encodedName = encodeRfc2047(senderName);
+  const fromHeader  = encodedName
+    ? `${encodedName} <${senderEmail}>`
+    : senderEmail;
+
   const signatureHtml = await buildSignatureHtml(userId);
-  const fullBody = signatureHtml ? (body || '') + signatureHtml : (body || '');
+  const fullBody = signatureHtml ? (body || "") + signatureHtml : (body || "");
 
   // Buduj MIME
   const boundary = `boundary_${Date.now()}`;
   const hasAttachments = attachments.length > 0;
+  const htmlBase64 = wrapBase64(Buffer.from(fullBody, "utf8").toString("base64"));
 
   let rawParts = [
+    `From: ${fromHeader}`,
     `To: ${to}`,
     ...(cc         ? [`Cc: ${cc}`]                 : []),
-    `Subject: =?UTF-8?B?${Buffer.from(subject).toString("base64")}?=`,
+    `Subject: =?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`,
     ...(inReplyTo  ? [`In-Reply-To: ${inReplyTo}`] : []),
     ...(references ? [`References: ${references}`] : []),
     `MIME-Version: 1.0`,
@@ -249,21 +276,23 @@ async function sendEmail({ userId, to, cc, subject, body, threadId, attachments 
     rawParts.push("");
     rawParts.push(`--${boundary}`);
     rawParts.push(`Content-Type: text/html; charset="UTF-8"`);
+    rawParts.push(`Content-Transfer-Encoding: base64`);
     rawParts.push("");
-    rawParts.push(fullBody);
+    rawParts.push(htmlBase64);
     for (const att of attachments) {
       rawParts.push(`--${boundary}`);
       rawParts.push(`Content-Type: ${att.mimeType}; name="${att.filename}"`);
       rawParts.push(`Content-Transfer-Encoding: base64`);
       rawParts.push(`Content-Disposition: attachment; filename="${att.filename}"`);
       rawParts.push("");
-      rawParts.push(att.data); // base64
+      rawParts.push(wrapBase64(att.data));
     }
     rawParts.push(`--${boundary}--`);
   } else {
     rawParts.push(`Content-Type: text/html; charset="UTF-8"`);
+    rawParts.push(`Content-Transfer-Encoding: base64`);
     rawParts.push("");
-    rawParts.push(fullBody);
+    rawParts.push(htmlBase64);
   }
 
   const raw = Buffer.from(rawParts.join("\r\n"))
@@ -311,6 +340,11 @@ function parseMessage(msg) {
       } else if (part.mimeType === "text/plain" && !body && part.body?.data) {
         body = Buffer.from(part.body.data, "base64").toString("utf8");
       } else if (part.filename && part.body?.attachmentId) {
+        // Pomijaj inline images (logo podpisu, pixel trackery) — mają Content-Disposition: inline
+        const disposition = (part.headers || [])
+          .find((h) => h.name.toLowerCase() === "content-disposition")?.value || "";
+        if (disposition.toLowerCase().startsWith("inline")) continue;
+
         attachments.push({
           filename:     part.filename,
           mimeType:     part.mimeType,

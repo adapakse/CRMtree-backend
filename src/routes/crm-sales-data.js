@@ -402,4 +402,108 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
   } catch (err) { next(err); }
 });
 
+// ── GET /api/crm/sales-data/analytics  ───────────────────────────────────────
+// Dashboard analityczny: pełne porównanie dwóch dowolnych okresów A vs B.
+// query: period_from, period_to  (Okres A — YYYY-MM)
+//        compare_from, compare_to (Okres B — YYYY-MM)
+//        rep_id, service_category (filtry)
+// Dostępny tylko dla: sales_manager i admin
+router.get('/analytics', requireAuth, crmAuth, requireCrmManager, loadCrmScope, async (req, res, next) => {
+  try {
+    const pfx  = req.dwhPrefix;
+    const JOIN = makeDwhJoin(pfx);
+    const { service_category, rep_id } = req.query;
+    const pfromA = req.query.period_from  || '';
+    const ptoA   = req.query.period_to    || '';
+    const pfromB = req.query.compare_from || '';
+    const ptoB   = req.query.compare_to   || '';
+
+    function buildConds(pfrom, pto) {
+      const w = [], p = [req.tenantId]; // $1 = tenantId (required by makeDwhJoin)
+      addPeriodFilters(w, p, pfrom, pto);
+      if (service_category) { p.push(service_category); w.push(`s.service_category = $${p.length}`); }
+      if (!req.isCrmManager && !req.crmGlobalRead) {
+        p.push(req.user.id); w.push(`p.manager_id = $${p.length}`);
+      } else if (rep_id) {
+        p.push(rep_id); w.push(`p.manager_id = $${p.length}`);
+      }
+      w.push(EXCLUDE_TEST);
+      return { where: w.length ? 'WHERE ' + w.join(' AND ') : '', params: p };
+    }
+
+    const FIN = `
+      SUM(s.gross_sales_value_pln)::numeric(14,2)  AS gross_turnover_pln,
+      SUM(s.net_sales_value_pln)::numeric(14,2)    AS net_turnover_pln,
+      SUM(s.gross_margin_value_pln)::numeric(14,2) AS revenue_pln,
+      SUM(s.number_of_products)::int               AS transactions_count`;
+
+    async function fetchPeriod(cond) {
+      const isManager = req.isCrmManager || req.crmGlobalRead;
+      const [kpiRes, trendRes, byPartnerRes, byProductRes, byRepRes] = await Promise.all([
+        db.query(`
+          SELECT ${FIN},
+            ROUND(100.0 * SUM(s.gross_margin_value_pln) / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS margin_pct,
+            COUNT(DISTINCT s.partner_id)::int AS partners_count
+          FROM dwh.${pfx}_sales s ${JOIN}
+          ${cond.where}
+        `, cond.params),
+        db.query(`
+          SELECT TO_CHAR(s.sale_date, 'YYYY-MM') AS period,
+            SUM(s.gross_sales_value_pln)::numeric(14,2)  AS gross_turnover_pln,
+            SUM(s.net_sales_value_pln)::numeric(14,2)    AS net_turnover_pln,
+            SUM(s.gross_margin_value_pln)::numeric(14,2) AS revenue_pln,
+            SUM(s.number_of_products)::int               AS transactions_count
+          FROM dwh.${pfx}_sales s ${JOIN}
+          ${cond.where}
+          GROUP BY TO_CHAR(s.sale_date, 'YYYY-MM') ORDER BY period ASC
+        `, cond.params),
+        db.query(`
+          SELECT COALESCE(p.company, dm.company_name, dm.name, 'Partner ' || s.partner_id::text) AS partner_name,
+            p.id AS partner_id, s.partner_id AS dwh_partner_id, u.display_name AS salesperson_name,
+            COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name,
+            p.industry AS industry,
+            ${FIN}
+          FROM dwh.${pfx}_sales s ${JOIN}
+          ${cond.where}
+          GROUP BY p.company, dm.company_name, dm.name, p.id, s.partner_id, u.display_name, u.id,
+                   dm.partner_group, g.name, p.industry
+          ORDER BY SUM(s.gross_sales_value_pln) DESC LIMIT 500
+        `, cond.params),
+        db.query(`
+          SELECT s.service_category AS product_type, ${FIN}
+          FROM dwh.${pfx}_sales s ${JOIN}
+          ${cond.where}
+          GROUP BY s.service_category ORDER BY SUM(s.gross_sales_value_pln) DESC
+        `, cond.params),
+        isManager
+          ? db.query(`
+              SELECT COALESCE(u.display_name,'— brak opiekuna —') AS salesperson_name,
+                u.id AS salesperson_id, COUNT(DISTINCT s.partner_id)::int AS partners_count, ${FIN}
+              FROM dwh.${pfx}_sales s ${JOIN}
+              ${cond.where}
+              GROUP BY u.display_name, u.id ORDER BY SUM(s.gross_sales_value_pln) DESC
+            `, cond.params)
+          : Promise.resolve({ rows: [] }),
+      ]);
+      return {
+        kpi:        kpiRes.rows[0] || {},
+        trend:      trendRes.rows,
+        by_partner: byPartnerRes.rows,
+        by_product: byProductRes.rows,
+        by_rep:     byRepRes.rows,
+      };
+    }
+
+    const condA = buildConds(pfromA, ptoA);
+    const condB = pfromB ? buildConds(pfromB, ptoB) : null;
+
+    const [periodA, periodB] = await Promise.all([
+      fetchPeriod(condA),
+      condB ? fetchPeriod(condB) : Promise.resolve(null),
+    ]);
+
+    res.json({ a: periodA, b: periodB });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

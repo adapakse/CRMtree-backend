@@ -13,6 +13,7 @@ const { validate, injectAuditContext }    = require('../middleware/errorHandler'
 const { crmAuth, loadCrmScope, crmScope, requireCrmManager, assertOwnership } = require('../middleware/crm-rbac');
 const testAccountSvc = require('../services/testAccountService');
 const email          = require('../utils/email');
+const { autoSaveLeadContacts } = require('../services/gmailProcessor');
 
 router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope);
 
@@ -637,7 +638,37 @@ router.get('/report',
       const closeDateTo   = req.query.period_end ? `'${req.query.period_end}'`
                           : req.query.date_to    ? `'${req.query.date_to}'`    : 'NULL';
 
-      const [kpiRes, funnelRes, monthlyActiveRes, monthlyWonRes, byRepRes, bySourceRes, lostRes, velocityRes] = await Promise.all([
+      // actByRep — aktywności handlowców (leady + partnerzy) z filtrem zakresu
+      const actParams = [req.tenantId];
+      const actConds  = ['a.tenant_id = $1'];
+      if (req.user.is_admin) {
+        // brak ograniczeń
+      } else if (req.user.crm_role === 'sales_manager') {
+        if (!req.query.assigned_to) {
+          if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
+            actParams.push(req.crmScopeUserIds);
+            actConds.push(`a.assigned_to = ANY($${actParams.length}::uuid[])`);
+          } else { actConds.push('1=0'); }
+        }
+      } else {
+        actParams.push(req.user.id);
+        actConds.push(`a.created_by = $${actParams.length}`);
+      }
+      if (req.query.date_from) {
+        actParams.push(req.query.date_from);
+        actConds.push(`DATE(a.activity_at) >= $${actParams.length}`);
+      }
+      if (req.query.date_to) {
+        actParams.push(req.query.date_to);
+        actConds.push(`DATE(a.activity_at) <= $${actParams.length}`);
+      }
+      if (req.query.assigned_to && req.isCrmManager) {
+        actParams.push(req.query.assigned_to);
+        actConds.push(`a.created_by = $${actParams.length}`);
+      }
+      const actWhere = 'WHERE ' + actConds.join(' AND ');
+
+      const [kpiRes, funnelRes, monthlyActiveRes, monthlyWonRes, byRepRes, bySourceRes, lostRes, velocityRes, actByRepRes] = await Promise.all([
 
         // KPI zbiorcze — wartości przeliczane na PLN wg kursów walut
         db.query(`
@@ -793,6 +824,32 @@ router.get('/report',
             WHEN 'new' THEN 1 WHEN 'qualification' THEN 2 WHEN 'presentation' THEN 3
             WHEN 'offer' THEN 4 WHEN 'negotiation' THEN 5 ELSE 6 END
         `, params),
+
+        // Aktywności handlowców (leady + partnerzy) — widoczne tylko dla managera
+        req.isCrmManager
+          ? db.query(`
+              SELECT COALESCE(u.display_name, '— nieprzypisany —') AS rep_name,
+                     a.created_by AS rep_id,
+                     a.type,
+                     a.source,
+                     COUNT(*)::int AS count
+              FROM (
+                SELECT la.created_by, la.type, la.activity_at, l.assigned_to,
+                       la.tenant_id, 'lead'::text AS source
+                FROM crm_lead_activities la
+                JOIN crm_leads l ON l.id = la.lead_id AND l.tenant_id = la.tenant_id
+                UNION ALL
+                SELECT pa.created_by, pa.type, pa.activity_at, p.manager_id AS assigned_to,
+                       pa.tenant_id, 'partner'::text AS source
+                FROM crm_partner_activities pa
+                JOIN crm_partners p ON p.id = pa.partner_id AND p.tenant_id = pa.tenant_id
+              ) a
+              LEFT JOIN users u ON u.id = a.created_by AND u.tenant_id = $1
+              ${actWhere}
+              GROUP BY u.display_name, a.created_by, a.type, a.source
+              ORDER BY rep_name NULLS LAST, a.type, a.source
+            `, actParams)
+          : Promise.resolve({ rows: [] }),
       ]);
 
       // Scalenie trendu: aktywne po dacie kwalifikacji + wygrane po dacie wygranej
@@ -810,13 +867,14 @@ router.get('/report',
         .slice(-12);
 
       res.json({
-        kpi:           { ...(kpiRes.rows[0] || {}), pipeline_in_period: kpiRes.rows[0]?.pipeline_in_period ?? 0 },
-        funnel:        funnelRes.rows,
+        kpi:             { ...(kpiRes.rows[0] || {}), pipeline_in_period: kpiRes.rows[0]?.pipeline_in_period ?? 0 },
+        funnel:          funnelRes.rows,
         monthly,
-        by_rep:        byRepRes.rows,
-        by_source:     bySourceRes.rows,
-        lost_reasons:  lostRes.rows,
-        stage_velocity: velocityRes.rows,
+        by_rep:          byRepRes.rows,
+        by_source:       bySourceRes.rows,
+        lost_reasons:    lostRes.rows,
+        stage_velocity:  velocityRes.rows,
+        activity_by_rep: actByRepRes.rows,
       });
     } catch (err) { next(err); }
   }
@@ -1265,6 +1323,19 @@ router.post('/:id/activities',
         metadata:   { lead_id: id, activity_id: rows[0].id, source: 'lead' },
         ipAddress:  req.auditContext?.ipAddress,
       });
+
+      // Auto-zapis uczestników spotkania jako kontakty leada.
+      if (type === 'meeting' && participants) {
+        const participantEmails = participants
+          .split(/[,;]+/)
+          .map(s => s.trim())
+          .filter(s => s.includes('@'));
+        if (participantEmails.length) {
+          autoSaveLeadContacts(id, participantEmails).catch(e =>
+            console.warn('[CRM] autoSaveLeadContacts from meeting:', e.message),
+          );
+        }
+      }
 
       // Powiadomienie email — tylko gdy przypisano do innego usera niż twórca
       if (assigned_to && assigned_to !== req.user.id) {
@@ -1912,6 +1983,22 @@ router.post('/:id/migrate',
       } catch (e) {
         const logger = require('../utils/logger');
         logger.error('Błąd kopiowania dokumentów leada do partnera', { error: e.message });
+      }
+
+      // ── Przenieś zgody marketingowe z leada na partnera ──────────────────────
+      try {
+        await db.query(
+          `INSERT INTO crm_partner_consents (tenant_id, partner_id, consent_key, value, updated_by, updated_at)
+           SELECT tenant_id, $1, consent_key, value, updated_by, updated_at
+           FROM crm_lead_consents
+           WHERE lead_id = $2
+           ON CONFLICT (partner_id, consent_key)
+           DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at`,
+          [partner.id, id]
+        );
+      } catch (e) {
+        const logger = require('../utils/logger');
+        logger.error('Błąd kopiowania zgód marketingowych leada do partnera', { error: e.message });
       }
 
       // ── Przenieś aktywności z leada ───────────────────────────────────────────

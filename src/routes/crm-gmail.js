@@ -343,12 +343,10 @@ async function sendLeadHandler(req, res) {
       [leadId, subject, body || null, sentThreadId, messageId, req.user.id, req.tenantId],
     );
 
-    // Auto-zapis odbiorców (To + CC) do extra_contacts leada
-    const allRecipients = [
-      ...String(to).split(",").map((s) => s.trim()).filter(Boolean),
-      ...(cc ? String(cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
-    ];
-    await autoSaveLeadContacts(leadId, allRecipients);
+    // Auto-zapis TYLKO odbiorców To (nie CC) do kontaktów leada
+    // CC celowo pomijane — może zawierać wewnętrznych pracowników lub osoby trzecie
+    const toRecipients = String(to).split(",").map((s) => s.trim()).filter(Boolean);
+    await autoSaveLeadContacts(leadId, toRecipients);
 
     if (training) {
       scheduleTrainingReplyLead(leadId, subject, sentThreadId, req.user.id, req.tenantId);
@@ -434,12 +432,9 @@ async function sendPartnerHandler(req, res) {
       [crmPartnerId, subject, body || null, sentThreadId, messageId, req.user.id, req.tenantId],
     );
 
-    // Auto-zapis odbiorców (To + CC) do kontaktów partnera
-    const allRecipients = [
-      ...String(to).split(",").map((s) => s.trim()).filter(Boolean),
-      ...(cc ? String(cc).split(",").map((s) => s.trim()).filter(Boolean) : []),
-    ];
-    await autoSavePartnerContacts(crmPartnerId, allRecipients);
+    // Auto-zapis TYLKO odbiorców To (nie CC) do kontaktów partnera
+    const toRecipients = String(to).split(",").map((s) => s.trim()).filter(Boolean);
+    await autoSavePartnerContacts(crmPartnerId, toRecipients);
 
     if (training) {
       scheduleTrainingReplyPartner(crmPartnerId, subject, sentThreadId, req.tenantId);

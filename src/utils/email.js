@@ -44,16 +44,32 @@ async function getGmailClient() {
   return _gmailClient;
 }
 
+// ─── Helpers RFC 2047 / RFC 2045 ─────────────────────────────────────────────
+
+// RFC 2047: enkoduje display name gdy zawiera znaki spoza ASCII
+function encodeRfc2047(str) {
+  if (!str || !/[^\x00-\x7F]/.test(str)) return str;
+  return `=?UTF-8?B?${Buffer.from(str, "utf8").toString("base64")}?=`;
+}
+
+// RFC 2045: base64 body musi być zawijane co max 76 znaków
+function wrapBase64(b64) {
+  return b64.match(/.{1,76}/g).join("\r\n");
+}
+
 // ─── Budowanie wiadomości RFC 2822 ───────────────────────────────────────────
 
 function buildRawMessage({ to, subject, html, text }) {
-  const from = `${config.email.fromName} <${config.email.from}>`;
+  const fromName = encodeRfc2047(config.email.fromName);
+  const from = fromName
+    ? `${fromName} <${config.email.from}>`
+    : config.email.from;
   const boundary = `boundary_${Date.now()}`;
 
   const headers = [
     `From: ${from}`,
     `To: ${to}`,
-    `Subject: =?UTF-8?B?${Buffer.from(subject).toString("base64")}?=`,
+    `Subject: =?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`,
     "MIME-Version: 1.0",
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
     "",
@@ -64,7 +80,7 @@ function buildRawMessage({ to, subject, html, text }) {
     "Content-Type: text/plain; charset=UTF-8",
     "Content-Transfer-Encoding: base64",
     "",
-    Buffer.from(text || stripHtml(html)).toString("base64"),
+    wrapBase64(Buffer.from(text || stripHtml(html), "utf8").toString("base64")),
   ].join("\r\n");
 
   const htmlPart = [
@@ -72,7 +88,7 @@ function buildRawMessage({ to, subject, html, text }) {
     "Content-Type: text/html; charset=UTF-8",
     "Content-Transfer-Encoding: base64",
     "",
-    Buffer.from(html).toString("base64"),
+    wrapBase64(Buffer.from(html, "utf8").toString("base64")),
   ].join("\r\n");
 
   const raw = `${headers}\r\n${textPart}\r\n\r\n${htmlPart}\r\n\r\n--${boundary}--`;

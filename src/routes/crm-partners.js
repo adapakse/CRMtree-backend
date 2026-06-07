@@ -8,6 +8,7 @@ const { pool } = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
 const { crmAuth, loadCrmScope } = require("../middleware/crm-rbac");
 const calendarService = require("../services/calendarService");
+const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
 const config   = require("../config");
 const email    = require("../utils/email");
@@ -273,7 +274,10 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type = 'email' AND is_read = false)::int AS new_email_count,
               (SELECT MAX(updated_at) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at,
-              (SELECT COUNT(*) FROM crm_partner_documents WHERE partner_id = p.id AND tenant_id = p.tenant_id)::int AS doc_count
+              (SELECT COUNT(*) FROM crm_partner_documents WHERE partner_id = p.id AND tenant_id = p.tenant_id)::int AS doc_count,
+              p.churn_exempt,
+              (SELECT churn_level FROM crm_partner_scores WHERE partner_id = p.id AND tenant_id = p.tenant_id LIMIT 1) AS churn_risk,
+              (SELECT churn_score FROM crm_partner_scores WHERE partner_id = p.id AND tenant_id = p.tenant_id LIMIT 1) AS churn_score
        FROM dwh.${req.dwhPrefix}_partner dm
        FULL OUTER JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
        LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
@@ -722,6 +726,7 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
       "subdomain", "language", "partner_currency", "country",
       "billing_address", "billing_zip", "billing_city", "billing_country", "billing_email_address",
       "admin_first_name", "admin_last_name", "admin_email",
+      "churn_exempt",
     ];
 
     // Pobierz aktualny stan PRZED aktualizacją (do audit logu)
@@ -758,6 +763,18 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
     );
     if (!r.rows.length) return res.status(404).json({ error: "Nie znaleziono" });
     r.rows[0].id = r.rows[0].dwh_partner_id;
+
+    // Gdy churn_exempt zmienione na TRUE — usuń istniejący scoring (badge zniknie natychmiast)
+    if (req.body.churn_exempt === true) {
+      try {
+        await pool.query(
+          'DELETE FROM crm_partner_scores WHERE partner_id = $1 AND tenant_id = $2',
+          [r.rows[0].crm_uuid ?? r.rows[0].id, req.tenantId]
+        );
+      } catch (scoreErr) {
+        logger.warn('Błąd czyszczenia churn scoring przy exempt:', { error: scoreErr.message });
+      }
+    }
 
     // Synchronizuj lead: stage → 'onboarded' gdy partner aktywowany
     if (req.body.status === 'active' && r.rows[0].lead_id) {
@@ -921,6 +938,19 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
       afterState: { type, title, assigned_to: assigned_to || null, activity_at: activity_at || null },
       metadata:   { partner_id: partnerId, activity_id: newAct.id, source: 'partner' },
     });
+
+    // Auto-zapis uczestników spotkania jako kontakty partnera.
+    if (type === 'meeting' && participants) {
+      const participantEmails = participants
+        .split(/[,;]+/)
+        .map(s => s.trim())
+        .filter(s => s.includes('@'));
+      if (participantEmails.length) {
+        autoSavePartnerContacts(partnerId, participantEmails).catch(e =>
+          console.warn('[CRM] autoSavePartnerContacts from meeting:', e.message),
+        );
+      }
+    }
 
     // ── Powiadomienie email — tylko gdy przypisano do innego usera ────────────
     if (assigned_to && assigned_to !== req.user.id) {

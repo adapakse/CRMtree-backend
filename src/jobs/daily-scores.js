@@ -296,11 +296,15 @@ async function runForTenant(tenantId, pfx) {
 }
 
 // ── Scheduler: sprawdza co minutę czy czas uruchomienia się zgadza ────────────
+const TZ = 'Europe/Warsaw';
+const timeFmt = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
+const dateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+
 function startDailyScoresJob() {
   setInterval(async () => {
-    const now  = new Date();
-    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    const today = now.toISOString().substring(0, 10);
+    const now   = new Date();
+    const hhmm  = timeFmt.format(now);   // "HH:MM" w strefie Europe/Warsaw
+    const today = dateFmt.format(now);   // "YYYY-MM-DD" w strefie Europe/Warsaw
 
     try {
       const { rows: tenants } = await db.query(`
