@@ -90,8 +90,8 @@ router.post(
       const {
         rows: [att],
       } = await db.query(
-        `INSERT INTO document_attachments (document_id,name,blob_path,blob_name,blob_size_bytes,mime_type,created_by)
-         SELECT $1,$2,$3,$4,$5,$6,$7
+        `INSERT INTO document_attachments (document_id,name,blob_path,blob_name,blob_size_bytes,mime_type,created_by,tenant_id)
+         SELECT $1,$2,$3,$4,$5,$6,$7,$8
          WHERE EXISTS (SELECT 1 FROM documents WHERE id = $1 AND tenant_id = $8)
          RETURNING *`,
         [
@@ -107,8 +107,8 @@ router.post(
       );
       if (!att) return res.status(404).json({ error: "Document not found" });
       await db.query(
-        `INSERT INTO attachment_versions (attachment_id,version_number,label,blob_path,blob_name,blob_size_bytes,mime_type,created_by)
-         VALUES ($1,1,'Original upload',$2,$3,$4,$5,$6)`,
+        `INSERT INTO attachment_versions (attachment_id,version_number,label,blob_path,blob_name,blob_size_bytes,mime_type,created_by,tenant_id)
+         VALUES ($1,1,'Original upload',$2,$3,$4,$5,$6,$7)`,
         [
           att.id,
           blob.blobPath,
@@ -116,6 +116,7 @@ router.post(
           blob.blobSizeBytes,
           req.file.mimetype,
           req.user.id,
+          req.tenantId,
         ],
       );
       await audit.log({
@@ -174,8 +175,8 @@ router.post(
       );
       const label = req.body.label || `Version ${nextVer}`;
       await db.query(
-        `INSERT INTO attachment_versions (attachment_id,version_number,label,blob_path,blob_name,blob_size_bytes,mime_type,created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        `INSERT INTO attachment_versions (attachment_id,version_number,label,blob_path,blob_name,blob_size_bytes,mime_type,created_by,tenant_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [
           req.params.attId,
           nextVer,
@@ -185,6 +186,7 @@ router.post(
           blob.blobSizeBytes,
           req.file.mimetype,
           req.user.id,
+          req.tenantId,
         ],
       );
       await db.query(

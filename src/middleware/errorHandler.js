@@ -18,6 +18,13 @@ function validate(req, res, next) {
 // ─── Global error handler (must be last middleware) ───────
 function errorHandler(err, req, res, next) {
   // eslint-disable-line no-unused-vars
+  // Multer errors (file type / size)
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(400).json({ error: 'Plik jest za duży. Maksymalny rozmiar to 50 MB.' });
+  }
+  if (err.message && err.message.startsWith('File type not allowed')) {
+    return res.status(400).json({ error: `Niedozwolony typ pliku. Dozwolone: PDF, DOCX, DOC.` });
+  }
   const status = err.status || 500;
   const isDev = process.env.NODE_ENV === "development";
 

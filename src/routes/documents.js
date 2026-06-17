@@ -333,8 +333,8 @@ router.post(
           );
           await client.query(
             `INSERT INTO document_versions
-               (document_id, version_number, label, blob_path, blob_name, blob_size_bytes, mime_type, created_by)
-             VALUES ($1, 1, 'Original upload', $2, $3, $4, $5, $6)`,
+               (document_id, version_number, label, blob_path, blob_name, blob_size_bytes, mime_type, created_by, tenant_id)
+             VALUES ($1, 1, 'Original upload', $2, $3, $4, $5, $6, $7)`,
             [
               doc.id,
               blobResult.blobPath,
@@ -342,6 +342,7 @@ router.post(
               blobResult.blobSizeBytes,
               req.file.mimetype,
               req.user.id,
+              req.tenantId,
             ],
           );
         }
@@ -653,8 +654,8 @@ router.post(
       await db.transaction(async (client) => {
         await client.query(
           `INSERT INTO document_versions
-             (document_id, version_number, label, blob_path, blob_name, blob_size_bytes, mime_type, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+             (document_id, version_number, label, blob_path, blob_name, blob_size_bytes, mime_type, created_by, tenant_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
           [
             doc.id,
             nextVer,
@@ -664,6 +665,7 @@ router.post(
             blobResult.blobSizeBytes,
             req.file.mimetype,
             req.user.id,
+            req.tenantId,
           ],
         );
         await client.query(
