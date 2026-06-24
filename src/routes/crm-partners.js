@@ -1037,9 +1037,6 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
     }
 
     const newStatus = req.body.status ?? act.status;
-    if (newStatus === 'closed' && !req.body.close_comment && !act.close_comment) {
-      return res.status(400).json({ error: 'Komentarz jest wymagany przy zamknięciu aktywności' });
-    }
 
     const type             = req.body.type             ?? act.type;
     const title            = req.body.title            ?? act.title;
