@@ -29,6 +29,8 @@ router.get('/',
     query('search').optional().isString().trim(),
     query('close_date_from').optional().isDate(),
     query('close_date_to').optional().isDate(),
+    query('created_from').optional().isDate(),
+    query('created_to').optional().isDate(),
     query('lost_reason').optional().isString().trim(),
     query('page').optional().isInt({ min: 1 }).toInt(),
     query('limit').optional().isInt({ min: 1, max: 5000 }).toInt(),
@@ -90,6 +92,14 @@ router.get('/',
       if (req.query.close_date_to) {
         params.push(req.query.close_date_to);
         where += ` AND l.close_date <= $${params.length}::date`;
+      }
+      if (req.query.created_from) {
+        params.push(req.query.created_from);
+        where += ` AND l.created_at >= $${params.length}::date`;
+      }
+      if (req.query.created_to) {
+        params.push(req.query.created_to);
+        where += ` AND l.created_at < ($${params.length}::date + interval '1 day')`;
       }
       if (req.query.lost_reason) {
         params.push(req.query.lost_reason);
