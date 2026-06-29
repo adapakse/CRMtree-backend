@@ -4,6 +4,7 @@
 
 const { google } = require("googleapis");
 const crypto     = require("crypto");
+const { load: cheerioLoad } = require("cheerio");
 const { pool }   = require("../config/database");
 const config     = require("../config");
 const { decrypt } = require("../utils/encrypt");
@@ -158,8 +159,8 @@ async function exchangeCodeAndSave(code, userId) {
   const email   = profile.data.emailAddress;
 
   await pool.query(
-    `INSERT INTO user_gmail_tokens (user_id, access_token, refresh_token, expires_at, email, updated_at)
-     VALUES ($1, $2, $3, $4, $5, NOW())
+    `INSERT INTO user_gmail_tokens (user_id, access_token, refresh_token, expires_at, email, updated_at, tenant_id)
+     VALUES ($1, $2, $3, $4, $5, NOW(), $6)
      ON CONFLICT (user_id) DO UPDATE SET
        access_token  = EXCLUDED.access_token,
        refresh_token = COALESCE(EXCLUDED.refresh_token, user_gmail_tokens.refresh_token),
@@ -172,6 +173,7 @@ async function exchangeCodeAndSave(code, userId) {
       tokens.refresh_token || null,
       tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
       email,
+      uRows[0].tenant_id,
     ],
   );
 
@@ -325,6 +327,15 @@ async function getThread(userId, threadId) {
   return (thread.data.messages || []).map(parseMessage);
 }
 
+// ── Usuń cytowaną historię z treści HTML (blockquote, gmail_quote, gmail_attr) ─
+function stripQuotedContent(html) {
+  if (!html) return html;
+  if (!html.includes('<')) return html;
+  const $ = cheerioLoad(html, { decodeEntities: false });
+  $('blockquote, .gmail_quote, .gmail_attr').remove();
+  return $('body').html() ?? '';
+}
+
 // ── Parser wiadomości MIME ─────────────────────────────────────────────────────
 function parseMessage(msg) {
   const headers = {};
@@ -370,6 +381,7 @@ function parseMessage(msg) {
     date:             headers["date"]       ? new Date(headers["date"]).toISOString() : new Date().toISOString(),
     snippet:          msg.snippet           || "",
     body,
+    cleanBody:        stripQuotedContent(body),
     attachments,
     messageIdHeader:  headers["message-id"] || "",
     referencesHeader: headers["references"] || "",

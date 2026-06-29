@@ -76,7 +76,7 @@ router.post(
 
       await perms.assertCanFull(req.user.id, doc);
 
-      const training = await isTrainingMode();
+      const training = await isTrainingMode(req.tenantId);
 
       if (!training && !doc.blob_path)
         return res.status(400).json({ error: "Document has no file attached" });

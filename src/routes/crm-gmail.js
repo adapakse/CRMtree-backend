@@ -294,7 +294,7 @@ async function sendLeadHandler(req, res) {
     );
     if (!leadQ.rows.length) return res.status(404).json({ error: "Lead nie znaleziony" });
 
-    const training = await isTrainingMode();
+    const training = await isTrainingMode(req.tenantId);
 
     let messageId, sentThreadId;
 
@@ -383,7 +383,7 @@ async function sendPartnerHandler(req, res) {
     const partner = await resolvePartner(req.params.partnerId, req.tenantId, req.dwhPrefix);
     if (!partner) return res.status(404).json({ error: "Partner nie znaleziony" });
 
-    const training = await isTrainingMode();
+    const training = await isTrainingMode(req.tenantId);
 
     let messageId, sentThreadId;
     const crmPartnerId = partner.id;

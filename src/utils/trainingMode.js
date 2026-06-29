@@ -2,28 +2,38 @@
 
 const { pool } = require('../config/database');
 
-let _cache = null;
-let _cacheAt = 0;
+// Per-tenant cache: Map<tenantId, { value: boolean, at: number }>
+const _cache = new Map();
 const TTL = 5_000; // 5 s — krótki cache, żeby zmiana ustawienia była widoczna natychmiast
 
-async function isTrainingMode() {
-  const now = Date.now();
-  if (_cache !== null && now - _cacheAt < TTL) return _cache;
+async function isTrainingMode(tenantId) {
+  if (!tenantId) {
+    console.warn('[TrainingMode] tenantId missing — defaulting to training mode (safe)');
+    return true;
+  }
+  const now    = Date.now();
+  const cached = _cache.get(tenantId);
+  if (cached && now - cached.at < TTL) return cached.value;
   try {
     const { rows } = await pool.query(
-      "SELECT value FROM app_settings WHERE key = 'crm_training_mode' LIMIT 1",
+      "SELECT value FROM app_settings WHERE key = 'crm_training_mode' AND tenant_id = $1",
+      [tenantId],
     );
-    _cache = rows.length > 0 && rows[0].value === 'true';
-    _cacheAt = now;
+    const value = rows.length > 0 && rows[0].value === 'true';
+    _cache.set(tenantId, { value, at: now });
+    return value;
   } catch {
     // nie czyść cache przy błędzie DB — zostaw poprzednią wartość
+    return cached?.value ?? true;
   }
-  return _cache ?? false;
 }
 
-function clearTrainingModeCache() {
-  _cache = null;
-  _cacheAt = 0;
+function clearTrainingModeCache(tenantId) {
+  if (tenantId) {
+    _cache.delete(tenantId);
+  } else {
+    _cache.clear();
+  }
 }
 
 module.exports = { isTrainingMode, clearTrainingModeCache };
