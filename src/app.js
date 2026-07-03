@@ -27,6 +27,8 @@ const adminDataRoutes 	  = require('./routes/admin-data');
 const adminTenantsRoutes  = require('./routes/admin-tenants');
 const profileRoutes       = require('./routes/profile');
 const crmGmail 		  = require('./routes/crm-gmail');
+const crmOutlook      = require('./routes/crm-outlook');
+const crmZoho         = require('./routes/crm-zoho');
 
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
@@ -150,7 +152,9 @@ app.use('/api/admin/settings',  settingsRoutes);
 app.use('/api/admin/data',     adminDataRoutes);
 app.use('/api/admin/tenants', adminTenantsRoutes);
 app.use('/api/profile',         profileRoutes);
-app.use('/api/crm/gmail', crmGmail);
+app.use('/api/crm/gmail',   crmGmail);
+app.use('/api/crm/outlook', crmOutlook);
+app.use('/api/crm/zoho',    crmZoho);
 
 app.use('/api/groups',          groupRoutes);
 app.use('/api/document-groups', documentGroupRoutes);

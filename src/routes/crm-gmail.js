@@ -535,6 +535,7 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, async (req, r
       }
     }
 
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json(messages);
   } catch (err) {
     console.error("[Gmail] getThread/lead error:", err.message);
@@ -609,6 +610,7 @@ router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, async (
       }
     }
 
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json(messages);
   } catch (err) {
     console.error("[Gmail] getThread/partner error:", err.message);
@@ -765,17 +767,15 @@ router.post("/debug/process", requireAuth, crmAuth, async (req, res) => {
         ok: true,
         email,
         note: "history_id był pusty — ustawiono bieżący historyId. Wyślij odpowiedź na email i kliknij ponownie.",
-        historyId_after: history_id,
-        messageIds_found: [],
+        historyId_after:   history_id,
+        newMessages_found: 0,
+        messageIds_found:  [],
         recent_message_reads: readRows,
       });
     }
 
-    // Pobierz nowe wiadomości od obecnego historyId
-    const { messageIds, historyId: fetched } = await gmailService.getNewMessages(req.user.id, history_id);
-
-    // Uruchom processNotification używając aktualnego historyId jako "powiadomienie"
-    await processNotification(email, fetched || history_id);
+    // processNotification handles getNewMessages, historyId update, recovery and dedup internally
+    const result = await processNotification(email, history_id);
 
     // Stan po przetworzeniu
     const { rows: after } = await pool.query(
@@ -787,11 +787,13 @@ router.post("/debug/process", requireAuth, crmAuth, async (req, res) => {
     );
 
     res.json({
-      ok:              true,
+      ok:                true,
       email,
-      historyId_before: history_id,
-      historyId_after:  after[0]?.history_id,
-      messageIds_found: messageIds,
+      recovered:         result?.recovered      || false,
+      historyId_before:  history_id,
+      historyId_after:   after[0]?.history_id,
+      newMessages_found: result?.recovered ? (result.recoveredCount ?? 0) : (result.processed ?? 0),
+      messageIds_found:  [],
       recent_message_reads: readRows,
     });
   } catch (err) {

@@ -123,7 +123,7 @@ async function getAuthUrl(userId, tenantId = null) {
   const oauth2 = makeOAuth2Client(creds);
   return oauth2.generateAuthUrl({
     access_type: "offline",
-    prompt:      "consent",
+    prompt:      "select_account consent",
     state:       makeOAuthState(userId),
     scope: [
       "https://www.googleapis.com/auth/gmail.send",
@@ -327,13 +327,72 @@ async function getThread(userId, threadId) {
   return (thread.data.messages || []).map(parseMessage);
 }
 
-// ── Usuń cytowaną historię z treści HTML (blockquote, gmail_quote, gmail_attr) ─
+// Converts HTML to the visible text a user would read,
+// replacing block-level and line-break elements with newlines.
+// Used only for separator detection — not for rendering.
+function htmlToVisibleText(html) {
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/?(div|p|li|blockquote)[^>]*>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Returns the index in `text` where the Zoho-generated quote block starts, or -1.
+// Zoho places these in the same element as the new reply content (no blockquote
+// wrapper), so blockquote/gmail_quote removal alone does not catch them:
+//   "----- On śr., 01 lip 2026 … wrote -----"  (Zoho inline "On <weekday>" citation)
+//   "Od: / Do: / Data: / Temat:"  header block (Zoho quoted-message header)
+function findZohoQuoteSepIndex(text) {
+  const candidates = [];
+
+  const onM = /(-{4,}[\s]*)?\bOn\s+(Mon,?|Tue,?|Wed,?|Thu,?|Fri,?|Sat,?|Sun,?|pon\.|wt\.|śr\.|czw\.|pt\.|sob\.|nd\.)/i.exec(text);
+  if (onM && onM.index > 0) candidates.push(onM.index);
+
+  const odM = /^[ \t]*Od:.*$/im.exec(text);
+  if (odM && odM.index > 0) {
+    const rest = text.slice(odM.index);
+    if (/^[ \t]*Do:.*$/im.test(rest) && /^[ \t]*Temat:.*$/im.test(rest)) {
+      candidates.push(odM.index);
+    }
+  }
+
+  return candidates.length ? Math.min(...candidates) : -1;
+}
+
+// ── Usuń cytowaną historię z treści HTML (blockquote, gmail_quote, gmail_attr,
+//    oraz cytaty Zoho wklejone w tym samym elemencie co nowa treść) ────────────
 function stripQuotedContent(html) {
   if (!html) return html;
-  if (!html.includes('<')) return html;
+
+  if (!html.includes('<')) {
+    const sep = findZohoQuoteSepIndex(html);
+    return sep > 0 ? html.slice(0, sep).trimEnd() : html;
+  }
+
   const $ = cheerioLoad(html, { decodeEntities: false });
   $('blockquote, .gmail_quote, .gmail_attr').remove();
-  return $('body').html() ?? '';
+  const cleaned = $('body').html() ?? '';
+
+  const visText = htmlToVisibleText(cleaned);
+  const sep     = findZohoQuoteSepIndex(visText);
+
+  if (sep > 0) {
+    const before = visText.slice(0, sep).trimEnd();
+    if (!before) return cleaned; // nothing before separator — keep cheerio result
+    return before
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\n/g, '<br>');
+  }
+
+  return cleaned;
 }
 
 // ── Parser wiadomości MIME ─────────────────────────────────────────────────────
@@ -439,8 +498,8 @@ async function getNewMessages(userId, startHistoryId) {
   } catch (e) {
     // 404 = historyId zbyt stary (historia wyczyszczona przez Google, max ~7 dni)
     if (e.code === 404 || e.status === 404) {
-      console.warn(`[GmailService] history.list 404 — historyId ${startHistoryId} zbyt stary. Brak wiadomości do pobrania.`);
-      return { messageIds: [], historyId: startHistoryId };
+      console.warn(`[GmailService] history.list 404 — historyId ${startHistoryId} wygasł. Wymagany recovery sync.`);
+      return { messageIds: [], historyId: null, needsRecovery: true };
     }
     throw e;
   }
@@ -504,6 +563,19 @@ async function getCurrentHistoryId(userId) {
   return String(res.data.historyId);
 }
 
+// Returns the IDs of the `maxResults` most recent INBOX messages (newest first).
+// Used by recovery sync when historyId has expired.
+async function listRecentInboxMessages(userId, maxResults = 50) {
+  const oauth2 = await getAuthForUser(userId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  const res    = await gmail.users.messages.list({
+    userId:     "me",
+    labelIds:   ["INBOX"],
+    maxResults,
+  });
+  return (res.data.messages || []).map(m => m.id);
+}
+
 // ── Zwraca świeży access_token dla Drive API ──────────────────────────────────
 async function getFreshAccessToken(userId) {
   const oauth2 = await getAuthForUser(userId);
@@ -524,6 +596,7 @@ module.exports = {
   getAttachmentBuffer,
   getMessage,
   getNewMessages,
+  listRecentInboxMessages,
   renewAllWatches,
   getCurrentHistoryId,
   getFreshAccessToken,

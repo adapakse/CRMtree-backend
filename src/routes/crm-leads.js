@@ -1058,6 +1058,7 @@ router.get('/:id',
                  'assigned_to',a.assigned_to,'assigned_to_name',au2.display_name,
                  'status',a.status,'close_comment',a.close_comment,
                  'gmail_thread_id',a.gmail_thread_id,'gmail_message_id',a.gmail_message_id,
+                 'email_provider',a.email_provider,
                  'is_read',a.is_read
                ) AS act
                FROM crm_lead_activities a
