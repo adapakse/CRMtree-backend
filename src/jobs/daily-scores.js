@@ -315,6 +315,7 @@ function startDailyScoresJob() {
         LEFT JOIN app_settings s ON s.tenant_id = t.id AND s.key = 'churn_daily_run_time'
         WHERE t.dwh_schema_prefix IS NOT NULL
           AND t.dwh_schema_prefix <> ''
+          AND t.deleted_at IS NULL
       `);
 
       for (const tenant of tenants) {

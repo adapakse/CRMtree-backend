@@ -29,6 +29,7 @@ const profileRoutes       = require('./routes/profile');
 const crmGmail 		  = require('./routes/crm-gmail');
 const crmOutlook      = require('./routes/crm-outlook');
 const crmZoho         = require('./routes/crm-zoho');
+const crmEmail        = require('./routes/crm-email');
 
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
@@ -155,6 +156,7 @@ app.use('/api/profile',         profileRoutes);
 app.use('/api/crm/gmail',   crmGmail);
 app.use('/api/crm/outlook', crmOutlook);
 app.use('/api/crm/zoho',    crmZoho);
+app.use('/api/crm/email',   crmEmail);
 
 app.use('/api/groups',          groupRoutes);
 app.use('/api/document-groups', documentGroupRoutes);
@@ -317,11 +319,10 @@ app.use(errorHandler);
 // Uruchamiamy przy starcie serwera, a potem co 6 * 24h.
 if (config.google.pubsubTopic) {
   const gmailService = require('./services/gmailService');
-  const { pool: dbPool } = require('./config/database');
   const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
 
   const scheduleWatchRenewal = () => {
-    gmailService.renewAllWatches(dbPool).catch(() => {});
+    gmailService.renewAllTenantWatches().catch(() => {});
     setTimeout(scheduleWatchRenewal, SIX_DAYS_MS);
   };
   // Pierwsze odnowienie po 60s od startu (serwer musi być gotowy)

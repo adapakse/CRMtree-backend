@@ -7,9 +7,12 @@ const _cache = new Map();
 const TTL = 5_000; // 5 s — krótki cache, żeby zmiana ustawienia była widoczna natychmiast
 
 async function isTrainingMode(tenantId) {
+  // No tenant context (e.g. a super-admin token used without impersonating a
+  // tenant) means there is no per-tenant crm_training_mode row to check —
+  // training mode can't be "actually enabled" for a tenant that isn't there,
+  // so this must resolve to false rather than assume a demo state.
   if (!tenantId) {
-    console.warn('[TrainingMode] tenantId missing — defaulting to training mode (safe)');
-    return true;
+    return false;
   }
   const now    = Date.now();
   const cached = _cache.get(tenantId);
@@ -23,7 +26,9 @@ async function isTrainingMode(tenantId) {
     _cache.set(tenantId, { value, at: now });
     return value;
   } catch {
-    // nie czyść cache przy błędzie DB — zostaw poprzednią wartość
+    // DB error and no cached value yet: fail safe into training mode rather
+    // than risking a real send/signature for a tenant we couldn't actually
+    // confirm is out of demo mode.
     return cached?.value ?? true;
   }
 }

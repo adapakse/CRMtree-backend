@@ -4,10 +4,15 @@
 
 const { google } = require("googleapis");
 const crypto     = require("crypto");
-const { load: cheerioLoad } = require("cheerio");
 const { pool }   = require("../config/database");
 const config     = require("../config");
 const { decrypt } = require("../utils/encrypt");
+const { ProviderNotConfiguredError } = require("../utils/providerErrors");
+const emailQuote  = require("../utils/emailQuote");
+
+// Dev-only escape hatch for the old "fall back to global .env app" behavior.
+// Never active in production — must be explicitly opted into locally.
+const ALLOW_ENV_FALLBACK = config.isDev && process.env.ALLOW_ENV_EMAIL_FALLBACK === "true";
 
 // ── OAuth2 client factory (accepts optional per-tenant credential override) ───
 function makeOAuth2Client(creds = null) {
@@ -39,23 +44,17 @@ async function getTenantGmailCreds(tenantId) {
 // ── Pobierz / odśwież token usera (+ konfiguracja tenanta w jednym zapytaniu) ──
 async function getAuthForUser(userId) {
   const { rows } = await pool.query(
-    `SELECT t.access_token, t.refresh_token, t.expires_at,
-            ep.client_id     AS ep_client_id,
-            ep.client_secret AS ep_secret_enc,
-            ep.redirect_uri  AS ep_redirect_uri
+    `SELECT t.access_token, t.refresh_token, t.expires_at, u.tenant_id
      FROM user_gmail_tokens t
      JOIN users u ON u.id = t.user_id
-     LEFT JOIN tenant_email_providers ep
-       ON ep.tenant_id = u.tenant_id AND ep.provider = 'gmail' AND ep.is_enabled = true
      WHERE t.user_id = $1`,
     [userId],
   );
   if (!rows.length) throw new Error("Brak połączonego konta Gmail. Zaloguj się przez OAuth.");
 
   const row   = rows[0];
-  const creds = row.ep_client_id
-    ? { client_id: row.ep_client_id, client_secret: decrypt(row.ep_secret_enc), redirect_uri: row.ep_redirect_uri }
-    : null;
+  const creds = await getTenantGmailCreds(row.tenant_id);
+  if (!creds && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("gmail");
   const oauth2 = makeOAuth2Client(creds);
   oauth2.setCredentials({
     access_token:  row.access_token,
@@ -120,6 +119,7 @@ function parseOAuthState(state) {
 // tenantId opcjonalne: jeśli podane, używa konfiguracji tenanta z DB
 async function getAuthUrl(userId, tenantId = null) {
   const creds  = await getTenantGmailCreds(tenantId);
+  if (!creds && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("gmail");
   const oauth2 = makeOAuth2Client(creds);
   return oauth2.generateAuthUrl({
     access_type: "offline",
@@ -136,19 +136,10 @@ async function getAuthUrl(userId, tenantId = null) {
 
 // ── Wymiana code → tokeny i zapis do DB ───────────────────────────────────────
 async function exchangeCodeAndSave(code, userId) {
-  // Look up tenant Gmail config via the user record (one joined query)
-  const { rows: uRows } = await pool.query(
-    `SELECT u.tenant_id,
-            ep.client_id, ep.client_secret AS ep_secret_enc, ep.redirect_uri
-     FROM users u
-     LEFT JOIN tenant_email_providers ep
-       ON ep.tenant_id = u.tenant_id AND ep.provider = 'gmail' AND ep.is_enabled = true
-     WHERE u.id = $1`,
-    [userId],
-  );
-  const creds = uRows[0]?.client_id
-    ? { client_id: uRows[0].client_id, client_secret: decrypt(uRows[0].ep_secret_enc), redirect_uri: uRows[0].redirect_uri }
-    : null;
+  const { rows: uRows } = await pool.query(`SELECT tenant_id FROM users WHERE id = $1`, [userId]);
+  const tenantId = uRows[0]?.tenant_id ?? null;
+  const creds = await getTenantGmailCreds(tenantId);
+  if (!creds && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("gmail");
   const oauth2 = makeOAuth2Client(creds);
   const { tokens } = await oauth2.getToken(code);
   oauth2.setCredentials(tokens);
@@ -173,7 +164,7 @@ async function exchangeCodeAndSave(code, userId) {
       tokens.refresh_token || null,
       tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
       email,
-      uRows[0].tenant_id,
+      tenantId,
     ],
   );
 
@@ -327,72 +318,14 @@ async function getThread(userId, threadId) {
   return (thread.data.messages || []).map(parseMessage);
 }
 
-// Converts HTML to the visible text a user would read,
-// replacing block-level and line-break elements with newlines.
-// Used only for separator detection — not for rendering.
-function htmlToVisibleText(html) {
-  return html
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/?(div|p|li|blockquote)[^>]*>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-// Returns the index in `text` where the Zoho-generated quote block starts, or -1.
-// Zoho places these in the same element as the new reply content (no blockquote
-// wrapper), so blockquote/gmail_quote removal alone does not catch them:
-//   "----- On śr., 01 lip 2026 … wrote -----"  (Zoho inline "On <weekday>" citation)
-//   "Od: / Do: / Data: / Temat:"  header block (Zoho quoted-message header)
-function findZohoQuoteSepIndex(text) {
-  const candidates = [];
-
-  const onM = /(-{4,}[\s]*)?\bOn\s+(Mon,?|Tue,?|Wed,?|Thu,?|Fri,?|Sat,?|Sun,?|pon\.|wt\.|śr\.|czw\.|pt\.|sob\.|nd\.)/i.exec(text);
-  if (onM && onM.index > 0) candidates.push(onM.index);
-
-  const odM = /^[ \t]*Od:.*$/im.exec(text);
-  if (odM && odM.index > 0) {
-    const rest = text.slice(odM.index);
-    if (/^[ \t]*Do:.*$/im.test(rest) && /^[ \t]*Temat:.*$/im.test(rest)) {
-      candidates.push(odM.index);
-    }
-  }
-
-  return candidates.length ? Math.min(...candidates) : -1;
-}
-
-// ── Usuń cytowaną historię z treści HTML (blockquote, gmail_quote, gmail_attr,
-//    oraz cytaty Zoho wklejone w tym samym elemencie co nowa treść) ────────────
+// Splits a message body into { cleanBody, quotedBody } — shared with
+// outlookService/zohoService via src/utils/emailQuote.js so all three
+// providers use the same marker-detection and edge-trimming rules instead of
+// three independently-drifting copies. Gmail needs no provider-specific hook
+// beyond the common blockquote/.gmail_quote/.gmail_attr removal already
+// built into the shared splitter.
 function stripQuotedContent(html) {
-  if (!html) return html;
-
-  if (!html.includes('<')) {
-    const sep = findZohoQuoteSepIndex(html);
-    return sep > 0 ? html.slice(0, sep).trimEnd() : html;
-  }
-
-  const $ = cheerioLoad(html, { decodeEntities: false });
-  $('blockquote, .gmail_quote, .gmail_attr').remove();
-  const cleaned = $('body').html() ?? '';
-
-  const visText = htmlToVisibleText(cleaned);
-  const sep     = findZohoQuoteSepIndex(visText);
-
-  if (sep > 0) {
-    const before = visText.slice(0, sep).trimEnd();
-    if (!before) return cleaned; // nothing before separator — keep cheerio result
-    return before
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/\n/g, '<br>');
-  }
-
-  return cleaned;
+  return emailQuote.split(html);
 }
 
 // ── Parser wiadomości MIME ─────────────────────────────────────────────────────
@@ -430,6 +363,8 @@ function parseMessage(msg) {
   }
   extractParts(msg.payload?.parts);
 
+  const { cleanBody, quotedBody } = stripQuotedContent(body);
+
   return {
     id:               msg.id,
     threadId:         msg.threadId,
@@ -440,7 +375,8 @@ function parseMessage(msg) {
     date:             headers["date"]       ? new Date(headers["date"]).toISOString() : new Date().toISOString(),
     snippet:          msg.snippet           || "",
     body,
-    cleanBody:        stripQuotedContent(body),
+    cleanBody,
+    quotedBody,
     attachments,
     messageIdHeader:  headers["message-id"] || "",
     referencesHeader: headers["references"] || "",
@@ -583,7 +519,357 @@ async function getFreshAccessToken(userId) {
   return token;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// TENANT-OWNED COMPANY MAILBOX — current model: one shared Gmail mailbox per
+// tenant (tenant_gmail_tokens), used by every CRM user of that tenant. Mirrors
+// the per-user functions above exactly, just resolving credentials by
+// tenant_id instead of user_id. The per-user functions above are left
+// completely untouched and are no longer called by any route — kept only so
+// existing user_gmail_tokens rows remain readable for rollback.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Pobierz / odśwież token skrzynki firmowej tenanta ─────────────────────────
+async function getAuthForTenant(tenantId) {
+  const { rows } = await pool.query(
+    `SELECT access_token, refresh_token, expires_at FROM tenant_gmail_tokens WHERE tenant_id = $1`,
+    [tenantId],
+  );
+  if (!rows.length) throw new Error("Brak podłączonej skrzynki firmowej Gmail. Poproś administratora o połączenie w panelu tenanta.");
+
+  const row   = rows[0];
+  const creds = await getTenantGmailCreds(tenantId);
+  if (!creds && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("gmail");
+  const oauth2 = makeOAuth2Client(creds);
+  oauth2.setCredentials({
+    access_token:  row.access_token,
+    refresh_token: row.refresh_token,
+    expiry_date:   row.expires_at ? new Date(row.expires_at).getTime() : null,
+  });
+
+  oauth2.on("tokens", async (tokens) => {
+    const updates = ["access_token = $1", "updated_at = NOW()"];
+    const params  = [tokens.access_token];
+    if (tokens.refresh_token) { updates.push(`refresh_token = $${params.length + 1}`); params.push(tokens.refresh_token); }
+    if (tokens.expiry_date)   { updates.push(`expires_at = $${params.length + 1}`);    params.push(new Date(tokens.expiry_date).toISOString()); }
+    params.push(tenantId);
+    await pool.query(`UPDATE tenant_gmail_tokens SET ${updates.join(", ")} WHERE tenant_id = $${params.length}`, params);
+  });
+
+  return oauth2;
+}
+
+// ── State OAuth2 dla flow tenantowego: tenantId + opcjonalny initiatingUserId
+// (tylko do audytu w logu — nigdy nie determinuje właściciela tokenu) ─────────
+function makeTenantOAuthState(tenantId, initiatingUserId = null) {
+  const tid = String(tenantId);
+  const uid = initiatingUserId ? String(initiatingUserId) : "-";
+  const ts  = Date.now();
+  const sig = crypto
+    .createHmac("sha256", config.jwtSecret || "fallback-secret")
+    .update(`tenant:${tid}:${uid}:${ts}`)
+    .digest("hex")
+    .slice(0, 16);
+  return `${tid}.${uid}.${ts}.${sig}`;
+}
+
+function parseTenantOAuthState(state) {
+  if (!state || typeof state !== "string") return null;
+  const parts = state.split(".");
+  if (parts.length !== 4) return null;
+  const [tenantId, uid, tsStr, sig] = parts;
+  if (!tenantId || !tsStr || !sig) return null;
+  const ts = parseInt(tsStr, 10);
+  if (!ts || isNaN(ts)) return null;
+  if (Date.now() - ts > 30 * 60 * 1000) return null;
+  const expected = crypto
+    .createHmac("sha256", config.jwtSecret || "fallback-secret")
+    .update(`tenant:${tenantId}:${uid}:${ts}`)
+    .digest("hex")
+    .slice(0, 16);
+  if (sig !== expected) return null;
+  return { tenantId, initiatingUserId: uid === "-" ? null : uid };
+}
+
+// ── URL autoryzacji OAuth2 dla skrzynki firmowej tenanta ──────────────────────
+async function getTenantAuthUrl(tenantId, initiatingUserId = null) {
+  const creds  = await getTenantGmailCreds(tenantId);
+  if (!creds && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("gmail");
+  const oauth2 = makeOAuth2Client(creds);
+  return oauth2.generateAuthUrl({
+    access_type: "offline",
+    prompt:      "select_account consent",
+    state:       makeTenantOAuthState(tenantId, initiatingUserId),
+    scope: [
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://mail.google.com/",
+      "https://www.googleapis.com/auth/drive.readonly",
+    ],
+  });
+}
+
+// ── Wymiana code → tokeny skrzynki firmowej i zapis do DB ─────────────────────
+async function exchangeTenantCodeAndSave(code, tenantId, initiatingUserId = null) {
+  const creds = await getTenantGmailCreds(tenantId);
+  if (!creds && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("gmail");
+  const oauth2 = makeOAuth2Client(creds);
+  const { tokens } = await oauth2.getToken(code);
+  oauth2.setCredentials(tokens);
+
+  const gmail   = google.gmail({ version: "v1", auth: oauth2 });
+  const profile = await gmail.users.getProfile({ userId: "me" });
+  const email   = profile.data.emailAddress;
+
+  await pool.query(
+    `INSERT INTO tenant_gmail_tokens (tenant_id, access_token, refresh_token, expires_at, email, connected_by_user_id, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (tenant_id) DO UPDATE SET
+       access_token         = EXCLUDED.access_token,
+       refresh_token        = COALESCE(EXCLUDED.refresh_token, tenant_gmail_tokens.refresh_token),
+       expires_at           = EXCLUDED.expires_at,
+       email                = EXCLUDED.email,
+       connected_by_user_id = EXCLUDED.connected_by_user_id,
+       updated_at           = NOW()`,
+    [tenantId, tokens.access_token, tokens.refresh_token || null,
+     tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
+     email, initiatingUserId],
+  );
+
+  return { email };
+}
+
+// ── Status / rozłączenie skrzynki firmowej ────────────────────────────────────
+async function getTenantMailboxStatus(tenantId) {
+  const { rows } = await pool.query(
+    "SELECT email FROM tenant_gmail_tokens WHERE tenant_id = $1",
+    [tenantId],
+  );
+  if (!rows.length) return { connected: false };
+  return { connected: true, email: rows[0].email };
+}
+
+async function disconnectTenantMailbox(tenantId) {
+  await pool.query("DELETE FROM tenant_gmail_tokens WHERE tenant_id = $1", [tenantId]);
+}
+
+// ── Wyślij email ze skrzynki firmowej tenanta ─────────────────────────────────
+// userId (opcjonalne) — tylko do osobistego podpisu. Autorstwo aktywności CRM
+// (created_by) zapisuje wołający route osobno, nie ta funkcja.
+async function sendTenantEmail({ tenantId, userId = null, to, cc, subject, body, threadId, attachments = [], inReplyTo = null, references = null }) {
+  const oauth2 = await getAuthForTenant(tenantId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+
+  const { rows: mbRows } = await pool.query("SELECT email FROM tenant_gmail_tokens WHERE tenant_id = $1", [tenantId]);
+  const fromHeader = mbRows[0]?.email || "";
+
+  const signatureHtml = userId ? await buildSignatureHtml(userId) : "";
+  const fullBody = signatureHtml ? (body || "") + signatureHtml : (body || "");
+
+  const boundary = `boundary_${Date.now()}`;
+  const hasAttachments = attachments.length > 0;
+  const htmlBase64 = wrapBase64(Buffer.from(fullBody, "utf8").toString("base64"));
+
+  let rawParts = [
+    `From: ${fromHeader}`,
+    `To: ${to}`,
+    ...(cc         ? [`Cc: ${cc}`]                 : []),
+    `Subject: =?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`,
+    ...(inReplyTo  ? [`In-Reply-To: ${inReplyTo}`] : []),
+    ...(references ? [`References: ${references}`] : []),
+    `MIME-Version: 1.0`,
+  ];
+
+  if (hasAttachments) {
+    rawParts.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+    rawParts.push("");
+    rawParts.push(`--${boundary}`);
+    rawParts.push(`Content-Type: text/html; charset="UTF-8"`);
+    rawParts.push(`Content-Transfer-Encoding: base64`);
+    rawParts.push("");
+    rawParts.push(htmlBase64);
+    for (const att of attachments) {
+      rawParts.push(`--${boundary}`);
+      rawParts.push(`Content-Type: ${att.mimeType}; name="${att.filename}"`);
+      rawParts.push(`Content-Transfer-Encoding: base64`);
+      rawParts.push(`Content-Disposition: attachment; filename="${att.filename}"`);
+      rawParts.push("");
+      rawParts.push(wrapBase64(att.data));
+    }
+    rawParts.push(`--${boundary}--`);
+  } else {
+    rawParts.push(`Content-Type: text/html; charset="UTF-8"`);
+    rawParts.push(`Content-Transfer-Encoding: base64`);
+    rawParts.push("");
+    rawParts.push(htmlBase64);
+  }
+
+  const raw = Buffer.from(rawParts.join("\r\n"))
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+  const params = { userId: "me", requestBody: { raw } };
+  if (threadId) params.requestBody.threadId = threadId;
+
+  const response = await gmail.users.messages.send(params);
+  return {
+    messageId: response.data.id,
+    threadId:  response.data.threadId,
+  };
+}
+
+// ── Pobierz wątek ze skrzynki firmowej ────────────────────────────────────────
+async function getTenantThread(tenantId, threadId) {
+  const oauth2 = await getAuthForTenant(tenantId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+
+  const thread = await gmail.users.threads.get({
+    userId: "me",
+    id:     threadId,
+    format: "full",
+  });
+
+  return (thread.data.messages || []).map(parseMessage);
+}
+
+async function getTenantAttachmentBuffer(tenantId, messageId, attachmentId) {
+  const oauth2 = await getAuthForTenant(tenantId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  const res    = await gmail.users.messages.attachments.get({
+    userId: "me",
+    messageId,
+    id: attachmentId,
+  });
+  const base64 = res.data.data.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(base64, "base64");
+}
+
+async function getTenantMessage(tenantId, messageId) {
+  const oauth2 = await getAuthForTenant(tenantId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  const res    = await gmail.users.messages.get({
+    userId:   "me",
+    id:       messageId,
+    format:   "full",
+  });
+  return parseMessage(res.data);
+}
+
+async function getTenantNewMessages(tenantId, startHistoryId) {
+  const oauth2 = await getAuthForTenant(tenantId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  try {
+    const res = await gmail.users.history.list({
+      userId:         "me",
+      startHistoryId: String(startHistoryId),
+      historyTypes:   ["messageAdded"],
+      labelId:        "INBOX",
+    });
+    const history    = res.data.history || [];
+    const messageIds = new Set();
+    for (const h of history) {
+      for (const ma of h.messagesAdded || []) {
+        messageIds.add(ma.message.id);
+      }
+    }
+    return {
+      messageIds: [...messageIds],
+      historyId:  res.data.historyId || startHistoryId,
+    };
+  } catch (e) {
+    if (e.code === 404 || e.status === 404) {
+      console.warn(`[GmailService] history.list 404 — historyId ${startHistoryId} wygasł (tenant=${tenantId}). Wymagany recovery sync.`);
+      return { messageIds: [], historyId: null, needsRecovery: true };
+    }
+    throw e;
+  }
+}
+
+async function renewAllTenantWatches() {
+  if (!config.google.pubsubTopic) return;
+  try {
+    const { rows } = await pool.query(
+      "SELECT tenant_id FROM tenant_gmail_tokens WHERE refresh_token IS NOT NULL",
+    );
+    for (const row of rows) {
+      try {
+        await registerTenantWatch(row.tenant_id);
+      } catch (e) {
+        console.warn("[Gmail] Watch renewal failed for tenant", row.tenant_id, e.message);
+      }
+    }
+    console.log(`[Gmail] Watch renewal completed for ${rows.length} tenant(s)`);
+  } catch (e) {
+    console.error("[Gmail] renewAllTenantWatches error:", e.message);
+  }
+}
+
+async function registerTenantWatch(tenantId) {
+  const creds = await getTenantGmailCreds(tenantId);
+  const pubsubTopic = creds?.extra_config?.pubsub_topic || config.google.pubsubTopic;
+  if (!pubsubTopic) return null;
+
+  const oauth2 = await getAuthForTenant(tenantId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  const res    = await gmail.users.watch({
+    userId: "me",
+    requestBody: {
+      topicName: pubsubTopic,
+      labelIds:  ["INBOX"],
+    },
+  });
+  await pool.query(
+    "UPDATE tenant_gmail_tokens SET history_id = $1, updated_at = NOW() WHERE tenant_id = $2",
+    [String(res.data.historyId), tenantId],
+  );
+  return res.data;
+}
+
+async function getTenantCurrentHistoryId(tenantId) {
+  const oauth2 = await getAuthForTenant(tenantId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  const res    = await gmail.users.getProfile({ userId: "me" });
+  return String(res.data.historyId);
+}
+
+async function listTenantRecentInboxMessages(tenantId, maxResults = 50) {
+  const oauth2 = await getAuthForTenant(tenantId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  const res    = await gmail.users.messages.list({
+    userId:     "me",
+    labelIds:   ["INBOX"],
+    maxResults,
+  });
+  return (res.data.messages || []).map(m => m.id);
+}
+
+async function getTenantFreshAccessToken(tenantId) {
+  const oauth2 = await getAuthForTenant(tenantId);
+  const { token } = await oauth2.getAccessToken();
+  return token;
+}
+
 module.exports = {
+  // Tenant-owned company mailbox — current model, used by all routes.
+  getAuthForTenant,
+  parseTenantOAuthState,
+  getTenantAuthUrl,
+  exchangeTenantCodeAndSave,
+  getTenantMailboxStatus,
+  disconnectTenantMailbox,
+  sendTenantEmail,
+  getTenantThread,
+  getTenantAttachmentBuffer,
+  getTenantMessage,
+  getTenantNewMessages,
+  registerTenantWatch,
+  renewAllTenantWatches,
+  getTenantCurrentHistoryId,
+  listTenantRecentInboxMessages,
+  getTenantFreshAccessToken,
+
+  // Legacy per-user (kept for rollback only — no route calls these anymore).
   getAuthUrl,
   parseOAuthState,
   exchangeCodeAndSave,

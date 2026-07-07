@@ -90,7 +90,7 @@ async function storeAttachment({ leadId, partnerId, messageId, attachmentId, fil
 // and records the activity / reads record.
 // Returns true when the message was new and recorded; false when skipped.
 //
-async function processOneMessage(msg, userId, tenantId, emailAddress) {
+async function processOneMessage(msg, tenantId, emailAddress) {
   console.log(`[GmailProcessor] Przetwarzanie msg=${msg.id} threadId=${msg.threadId} from="${msg.from}" subject="${msg.subject}"`);
 
   // ── 1. Thread-based match ──────────────────────────────────────────────────
@@ -142,14 +142,16 @@ async function processOneMessage(msg, userId, tenantId, emailAddress) {
     const idCol2    = leadId ? 'lead_id'               : 'partner_id';
     const recordId2 = leadId || partnerId;
 
+    // created_by is NULL — this is an inbound message on the tenant's shared
+    // mailbox, not authored by any specific CRM user.
     const insRes = await pool.query(
       `INSERT INTO ${actTable2}
          (${idCol2}, type, title, body, activity_at, gmail_thread_id, gmail_message_id, is_read, status, created_by, tenant_id)
-       SELECT $1, 'email', $2, $3, $4, $5, $6, false, 'new', $7, $8
+       SELECT $1, 'email', $2, $3, $4, $5, $6, false, 'new', NULL, $7
        WHERE NOT EXISTS (SELECT 1 FROM ${actTable2} WHERE gmail_message_id = $6)
        RETURNING id`,
       [recordId2, msg.subject || '(bez tematu)', msg.body || msg.snippet || null,
-       msg.date ? new Date(msg.date) : new Date(), msg.threadId, msg.id, userId, tenantId],
+       msg.date ? new Date(msg.date) : new Date(), msg.threadId, msg.id, tenantId],
     );
     console.log(`[GmailProcessor] Fallback match: ${actTable2} recordId=${recordId2} email="${senderEmail}" inserted=${insRes.rowCount} tenant=${tenantId}`);
 
@@ -165,7 +167,7 @@ async function processOneMessage(msg, userId, tenantId, emailAddress) {
 
       for (const att of msg.attachments || []) {
         try {
-          const buffer = await gmailService.getAttachmentBuffer(userId, msg.id, att.attachmentId);
+          const buffer = await gmailService.getTenantAttachmentBuffer(tenantId, msg.id, att.attachmentId);
           await storeAttachment({
             leadId:       leadId    || undefined,
             partnerId:    partnerId || undefined,
@@ -229,7 +231,7 @@ async function processOneMessage(msg, userId, tenantId, emailAddress) {
 
   for (const att of msg.attachments || []) {
     try {
-      const buffer = await gmailService.getAttachmentBuffer(userId, msg.id, att.attachmentId);
+      const buffer = await gmailService.getTenantAttachmentBuffer(tenantId, msg.id, att.attachmentId);
       await storeAttachment({
         leadId:       leadId    || undefined,
         partnerId:    partnerId || undefined,
@@ -255,25 +257,25 @@ async function processOneMessage(msg, userId, tenantId, emailAddress) {
 // Saves a fresh historyId from the Gmail profile after processing.
 // Called only on 404 from history.list — never saves the stale cursor.
 //
-async function recoverFromExpiredHistory(userId, tenantId, emailAddress) {
-  const messageIds = await gmailService.listRecentInboxMessages(userId, 50);
+async function recoverFromExpiredHistory(tenantId, emailAddress) {
+  const messageIds = await gmailService.listTenantRecentInboxMessages(tenantId, 50);
   console.log(`[GmailProcessor] Recovery: sprawdzam ${messageIds.length} ostatnich wiadomości INBOX (tenant=${tenantId})`);
 
   let count = 0;
   for (const msgId of messageIds) {
     try {
-      const msg = await gmailService.getMessage(userId, msgId);
-      const ok  = await processOneMessage(msg, userId, tenantId, emailAddress);
+      const msg = await gmailService.getTenantMessage(tenantId, msgId);
+      const ok  = await processOneMessage(msg, tenantId, emailAddress);
       if (ok) count++;
     } catch (msgErr) {
       console.warn('[GmailProcessor] Recovery — błąd wiadomości:', msgErr.message);
     }
   }
 
-  const freshHistoryId = await gmailService.getCurrentHistoryId(userId);
+  const freshHistoryId = await gmailService.getTenantCurrentHistoryId(tenantId);
   await pool.query(
-    "UPDATE user_gmail_tokens SET history_id = $1, updated_at = NOW() WHERE user_id = $2",
-    [freshHistoryId, userId],
+    "UPDATE tenant_gmail_tokens SET history_id = $1, updated_at = NOW() WHERE tenant_id = $2",
+    [freshHistoryId, tenantId],
   );
   console.log(`[GmailProcessor] Recovery zakończony: odzyskano ${count} nowych, nowy historyId=${freshHistoryId}`);
 
@@ -286,45 +288,49 @@ async function recoverFromExpiredHistory(userId, tenantId, emailAddress) {
 // the recovery outcome to the user.
 //
 async function processNotification(emailAddress, historyId) {
-  const { rows: userRows } = await pool.query(`
-    SELECT t.user_id, t.history_id, u.tenant_id
-    FROM user_gmail_tokens t
-    JOIN users u ON u.id = t.user_id
-    WHERE LOWER(t.email) = LOWER($1)
+  // Shared company mailbox: resolve tenant directly from tenant_gmail_tokens
+  // (one row per tenant, PK on tenant_id) — no more per-user token to join
+  // through. LIMIT 1 defensively in case the same address is ever configured
+  // for more than one tenant.
+  const { rows: tenantRows } = await pool.query(`
+    SELECT tenant_id, history_id
+    FROM tenant_gmail_tokens
+    WHERE LOWER(email) = LOWER($1)
+    LIMIT 1
   `, [emailAddress]);
-  if (!userRows.length) return { recovered: false, processed: 0 };
+  if (!tenantRows.length) return { recovered: false, processed: 0 };
 
-  const { user_id: userId, history_id: lastHistoryId, tenant_id: tenantId } = userRows[0];
+  const { tenant_id: tenantId, history_id: lastHistoryId } = tenantRows[0];
 
   if (!lastHistoryId) {
     await pool.query(
-      "UPDATE user_gmail_tokens SET history_id = $1 WHERE user_id = $2",
-      [String(historyId), userId],
+      "UPDATE tenant_gmail_tokens SET history_id = $1 WHERE tenant_id = $2",
+      [String(historyId), tenantId],
     );
     return { recovered: false, processed: 0 };
   }
 
-  const { messageIds, historyId: fetchedHistoryId, needsRecovery } = await gmailService.getNewMessages(userId, lastHistoryId);
+  const { messageIds, historyId: fetchedHistoryId, needsRecovery } = await gmailService.getTenantNewMessages(tenantId, lastHistoryId);
 
   // historyId expired — do NOT persist the stale cursor; run bounded recovery instead
   if (needsRecovery) {
     console.warn(`[GmailProcessor] historyId ${lastHistoryId} wygasł — uruchamiam recovery sync`);
-    const { count, freshHistoryId } = await recoverFromExpiredHistory(userId, tenantId, emailAddress);
+    const { count, freshHistoryId } = await recoverFromExpiredHistory(tenantId, emailAddress);
     return { recovered: true, recoveredCount: count, historyId: freshHistoryId };
   }
 
   const newHistoryId = String(Math.max(Number(fetchedHistoryId || 0), Number(historyId || 0)));
   await pool.query(
-    "UPDATE user_gmail_tokens SET history_id = $1 WHERE user_id = $2",
-    [newHistoryId, userId],
+    "UPDATE tenant_gmail_tokens SET history_id = $1 WHERE tenant_id = $2",
+    [newHistoryId, tenantId],
   );
   console.log(`[GmailProcessor] historyId: lastDB=${lastHistoryId} fetched=${fetchedHistoryId} notification=${historyId} → saved=${newHistoryId} messages=${messageIds.length} tenant=${tenantId}`);
 
   let processed = 0;
   for (const msgId of messageIds) {
     try {
-      const msg = await gmailService.getMessage(userId, msgId);
-      const ok  = await processOneMessage(msg, userId, tenantId, emailAddress);
+      const msg = await gmailService.getTenantMessage(tenantId, msgId);
+      const ok  = await processOneMessage(msg, tenantId, emailAddress);
       if (ok) processed++;
     } catch (msgErr) {
       console.error("[GmailProcessor] Message processing error:", msgErr.message);
