@@ -41,6 +41,7 @@ const crmBudgetsRoutes      = require('./routes/crm-budgets');
 const crmChurnRoutes        = require('./routes/crm-churn');
 const crmDocumentsRoutes    = require('./routes/crm-documents');
 const crmConsentsRoutes     = require('./routes/crm-consents');
+const crmSeoRoutes          = require('./routes/crm-seo');
 
 require('./middleware/auth');
 
@@ -170,6 +171,7 @@ app.use('/api/crm/budgets',      crmBudgetsRoutes);
 app.use('/api/crm/churn',        crmChurnRoutes);
 app.use('/api/crm/documents',    crmDocumentsRoutes);
 app.use('/api/crm/consents',     crmConsentsRoutes);
+app.use('/api/crm/seo',          crmSeoRoutes);
 
 // ─── Workflow global endpoints ─────────────────────────────
 const { requireAuth } = require('./middleware/auth');

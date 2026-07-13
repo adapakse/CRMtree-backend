@@ -96,6 +96,13 @@ module.exports = {
       "GOOGLE_REDIRECT_URI",
       "http://localhost:3000/api/crm/gmail/oauth/callback",
     ),
+    // SEObot — Search Console (reuses the same OAuth client as Gmail above;
+    // this redirect URI must be added to that client's "Authorized redirect
+    // URIs" in Google Cloud Console before the flow works).
+    gscRedirectUri: optional(
+      "GOOGLE_GSC_REDIRECT_URI",
+      "http://localhost:3000/api/crm/seo/gsc/oauth/callback",
+    ),
     // Pub/Sub topic (format: projects/<project>/topics/<topic>)
     // Wymagany do rejestracji Gmail watch (gmail.users.watch).
     pubsubTopic: optional("GOOGLE_PUBSUB_TOPIC"),
