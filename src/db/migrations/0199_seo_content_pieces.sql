@@ -2,7 +2,7 @@
 -- Faza 0 (SEObot): public blog content storage + internal CRMtree tenant for dogfooding.
 
 INSERT INTO tenants (id, name, slug, is_active)
-VALUES ('00000000-0000-0000-0000-000000000001', 'CRMtree', 'crmtree', true)
+VALUES ('4a299a1b-9e33-43d7-b649-ead5a17d61fc', 'CRMtree', 'crmtree', true)
 ON CONFLICT (id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS seo_content_pieces (
@@ -39,7 +39,7 @@ INSERT INTO seo_content_pieces
   (tenant_id, locale, title, slug, body, meta_description, status, category, published_at)
 VALUES
   (
-    '00000000-0000-0000-0000-000000000001', 'pl',
+    '4a299a1b-9e33-43d7-b649-ead5a17d61fc', 'pl',
     'Jak zarządzać lejkiem sprzedażowym, żeby nie tracić leadów',
     'jak-zarzadzac-lejkiem-sprzedazowym',
     E'Zarządzanie lejkiem sprzedażowym to codzienna praca handlowca, nie jednorazowy projekt. W tym artykule pokazujemy, jak CRM pomaga uporządkować etapy lejka, przypisywać leady do właściwych osób i nie tracić szans sprzedażowych przez brak follow-upu.\n\nKażdy etap lejka — od pierwszego kontaktu, przez kwalifikację, aż po zamknięcie — wymaga innego rodzaju uwagi. Dobrze skonfigurowany CRM pozwala zespołowi sprzedaży widzieć, gdzie utknęła dana szansa, i reagować zanim lead ostygnie.',
@@ -47,7 +47,7 @@ VALUES
     'published', 'sprzedaz', now()
   ),
   (
-    '00000000-0000-0000-0000-000000000001', 'pl',
+    '4a299a1b-9e33-43d7-b649-ead5a17d61fc', 'pl',
     'Upsell i cross-sell: jak systematycznie zwiększać wartość klienta',
     'upsell-cross-sell-w-crm',
     E'Upsell i cross-sell to nie przypadkowe okazje, tylko proces, który da się zaplanować i śledzić w CRM. W artykule opisujemy, jak oznaczać okazje do dosprzedaży, kiedy najlepiej je proponować i jak mierzyć skuteczność takich działań w czasie.\n\nKluczem jest widoczność: handlowiec, który widzi pełną historię klienta w jednym miejscu, łatwiej rozpoznaje moment, w którym warto zaproponować rozszerzenie usługi lub produkt komplementarny.',

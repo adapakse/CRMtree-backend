@@ -9,7 +9,7 @@ const { query, param } = require('express-validator');
 const db = require('../config/database');
 const { validate } = require('../middleware/errorHandler');
 
-const CRMTREE_TENANT_ID = '00000000-0000-0000-0000-000000000001';
+const CRMTREE_TENANT_ID = '4a299a1b-9e33-43d7-b649-ead5a17d61fc';
 
 // ── GET /api/public/blog ──────────────────────────────────────────
 router.get('/',
