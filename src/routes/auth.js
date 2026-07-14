@@ -25,8 +25,17 @@ async function isTenantDeleted(tenantId) {
 // Lokalnie i na htcd (NODE_ENV=development) używany jest stub poniżej.
 if (process.env.NODE_ENV !== 'development') {
 
+  // SAML strategy is only registered in middleware/auth.js when SAML_IDP_CERT
+  // is set — calling passport.authenticate('saml') without it throws
+  // "Unknown authentication strategy" and crashes the request. Guard both
+  // routes so an unconfigured tenant gets a clean error instead of a 500.
+  const samlNotConfigured = (req, res) => {
+    res.status(503).json({ error: 'Logowanie SSO (SAML) nie jest jeszcze skonfigurowane dla tego tenanta.' });
+  };
+
   // GET /api/auth/saml — redirect do IdP (Google Workspace)
   router.get('/saml', (req, res, next) => {
+    if (!config.saml?.idpCert) return samlNotConfigured(req, res);
     logger.info('[SAML] Inicjowanie logowania → redirect do IdP', {
       entryPoint:  config.saml?.entryPoint,
       issuer:      config.saml?.issuer,
@@ -38,6 +47,7 @@ if (process.env.NODE_ENV !== 'development') {
   // POST /api/auth/saml/callback — Google odsyła SAML assertion tutaj
   router.post(
     '/saml/callback',
+    (req, res, next) => (config.saml?.idpCert ? next() : samlNotConfigured(req, res)),
     injectAuditContext,
     (req, res, next) => {
       // ── DIAGNOSTYKA CERTYFIKATU — usuń po naprawieniu ─────────────────

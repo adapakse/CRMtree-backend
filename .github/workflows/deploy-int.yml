@@ -1,13 +1,13 @@
-name: Build & Deploy Backend
+name: Build & Deploy Backend (Integration)
 
 on:
   push:
-    branches: [master]
+    branches: [develop]
 
 env:
   ACR:      crmtreeregistry.azurecr.io
   ACR_USER: crmtreeregistry
-  APP_NAME: crmtree-backend
+  APP_NAME: crmtree-backend-int
   RG:       rg-crmtree-prod
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
         env:
           DB_HOST:     ${{ secrets.DB_HOST }}
           DB_PORT:     ${{ secrets.DB_PORT }}
-          DB_NAME:     ${{ secrets.DB_NAME }}
+          DB_NAME:     ${{ secrets.DB_NAME_INT }}
           DB_USER:     ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_SSL:      "true"
@@ -46,10 +46,10 @@ jobs:
       - name: Build Docker image
         env:
           DOCKER_BUILDKIT: 0
-        run: docker build -t ${{ env.ACR }}/${{ env.APP_NAME }}:${{ github.run_number }} .
+        run: docker build -t ${{ env.ACR }}/crmtree-backend:int-${{ github.run_number }} .
 
       - name: Push to ACR
-        run: docker push ${{ env.ACR }}/${{ env.APP_NAME }}:${{ github.run_number }}
+        run: docker push ${{ env.ACR }}/crmtree-backend:int-${{ github.run_number }}
 
       - name: Deploy to Azure Container App
         run: |
@@ -61,4 +61,4 @@ jobs:
           az containerapp update \
             --name ${{ env.APP_NAME }} \
             --resource-group ${{ env.RG }} \
-            --image ${{ env.ACR }}/${{ env.APP_NAME }}:${{ github.run_number }}
+            --image ${{ env.ACR }}/crmtree-backend:int-${{ github.run_number }}

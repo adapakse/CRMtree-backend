@@ -30,6 +30,7 @@ const crmGmail 		  = require('./routes/crm-gmail');
 const crmOutlook      = require('./routes/crm-outlook');
 const crmZoho         = require('./routes/crm-zoho');
 const crmEmail        = require('./routes/crm-email');
+const publicBlogRoutes    = require('./routes/public-blog');
 
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
@@ -43,6 +44,7 @@ const crmBudgetsRoutes      = require('./routes/crm-budgets');
 const crmChurnRoutes        = require('./routes/crm-churn');
 const crmDocumentsRoutes    = require('./routes/crm-documents');
 const crmConsentsRoutes     = require('./routes/crm-consents');
+const crmSeoRoutes          = require('./routes/crm-seo');
 
 require('./middleware/auth');
 
@@ -139,6 +141,7 @@ app.get('/health', async (req, res) => {
 });
 
 // ─── API Routes ───────────────────────────────────────────
+app.use('/api/public/blog',     publicBlogRoutes);
 app.use('/api/auth',            authRoutes);
 app.use('/api/documents',       documentRoutes);
 
@@ -174,6 +177,7 @@ app.use('/api/crm/budgets',      crmBudgetsRoutes);
 app.use('/api/crm/churn',        crmChurnRoutes);
 app.use('/api/crm/documents',    crmDocumentsRoutes);
 app.use('/api/crm/consents',     crmConsentsRoutes);
+app.use('/api/crm/seo',          crmSeoRoutes);
 
 // ─── Workflow global endpoints ─────────────────────────────
 const { requireAuth } = require('./middleware/auth');
