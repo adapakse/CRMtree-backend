@@ -19,7 +19,8 @@ router.get('/',
     try {
       const locale = req.query.locale || 'pl';
       const { rows } = await db.query(
-        `SELECT id, title, slug, meta_description, category, header_image_url, published_at
+        `SELECT id, title, slug, meta_description, category, header_image_url, published_at,
+                GREATEST(1, CEIL(array_length(regexp_split_to_array(trim(body), '\\s+'), 1) / 200.0))::int AS reading_minutes
            FROM seo_content_pieces
           WHERE tenant_id = $1 AND locale = $2 AND status = 'published'
           ORDER BY published_at DESC`,
@@ -38,7 +39,8 @@ router.get('/:slug',
     try {
       const locale = req.query.locale || 'pl';
       const { rows } = await db.query(
-        `SELECT id, title, slug, body, meta_description, category, header_image_url, published_at
+        `SELECT id, title, slug, body, meta_description, category, header_image_url, published_at,
+                GREATEST(1, CEIL(array_length(regexp_split_to_array(trim(body), '\\s+'), 1) / 200.0))::int AS reading_minutes
            FROM seo_content_pieces
           WHERE tenant_id = $1 AND locale = $2 AND slug = $3 AND status = 'published'`,
         [CRMTREE_TENANT_ID, locale, req.params.slug],
