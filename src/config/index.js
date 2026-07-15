@@ -134,4 +134,8 @@ module.exports = {
     apiUrl: optional("HTCD_API_URL", "https://api-htcd.worktrips.com"),
     apiKey: optional("HTCD_API_KEY"),
   },
+
+  anthropic: {
+    apiKey: optional("ANTHROPIC_API_KEY"),
+  },
 };

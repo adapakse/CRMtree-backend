@@ -1,9 +1,7 @@
 'use strict';
 // ─────────────────────────────────────────────────────────────────
-// routes/crm-seo.js — SEObot editorial panel + Search Console connection.
-// Content generation (Claude) is NOT wired here yet — no ANTHROPIC_API_KEY
-// configured. This covers everything that doesn't depend on it: the
-// content lifecycle, the mandatory editorial gate, and GSC OAuth.
+// routes/crm-seo.js — SEObot editorial panel, generation trigger, and
+// Search Console connection.
 // ─────────────────────────────────────────────────────────────────
 
 const router = require('express').Router();
@@ -14,6 +12,8 @@ const { requireAuth } = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, requireFeature } = require('../middleware/crm-rbac');
 const gscService = require('../services/gscService');
+const seoContentService = require('../services/seoContentService');
+const strategyService = require('../services/seoStrategyService');
 const logger = require('../utils/logger');
 
 router.use(requireAuth, injectAuditContext, crmAuth, requireFeature('seo_bot'));
@@ -139,6 +139,37 @@ router.post('/content/:id/reject',
     } catch (err) { next(err); }
   },
 );
+
+// ── POST /api/crm/seo/content/generate — manually trigger one article ─────
+// (autopilot/cron scheduling is a follow-up; this is the trigger used for
+// testing and for on-demand generation in the meantime).
+router.post('/content/generate',
+  requireSeoEditor,
+  async (req, res, next) => {
+    try {
+      const { rows: tenantRows } = await db.query(
+        `SELECT seo_daily_article_limit FROM tenants WHERE id = $1`,
+        [req.user.tenant_id],
+      );
+      const limit = tenantRows[0]?.seo_daily_article_limit ?? 0;
+      const generatedToday = await seoContentService.countGeneratedToday(req.user.tenant_id);
+      if (generatedToday >= limit) {
+        return res.status(429).json({ error: `Osiągnięto dzienny limit artykułów (${limit}).` });
+      }
+      const content = await seoContentService.generateArticle(req.user.tenant_id);
+      logger.info('SEO content generation triggered', { tenantId: req.user.tenant_id, contentId: content.id, triggeredBy: req.user.id });
+      res.status(201).json(content);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── GET /api/crm/seo/pillars — content strategy map (viewers, like /content) ──
+router.get('/pillars', async (req, res, next) => {
+  try {
+    const pillars = await strategyService.getPillarsWithCoverage(req.user.tenant_id);
+    res.json(pillars);
+  } catch (err) { next(err); }
+});
 
 // ── Google Search Console connection ───────────────────────────────────────
 router.get('/gsc/oauth/url', requireSeoEditor, (req, res) => {
