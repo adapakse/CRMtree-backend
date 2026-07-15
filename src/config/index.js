@@ -138,4 +138,8 @@ module.exports = {
   anthropic: {
     apiKey: optional("ANTHROPIC_API_KEY"),
   },
+
+  pexels: {
+    apiKey: optional("PEXELS_API_KEY"),
+  },
 };

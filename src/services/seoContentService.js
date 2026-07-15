@@ -20,6 +20,7 @@ const db = require('../config/database');
 const config = require('../config');
 const logger = require('../utils/logger');
 const strategyService = require('./seoStrategyService');
+const pexelsService = require('./pexelsService');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 
@@ -359,12 +360,14 @@ async function generateArticle(tenantId) {
     ? renderedBody
     : `[Automatyczna walidacja nie przeszła po ${attempts} próbach poprawy — wymaga ręcznej korekty]:\n${validation.errors.join('\n')}\n\n${renderedBody}`;
 
+  const headerImageUrl = await pexelsService.searchHeaderImage(pillar.name);
+
   const { rows: contentRows } = await db.query(
     `INSERT INTO seo_content_pieces
-       (tenant_id, locale, title, slug, body, meta_description, status, target_keyword, category, generation_cost_usd)
-     VALUES ($1, 'pl', $2, $3, $4, $5, $6, $7, $8, $9)
+       (tenant_id, locale, title, slug, body, meta_description, status, target_keyword, category, generation_cost_usd, header_image_url)
+     VALUES ($1, 'pl', $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
-    [tenantId, article.title, article.slug, body, article.meta_description, status, keyword.phrase, pillar.name, totalCostUsd.toFixed(4)],
+    [tenantId, article.title, article.slug, body, article.meta_description, status, keyword.phrase, pillar.name, totalCostUsd.toFixed(4), headerImageUrl],
   );
 
   await db.query(`UPDATE seo_keywords SET content_id = $1 WHERE id = $2`, [contentRows[0].id, keywordId]);
