@@ -1,14 +1,15 @@
 'use strict';
 // src/services/whatsappService.js
 //
-// WhatsApp Cloud API (Meta) — tenant-scoped outbound text messaging.
-// Mirrors the tenant_email_providers model: one shared company WhatsApp
-// number per tenant, configured by a super admin in Tenant management
-// (see routes/admin-tenants.js, tenant_whatsapp_config), never per-user.
+// WhatsApp Cloud API (Meta) — tenant-scoped messaging. Mirrors the
+// tenant_email_providers model: one shared company WhatsApp number per
+// tenant, configured by a super admin in Tenant management (see
+// routes/admin-tenants.js, tenant_whatsapp_config), never per-user.
 //
-// Step 2 scope: outbound text messages only. No webhook, no inbound
-// handling, no message templates — those are later steps.
+// Outbound send + inbound webhook (messages + delivery/read statuses). No
+// message templates yet.
 
+const crypto = require('crypto');
 const { pool } = require('../config/database');
 const { decrypt } = require('../utils/encrypt');
 
@@ -126,10 +127,140 @@ async function sendTextMessage({ tenantId, to, body }) {
   return { messageId: data?.messages?.[0]?.id || null, fromPhone: cfg.displayPhoneNumber };
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Webhook helpers (incoming messages + delivery/read status updates)
+// ─────────────────────────────────────────────────────────────────
+
+// GET /webhook handshake: `webhook_verify_token` is encrypted per-tenant, so
+// there's no way to look it up by value — instead, decrypt every enabled
+// tenant's token and timing-safe-compare each against what Meta sent. Tenant
+// counts here are small (one row per tenant with WhatsApp configured), so a
+// full scan per verification request is cheap and avoids ever storing the
+// token in a directly queryable (plaintext or hashed-for-lookup) form.
+async function verifyWebhookToken(candidateToken) {
+  if (!candidateToken) return false;
+  const candidateBuf = Buffer.from(String(candidateToken));
+  const { rows } = await pool.query(
+    `SELECT webhook_verify_token FROM tenant_whatsapp_config WHERE is_enabled = true`,
+  );
+  for (const row of rows) {
+    const decrypted = decrypt(row.webhook_verify_token);
+    if (!decrypted) continue;
+    const decryptedBuf = Buffer.from(decrypted);
+    if (decryptedBuf.length !== candidateBuf.length) continue;
+    if (crypto.timingSafeEqual(decryptedBuf, candidateBuf)) return true;
+  }
+  return false;
+}
+
+// Resolves the tenant a POST /webhook delivery belongs to, from the
+// `phone_number_id` Meta always includes in value.metadata. Returns the
+// still-encrypted app_secret — decrypting is the caller's job, since it's
+// only needed once signature verification is actually attempted.
+async function findTenantConfigByPhoneNumberId(phoneNumberId) {
+  if (!phoneNumberId) return null;
+  const { rows } = await pool.query(
+    `SELECT tenant_id, phone_number_id, display_phone_number, app_secret
+     FROM tenant_whatsapp_config
+     WHERE phone_number_id = $1 AND is_enabled = true`,
+    [phoneNumberId],
+  );
+  if (!rows.length) return null;
+  return {
+    tenantId:           rows[0].tenant_id,
+    phoneNumberId:      rows[0].phone_number_id,
+    displayPhoneNumber: rows[0].display_phone_number || rows[0].phone_number_id,
+    appSecretEncrypted: rows[0].app_secret,
+  };
+}
+
+// `rawBody` must be the exact bytes Meta signed (a Buffer captured by
+// express.json()'s verify hook in app.js) — re-serializing req.body to JSON
+// would not reliably reproduce the same bytes and would break verification.
+function verifyWebhookSignature(rawBody, appSecret, signatureHeader) {
+  if (!rawBody || !appSecret || !signatureHeader) return false;
+  if (!signatureHeader.startsWith('sha256=')) return false;
+
+  const expected = crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
+  const providedHex = signatureHeader.slice('sha256='.length);
+
+  let expectedBuf, providedBuf;
+  try {
+    expectedBuf = Buffer.from(expected, 'hex');
+    providedBuf = Buffer.from(providedHex, 'hex');
+  } catch {
+    return false;
+  }
+  if (expectedBuf.length !== providedBuf.length) return false;
+  return crypto.timingSafeEqual(expectedBuf, providedBuf);
+}
+
+// Digits-only form used purely for matching a webhook sender number against
+// crm_leads.phone/crm_partners.phone — never used for what's actually sent
+// to Meta (see normalizePhone above, which is stricter and throws on bad input).
+function normalizePhoneDigits(raw) {
+  return String(raw || '').replace(/\D/g, '');
+}
+
+// Exact digit-for-digit match only — never fuzzy/partial, per the "don't
+// guess" rule. Returns both ids null if there's zero or more-than-one match
+// in either table, or if the number matches both a lead AND a partner —
+// ambiguous matches are left unassigned rather than guessed.
+async function findCrmRecordByPhone(tenantId, digits) {
+  if (!digits) return { leadId: null, partnerId: null };
+
+  const [{ rows: leadRows }, { rows: partnerRows }] = await Promise.all([
+    pool.query(
+      `SELECT id FROM crm_leads
+       WHERE tenant_id = $1 AND phone IS NOT NULL AND regexp_replace(phone, '\\D', '', 'g') = $2`,
+      [tenantId, digits],
+    ),
+    pool.query(
+      `SELECT id FROM crm_partners
+       WHERE tenant_id = $1 AND phone IS NOT NULL AND regexp_replace(phone, '\\D', '', 'g') = $2`,
+      [tenantId, digits],
+    ),
+  ]);
+
+  if (leadRows.length === 1 && partnerRows.length === 0) return { leadId: leadRows[0].id, partnerId: null };
+  if (partnerRows.length === 1 && leadRows.length === 0) return { leadId: null, partnerId: partnerRows[0].id };
+  return { leadId: null, partnerId: null };
+}
+
+// ON CONFLICT targets the partial unique index from migration 0207
+// (tenant_id, meta_message_id) WHERE meta_message_id IS NOT NULL — DO NOTHING
+// makes a retried Meta webhook delivery a harmless no-op instead of a duplicate row.
+async function saveIncomingMessage({ tenantId, leadId, partnerId, fromPhone, toPhone, body, metaMessageId, rawPayload }) {
+  await pool.query(
+    `INSERT INTO whatsapp_messages
+       (tenant_id, lead_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, raw_payload)
+     VALUES ($1, $2, $3, 'incoming', $4, $5, $6, $7, 'received', $8)
+     ON CONFLICT (tenant_id, meta_message_id) WHERE meta_message_id IS NOT NULL DO NOTHING`,
+    [tenantId, leadId, partnerId, fromPhone, toPhone, body, metaMessageId, JSON.stringify(rawPayload)],
+  );
+}
+
+// No-op if the message isn't found (e.g. status arrived for a message this
+// tenant sent before whatsapp_messages existed, or an id typo from Meta).
+async function updateMessageStatus({ tenantId, metaMessageId, status }) {
+  if (!metaMessageId || !status) return;
+  await pool.query(
+    `UPDATE whatsapp_messages SET status = $1 WHERE tenant_id = $2 AND meta_message_id = $3`,
+    [status, tenantId, metaMessageId],
+  );
+}
+
 module.exports = {
   getStatus,
   sendTextMessage,
   WhatsappNotConfiguredError,
   WhatsappSendError,
   WhatsappInvalidPhoneError,
+  verifyWebhookToken,
+  findTenantConfigByPhoneNumberId,
+  verifyWebhookSignature,
+  normalizePhoneDigits,
+  findCrmRecordByPhone,
+  saveIncomingMessage,
+  updateMessageStatus,
 };

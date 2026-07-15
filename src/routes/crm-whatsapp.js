@@ -1,22 +1,121 @@
 'use strict';
 // src/routes/crm-whatsapp.js
 //
-// CRM WhatsApp API — outbound text messages only (step 2). No webhook, no
-// inbound handling, no message templates yet.
+// CRM WhatsApp API — outbound send + inbound webhook (messages/statuses). No
+// message templates yet.
 //
-// tenantId always comes from req.user (set by requireAuth) — never from the
-// request body/params — so a lead/partner belonging to another tenant can
-// never be messaged, and the calling user never sees or chooses WhatsApp
-// configuration (that's superadmin-only, in routes/admin-tenants.js).
+// tenantId for the authenticated CRM endpoints below always comes from
+// req.user (set by requireAuth) — never from the request body/params — so a
+// lead/partner belonging to another tenant can never be messaged, and the
+// calling user never sees or chooses WhatsApp configuration (that's
+// superadmin-only, in routes/admin-tenants.js).
+//
+// GET/POST /webhook are the one exception: Meta calls them directly, with no
+// CRM session, so they're registered BEFORE router.use(requireAuth, crmAuth)
+// below — Express matches routes in registration order, so these two never
+// reach that middleware. Their own auth is the handshake token (GET) and the
+// X-Hub-Signature-256 HMAC (POST), not a JWT.
 
 const router = require('express').Router();
 const { body, param } = require('express-validator');
 const db     = require('../config/database');
 const logger = require('../utils/logger');
+const { decrypt } = require('../utils/encrypt');
 const { requireAuth } = require('../middleware/auth');
 const { crmAuth }     = require('../middleware/crm-rbac');
 const { validate }    = require('../middleware/errorHandler');
 const whatsappService = require('../services/whatsappService');
+
+// ── GET /webhook — Meta verify handshake (public, no auth) ────────────────
+router.get('/webhook', async (req, res) => {
+  try {
+    const mode      = req.query['hub.mode'];
+    const token     = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+
+    if (mode === 'subscribe' && await whatsappService.verifyWebhookToken(token)) {
+      res.status(200).type('text/plain').send(challenge);
+      return;
+    }
+    res.status(403).json({ error: 'Verification failed' });
+  } catch (err) {
+    logger.error('WhatsApp webhook verify error', { error: err.message });
+    res.status(403).json({ error: 'Verification failed' });
+  }
+});
+
+// ── POST /webhook — incoming messages + delivery/read statuses (public, no auth) ──
+// req.body is already parsed (express.json() runs at the app level); req.rawBody
+// is the exact Buffer express.json()'s verify hook captured in app.js, needed
+// for HMAC signature verification since a re-serialized JSON body could differ
+// byte-for-byte from what Meta actually signed.
+router.post('/webhook', async (req, res) => {
+  try {
+    const entries     = Array.isArray(req.body?.entry) ? req.body.entry : [];
+    const allChanges   = entries.flatMap(e => Array.isArray(e.changes) ? e.changes : []);
+    const values       = allChanges.map(c => c.value).filter(Boolean);
+    const phoneNumberId = values.find(v => v.metadata?.phone_number_id)?.metadata?.phone_number_id;
+
+    if (!phoneNumberId) {
+      // Nothing routable to a tenant — ack so Meta doesn't retry, save nothing.
+      return res.status(200).json({ received: true });
+    }
+
+    const tenantConfig = await whatsappService.findTenantConfigByPhoneNumberId(phoneNumberId);
+    if (!tenantConfig) {
+      // Unknown/disabled phone_number_id — ack, save nothing.
+      return res.status(200).json({ received: true });
+    }
+
+    if (!tenantConfig.appSecretEncrypted) {
+      logger.warn('WhatsApp webhook: tenant has no app_secret configured, cannot verify signature', {
+        tenantId: tenantConfig.tenantId,
+      });
+      return res.status(401).json({ error: 'Signature verification not configured for this tenant' });
+    }
+
+    const appSecret       = decrypt(tenantConfig.appSecretEncrypted);
+    const signatureHeader = req.get('X-Hub-Signature-256');
+    if (!whatsappService.verifyWebhookSignature(req.rawBody, appSecret, signatureHeader)) {
+      logger.warn('WhatsApp webhook: signature verification failed', { tenantId: tenantConfig.tenantId });
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    for (const value of values) {
+      for (const message of value.messages || []) {
+        if (message.type !== 'text' || !message.id) continue;
+
+        const fromDigits = whatsappService.normalizePhoneDigits(message.from);
+        const { leadId, partnerId } = await whatsappService.findCrmRecordByPhone(tenantConfig.tenantId, fromDigits);
+
+        await whatsappService.saveIncomingMessage({
+          tenantId:      tenantConfig.tenantId,
+          leadId, partnerId,
+          fromPhone:     fromDigits ? `+${fromDigits}` : String(message.from || ''),
+          toPhone:       tenantConfig.displayPhoneNumber,
+          body:          message.text?.body ?? null,
+          metaMessageId: message.id,
+          rawPayload:    message,
+        });
+      }
+
+      for (const status of value.statuses || []) {
+        if (!status.id || !status.status) continue;
+        await whatsappService.updateMessageStatus({
+          tenantId:      tenantConfig.tenantId,
+          metaMessageId: status.id,
+          status:        status.status,
+        });
+      }
+    }
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    // Never let our own bug trigger a Meta retry storm — log and ack.
+    logger.error('WhatsApp webhook processing error', { error: err.message });
+    res.status(200).json({ received: true });
+  }
+});
 
 router.use(requireAuth, crmAuth);
 

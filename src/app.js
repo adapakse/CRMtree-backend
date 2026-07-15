@@ -97,7 +97,8 @@ app.use('/api/', rateLimit({
   skip: (req) => (
     config.isDev ||
     req.path.startsWith('/auth/') ||
-    req.path === '/signing/webhook'
+    req.path === '/signing/webhook' ||
+    req.path === '/crm/whatsapp/webhook'
   ),
 }));
 
@@ -117,7 +118,18 @@ app.use((req, res, next) => {
   }
 });
 
-app.use(express.json({ limit: '10mb' }));
+// WhatsApp webhook signature verification (X-Hub-Signature-256) needs the
+// exact raw bytes Meta signed, not the re-serialized JSON — capturing it here
+// via express.json()'s own verify hook avoids a second manual body-reader
+// (unlike /signing/webhook above) and doesn't affect any other route's parsing.
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    if (req.path === '/api/crm/whatsapp/webhook') {
+      req.rawBody = buf;
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(compression());
 
