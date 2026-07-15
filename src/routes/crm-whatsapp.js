@@ -89,20 +89,20 @@ router.post('/send/lead/:leadId',
         return res.status(400).json({ error: 'Brak numeru telefonu do wysyłki WhatsApp.' });
       }
 
-      const { messageId } = await whatsappService.sendTextMessage({
+      const { messageId, fromPhone } = await whatsappService.sendTextMessage({
         tenantId: req.tenantId, to: toPhone, body: req.body.message,
       });
 
-      const { rows: actRows } = await db.query(
-        `INSERT INTO crm_lead_activities
-           (lead_id, type, title, body, activity_at, created_by, tenant_id)
-         VALUES ($1, 'whatsapp', 'WhatsApp', $2, NOW(), $3, $4)
+      const { rows: msgRows } = await db.query(
+        `INSERT INTO whatsapp_messages
+           (tenant_id, lead_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by)
+         VALUES ($1, $2, 'outgoing', $3, $4, $5, $6, 'sent', $7)
          RETURNING id`,
-        [lead.id, req.body.message, req.user.id, req.tenantId],
+        [req.tenantId, lead.id, fromPhone, toPhone, req.body.message, messageId, req.user.id],
       );
 
       logger.info('WhatsApp message sent (lead)', { tenantId: req.tenantId, leadId: lead.id, by: req.user.email });
-      res.json({ messageId, activityId: actRows[0].id });
+      res.json({ messageId, id: msgRows[0].id });
     } catch (err) {
       sendServiceError(res, err, 'Błąd wysyłki WhatsApp');
     }
@@ -128,23 +128,94 @@ router.post('/send/partner/:partnerId',
         return res.status(400).json({ error: 'Brak numeru telefonu do wysyłki WhatsApp.' });
       }
 
-      const { messageId } = await whatsappService.sendTextMessage({
+      const { messageId, fromPhone } = await whatsappService.sendTextMessage({
         tenantId: req.tenantId, to: toPhone, body: req.body.message,
       });
 
-      const { rows: actRows } = await db.query(
-        `INSERT INTO crm_partner_activities
-           (partner_id, type, title, body, activity_at, created_by, tenant_id)
-         VALUES ($1, 'whatsapp', 'WhatsApp', $2, NOW(), $3, $4)
+      const { rows: msgRows } = await db.query(
+        `INSERT INTO whatsapp_messages
+           (tenant_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by)
+         VALUES ($1, $2, 'outgoing', $3, $4, $5, $6, 'sent', $7)
          RETURNING id`,
-        [partner.id, req.body.message, req.user.id, req.tenantId],
+        [req.tenantId, partner.id, fromPhone, toPhone, req.body.message, messageId, req.user.id],
       );
 
       logger.info('WhatsApp message sent (partner)', { tenantId: req.tenantId, partnerId: partner.id, by: req.user.email });
-      res.json({ messageId, activityId: actRows[0].id });
+      res.json({ messageId, id: msgRows[0].id });
     } catch (err) {
       sendServiceError(res, err, 'Błąd wysyłki WhatsApp');
     }
+  },
+);
+
+// ── GET /history/lead/:leadId — WhatsApp conversation for this lead ────────
+// Reads from whatsapp_messages (real conversation model), not activities.
+// Chronological ascending order, like an email thread. Outgoing-only until
+// the webhook/incoming step lands.
+router.get('/history/lead/:leadId',
+  [param('leadId').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const leadId = parseInt(req.params.leadId, 10);
+      const { rows: leadRows } = await db.query(
+        'SELECT id FROM crm_leads WHERE id = $1 AND tenant_id = $2',
+        [leadId, req.tenantId],
+      );
+      if (!leadRows.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
+
+      const { rows } = await db.query(
+        `SELECT m.id, m.created_at, m.direction, m.from_phone, m.to_phone, m.body, m.status,
+                u.display_name AS created_by_name
+         FROM whatsapp_messages m
+         LEFT JOIN users u ON u.id = m.created_by
+         WHERE m.lead_id = $1 AND m.tenant_id = $2
+         ORDER BY m.created_at ASC`,
+        [leadId, req.tenantId],
+      );
+
+      res.json(rows.map(r => ({
+        id: r.id,
+        created_at: r.created_at,
+        direction: r.direction,
+        from_phone: r.from_phone,
+        to_phone: r.to_phone,
+        message: r.body,
+        status: r.status,
+        created_by_name: r.created_by_name || null,
+      })));
+    } catch (err) { next(err); }
+  },
+);
+
+// ── GET /history/partner/:partnerId — WhatsApp conversation for this partner ──
+router.get('/history/partner/:partnerId',
+  [param('partnerId').isString().trim().notEmpty()], validate,
+  async (req, res, next) => {
+    try {
+      const partner = await resolvePartnerForWhatsapp(req.params.partnerId, req.tenantId);
+      if (!partner) return res.status(404).json({ error: 'Partner nie znaleziony' });
+
+      const { rows } = await db.query(
+        `SELECT m.id, m.created_at, m.direction, m.from_phone, m.to_phone, m.body, m.status,
+                u.display_name AS created_by_name
+         FROM whatsapp_messages m
+         LEFT JOIN users u ON u.id = m.created_by
+         WHERE m.partner_id = $1 AND m.tenant_id = $2
+         ORDER BY m.created_at ASC`,
+        [partner.id, req.tenantId],
+      );
+
+      res.json(rows.map(r => ({
+        id: r.id,
+        created_at: r.created_at,
+        direction: r.direction,
+        from_phone: r.from_phone,
+        to_phone: r.to_phone,
+        message: r.body,
+        status: r.status,
+        created_by_name: r.created_by_name || null,
+      })));
+    } catch (err) { next(err); }
   },
 );
 

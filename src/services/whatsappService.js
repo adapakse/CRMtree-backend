@@ -45,15 +45,19 @@ class WhatsappInvalidPhoneError extends Error {
 async function getTenantConfig(tenantId) {
   if (!tenantId) return null;
   const { rows } = await pool.query(
-    `SELECT phone_number_id, access_token, is_enabled
+    `SELECT phone_number_id, display_phone_number, access_token, is_enabled
      FROM tenant_whatsapp_config
      WHERE tenant_id = $1`,
     [tenantId],
   );
   if (!rows.length || !rows[0].is_enabled) return null;
   return {
-    phoneNumberId: rows[0].phone_number_id,
-    accessToken:   decrypt(rows[0].access_token),
+    phoneNumberId:      rows[0].phone_number_id,
+    // Prefer the human-readable display number; fall back to the technical
+    // phone_number_id if the tenant admin never filled it in, so callers
+    // (e.g. whatsapp_messages.from_phone) always have something to store.
+    displayPhoneNumber: rows[0].display_phone_number || rows[0].phone_number_id,
+    accessToken:        decrypt(rows[0].access_token),
   };
 }
 
@@ -119,7 +123,7 @@ async function sendTextMessage({ tenantId, to, body }) {
     throw new WhatsappSendError(`Błąd wysyłki WhatsApp (Meta): ${metaMessage}`);
   }
 
-  return { messageId: data?.messages?.[0]?.id || null };
+  return { messageId: data?.messages?.[0]?.id || null, fromPhone: cfg.displayPhoneNumber };
 }
 
 module.exports = {
