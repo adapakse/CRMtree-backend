@@ -230,7 +230,7 @@ async function generateOutline({ keyword, pillar, publishedArticles }) {
           publishedArticles.length
             ? `Już opublikowane artykuły (kandydaci do linkowania wewnętrznego):\n${publishedArticles.map((a) => `- ${a.slug}: ${a.title}`).join('\n')}`
             : 'Brak jeszcze opublikowanych artykułów do linkowania wewnętrznego — zostaw internal_link_candidates puste.',
-          'Zaproponuj strukturę artykułu: H1, sekcje H2/H3 z krótkim opisem zawartości, pytania FAQ, szkic meta title/description, kandydatów na linki wewnętrzne.',
+          'Zaproponuj strukturę artykułu: H1, sekcje H2/H3 z krótkim opisem zawartości (maksymalnie 8 sekcji łącznie — połącz pokrewne wątki, jeśli masz ich więcej), pytania FAQ (3-5), szkic meta title/description, kandydatów na linki wewnętrzne.',
         ].join('\n\n'),
       },
     ],
