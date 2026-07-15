@@ -30,6 +30,7 @@ const crmGmail 		  = require('./routes/crm-gmail');
 const crmOutlook      = require('./routes/crm-outlook');
 const crmZoho         = require('./routes/crm-zoho');
 const crmEmail        = require('./routes/crm-email');
+const crmWhatsapp     = require('./routes/crm-whatsapp');
 const publicBlogRoutes    = require('./routes/public-blog');
 
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
@@ -160,6 +161,7 @@ app.use('/api/crm/gmail',   crmGmail);
 app.use('/api/crm/outlook', crmOutlook);
 app.use('/api/crm/zoho',    crmZoho);
 app.use('/api/crm/email',   crmEmail);
+app.use('/api/crm/whatsapp', crmWhatsapp);
 
 app.use('/api/groups',          groupRoutes);
 app.use('/api/document-groups', documentGroupRoutes);
