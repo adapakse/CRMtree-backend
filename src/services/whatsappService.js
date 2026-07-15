@@ -227,6 +227,59 @@ async function findCrmRecordByPhone(tenantId, digits) {
   return { leadId: null, partnerId: null };
 }
 
+// Matches an incoming sender against this tenant's own most recent outgoing
+// message to that same number — i.e. "who did we message that this reply is
+// answering?". This is checked before findCrmRecordByPhone because a lead's
+// crm_leads.phone can be blank/stale/differently formatted while the actual
+// WhatsApp thread (what we sent to, what they replied from) is still exact.
+// Only conversations already assigned to a lead/partner count as a match, so
+// this can never assign an incoming message based on another unassigned one.
+async function findConversationByPhone(tenantId, digits) {
+  if (!digits) return { leadId: null, partnerId: null };
+  const { rows } = await pool.query(
+    `SELECT lead_id, partner_id
+     FROM whatsapp_messages
+     WHERE tenant_id = $1
+       AND direction = 'outgoing'
+       AND regexp_replace(to_phone, '\\D', '', 'g') = $2
+       AND (lead_id IS NOT NULL OR partner_id IS NOT NULL)
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [tenantId, digits],
+  );
+  if (!rows.length) return { leadId: null, partnerId: null };
+  return { leadId: rows[0].lead_id, partnerId: rows[0].partner_id };
+}
+
+// Single entry point the webhook uses to decide who an incoming message
+// belongs to. Order of preference: existing conversation (see
+// findConversationByPhone) first, direct crm_leads/crm_partners phone match
+// second, unassigned otherwise. Returns match flags alongside the ids purely
+// for safe (no-phone-number) diagnostic logging in the webhook route.
+async function resolveIncomingSender(tenantId, digits) {
+  const conversationMatch = await findConversationByPhone(tenantId, digits);
+  const conversationMatchFound = Boolean(conversationMatch.leadId || conversationMatch.partnerId);
+  if (conversationMatchFound) {
+    return {
+      leadId: conversationMatch.leadId,
+      partnerId: conversationMatch.partnerId,
+      conversationMatchFound: true,
+      crmPhoneMatchFound: false,
+      assignedTo: conversationMatch.leadId ? 'lead' : 'partner',
+    };
+  }
+
+  const crmMatch = await findCrmRecordByPhone(tenantId, digits);
+  const crmPhoneMatchFound = Boolean(crmMatch.leadId || crmMatch.partnerId);
+  return {
+    leadId: crmMatch.leadId,
+    partnerId: crmMatch.partnerId,
+    conversationMatchFound: false,
+    crmPhoneMatchFound,
+    assignedTo: crmMatch.leadId ? 'lead' : (crmMatch.partnerId ? 'partner' : 'unassigned'),
+  };
+}
+
 // ON CONFLICT targets the partial unique index from migration 0207
 // (tenant_id, meta_message_id) WHERE meta_message_id IS NOT NULL — DO NOTHING
 // makes a retried Meta webhook delivery a harmless no-op instead of a duplicate row.
@@ -261,6 +314,7 @@ module.exports = {
   verifyWebhookSignature,
   normalizePhoneDigits,
   findCrmRecordByPhone,
+  resolveIncomingSender,
   saveIncomingMessage,
   updateMessageStatus,
 };

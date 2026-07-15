@@ -50,20 +50,53 @@ router.get('/webhook', async (req, res) => {
 // for HMAC signature verification since a re-serialized JSON body could differ
 // byte-for-byte from what Meta actually signed.
 router.post('/webhook', async (req, res) => {
+  // Diagnostic logging only — never the raw payload, tokens, or app secret.
+  // This is the first thing that runs, before anything can be skipped, so a
+  // real incoming message from a phone that never shows up further down
+  // (tenant lookup, signature check, ...) still leaves a trace here. If this
+  // very log line never appears for a real phone-sent message, the request
+  // never reached this process at all (Meta didn't send it, or it died at
+  // the tunnel/proxy) — that's a problem outside this codebase.
+  const hasRawBody        = Buffer.isBuffer(req.rawBody);
+  const hasSignatureHeader = Boolean(req.get('X-Hub-Signature-256'));
+  const entries            = Array.isArray(req.body?.entry) ? req.body.entry : [];
+
+  logger.info('whatsapp webhook POST received', {
+    hasRawBody,
+    rawBodyLength: hasRawBody ? req.rawBody.length : 0,
+    hasSignatureHeader,
+    hasEntry: entries.length > 0,
+    entryCount: entries.length,
+  });
+
   try {
-    const entries     = Array.isArray(req.body?.entry) ? req.body.entry : [];
-    const allChanges   = entries.flatMap(e => Array.isArray(e.changes) ? e.changes : []);
-    const values       = allChanges.map(c => c.value).filter(Boolean);
+    const allChanges    = entries.flatMap(e => Array.isArray(e.changes) ? e.changes : []);
+    const values        = allChanges.map(c => c.value).filter(Boolean);
     const phoneNumberId = values.find(v => v.metadata?.phone_number_id)?.metadata?.phone_number_id;
+    const messagesCount = values.reduce((n, v) => n + (Array.isArray(v.messages) ? v.messages.length : 0), 0);
+    const statusesCount = values.reduce((n, v) => n + (Array.isArray(v.statuses) ? v.statuses.length : 0), 0);
+
+    logger.info('whatsapp webhook payload summary', {
+      hasPhoneNumberId: Boolean(phoneNumberId),
+      changesCount: allChanges.length,
+      valuesCount:  values.length,
+      messagesCount,
+      statusesCount,
+    });
 
     if (!phoneNumberId) {
       // Nothing routable to a tenant — ack so Meta doesn't retry, save nothing.
+      // A dashboard "Test" send often hits this, since its sample payload
+      // doesn't always carry a real metadata.phone_number_id.
+      logger.info('whatsapp webhook skipped', { reason: 'NO_PHONE_NUMBER_ID' });
       return res.status(200).json({ received: true });
     }
 
     const tenantConfig = await whatsappService.findTenantConfigByPhoneNumberId(phoneNumberId);
+    logger.info('whatsapp webhook tenant lookup', { tenantFound: Boolean(tenantConfig) });
     if (!tenantConfig) {
       // Unknown/disabled phone_number_id — ack, save nothing.
+      logger.info('whatsapp webhook skipped', { reason: 'NO_TENANT_CONFIG' });
       return res.status(200).json({ received: true });
     }
 
@@ -71,22 +104,39 @@ router.post('/webhook', async (req, res) => {
       logger.warn('WhatsApp webhook: tenant has no app_secret configured, cannot verify signature', {
         tenantId: tenantConfig.tenantId,
       });
+      logger.info('whatsapp webhook skipped', { reason: 'NO_APP_SECRET' });
       return res.status(401).json({ error: 'Signature verification not configured for this tenant' });
     }
 
     const appSecret       = decrypt(tenantConfig.appSecretEncrypted);
     const signatureHeader = req.get('X-Hub-Signature-256');
-    if (!whatsappService.verifyWebhookSignature(req.rawBody, appSecret, signatureHeader)) {
+    const signatureValid  = whatsappService.verifyWebhookSignature(req.rawBody, appSecret, signatureHeader);
+    logger.info('whatsapp webhook signature check', { signatureValid });
+    if (!signatureValid) {
       logger.warn('WhatsApp webhook: signature verification failed', { tenantId: tenantConfig.tenantId });
+      logger.info('whatsapp webhook skipped', { reason: 'INVALID_SIGNATURE' });
       return res.status(401).json({ error: 'Invalid signature' });
     }
+
+    if (messagesCount === 0 && statusesCount === 0) {
+      logger.info('whatsapp webhook skipped', { reason: 'NO_MESSAGES_OR_STATUSES' });
+    }
+
+    let savedIncomingCount = 0;
+    let updatedStatusCount = 0;
 
     for (const value of values) {
       for (const message of value.messages || []) {
         if (message.type !== 'text' || !message.id) continue;
 
         const fromDigits = whatsappService.normalizePhoneDigits(message.from);
-        const { leadId, partnerId } = await whatsappService.findCrmRecordByPhone(tenantConfig.tenantId, fromDigits);
+        const {
+          leadId, partnerId, conversationMatchFound, crmPhoneMatchFound, assignedTo,
+        } = await whatsappService.resolveIncomingSender(tenantConfig.tenantId, fromDigits);
+
+        logger.info('whatsapp webhook incoming match', {
+          conversationMatchFound, crmPhoneMatchFound, assignedTo,
+        });
 
         await whatsappService.saveIncomingMessage({
           tenantId:      tenantConfig.tenantId,
@@ -97,6 +147,7 @@ router.post('/webhook', async (req, res) => {
           metaMessageId: message.id,
           rawPayload:    message,
         });
+        savedIncomingCount++;
       }
 
       for (const status of value.statuses || []) {
@@ -106,8 +157,13 @@ router.post('/webhook', async (req, res) => {
           metaMessageId: status.id,
           status:        status.status,
         });
+        updatedStatusCount++;
       }
     }
+
+    logger.info('whatsapp webhook processed', {
+      tenantId: tenantConfig.tenantId, savedIncomingCount, updatedStatusCount,
+    });
 
     res.status(200).json({ received: true });
   } catch (err) {
