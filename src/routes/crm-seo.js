@@ -14,6 +14,7 @@ const { crmAuth, requireFeature } = require('../middleware/crm-rbac');
 const gscService = require('../services/gscService');
 const seoContentService = require('../services/seoContentService');
 const strategyService = require('../services/seoStrategyService');
+const pexelsService = require('../services/pexelsService');
 const logger = require('../utils/logger');
 
 router.use(requireAuth, injectAuditContext, crmAuth, requireFeature('seo_bot'));
@@ -81,11 +82,12 @@ router.patch('/content/:id',
     body('title').optional().isString().trim().notEmpty(),
     body('body').optional().isString().trim().notEmpty(),
     body('meta_description').optional().isString().trim(),
+    body('header_image_url').optional({ nullable: true }).isString().trim(),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const fields = ['title', 'body', 'meta_description'].filter((f) => req.body[f] !== undefined);
+      const fields = ['title', 'body', 'meta_description', 'header_image_url'].filter((f) => req.body[f] !== undefined);
       if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
       const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(', ');
       const { rows } = await db.query(
@@ -95,6 +97,30 @@ router.patch('/content/:id',
       );
       if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
       res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── POST /api/crm/seo/content/:id/reroll-image — pick a different Pexels photo ──
+router.post('/content/:id/reroll-image',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT target_keyword, category, header_image_url FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      const query = rows[0].category || rows[0].target_keyword || 'business';
+      const newUrl = await pexelsService.searchHeaderImage(query, rows[0].header_image_url);
+      if (!newUrl) return res.status(502).json({ error: 'Nie udało się znaleźć zdjęcia w Pexels.' });
+      const { rows: updated } = await db.query(
+        `UPDATE seo_content_pieces SET header_image_url = $1 WHERE id = $2 AND tenant_id = $3 RETURNING *`,
+        [newUrl, req.params.id, req.user.tenant_id],
+      );
+      res.json(updated[0]);
     } catch (err) { next(err); }
   },
 );
