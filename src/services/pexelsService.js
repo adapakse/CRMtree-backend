@@ -11,20 +11,29 @@
 const config = require('../config');
 const logger = require('../utils/logger');
 
-// Picks randomly among the top results (rather than always the #1 match) so
-// re-rolling (see crm-seo.js POST /content/:id/reroll-image) has a real
-// chance of returning something different from excludeUrl.
+// Picks randomly among a wide, randomly-paged result set (rather than always
+// the top match) so re-rolling (see crm-seo.js POST /content/:id/reroll-image)
+// draws from a real pool instead of cycling the same handful of photos —
+// per_page=8/page=1 alone gives only 8 possible results total, which repeats
+// fast under repeated re-rolls.
 async function searchHeaderImage(query, excludeUrl = null) {
   if (!config.pexels.apiKey) return null;
   try {
-    const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=8&orientation=landscape&locale=pl-PL`;
-    const response = await fetch(url, { headers: { Authorization: config.pexels.apiKey } });
-    if (!response.ok) {
-      logger.warn('Pexels search failed', { query, status: response.status });
-      return null;
-    }
-    const data = await response.json();
-    const photos = (data.photos || []).map((p) => p.src?.large).filter(Boolean);
+    const page = 1 + Math.floor(Math.random() * 3); // spread across the first 3 pages
+    const fetchPage = async (p) => {
+      const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=40&page=${p}&orientation=landscape&locale=pl-PL`;
+      const response = await fetch(url, { headers: { Authorization: config.pexels.apiKey } });
+      if (!response.ok) {
+        logger.warn('Pexels search failed', { query, status: response.status });
+        return [];
+      }
+      const data = await response.json();
+      return (data.photos || []).map((photo) => photo.src?.large).filter(Boolean);
+    };
+
+    // Niche queries may not have enough results to fill a high page — fall back to page 1.
+    let photos = await fetchPage(page);
+    if (!photos.length && page !== 1) photos = await fetchPage(1);
     const candidates = excludeUrl ? photos.filter((u) => u !== excludeUrl) : photos;
     const pool = candidates.length ? candidates : photos;
     return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
