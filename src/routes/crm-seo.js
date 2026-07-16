@@ -135,7 +135,7 @@ router.post('/content/:id/approve',
       const { rows } = await db.query(
         `UPDATE seo_content_pieces
             SET status = 'published', published_at = now(), reviewed_by = $3
-          WHERE id = $1 AND tenant_id = $2 AND status IN ('in_review', 'needs_update')
+          WHERE id = $1 AND tenant_id = $2 AND status IN ('draft', 'in_review', 'needs_update')
           RETURNING *`,
         [req.params.id, req.user.tenant_id, req.user.id],
       );
