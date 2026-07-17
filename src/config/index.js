@@ -142,4 +142,17 @@ module.exports = {
   pexels: {
     apiKey: optional("PEXELS_API_KEY"),
   },
+
+  // SEObot Social — one-click multi-platform publishing at article publish time.
+  // X (Twitter) intentionally excluded for now (on hold, needs a paid API tier).
+  linkedin: {
+    clientId: optional("LINKEDIN_CLIENT_ID"),
+    clientSecret: optional("LINKEDIN_CLIENT_SECRET"),
+    redirectUri: optional("LINKEDIN_REDIRECT_URI", "http://localhost:3000/api/crm/seo/social/linkedin/oauth/callback"),
+  },
+  meta: {
+    appId: optional("META_APP_ID"),
+    appSecret: optional("META_APP_SECRET"),
+    redirectUri: optional("META_REDIRECT_URI", "http://localhost:3000/api/crm/seo/social/facebook/oauth/callback"),
+  },
 };

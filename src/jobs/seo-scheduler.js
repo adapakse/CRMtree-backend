@@ -20,7 +20,7 @@ async function publishDueArticles() {
     );
     for (const row of rows) {
       logger.info('[seo-scheduler] Published scheduled article', { contentId: row.id, tenantId: row.tenant_id, title: row.title });
-      socialService.generateAndSaveSocialPost(row.id, config.frontendUrl); // fire-and-forget
+      socialService.publishToConnectedPlatforms(row.id, row.tenant_id, config.frontendUrl); // fire-and-forget
     }
   } catch (err) {
     logger.error('[seo-scheduler] Tick error', { error: err.message });

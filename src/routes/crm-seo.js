@@ -18,6 +18,8 @@ const strategyService = require('../services/seoStrategyService');
 const pexelsService = require('../services/pexelsService');
 const backlinkService = require('../services/seoBacklinkService');
 const socialService = require('../services/seoSocialService');
+const linkedinService = require('../services/socialPublish/linkedinService');
+const metaService = require('../services/socialPublish/metaService');
 const logger = require('../utils/logger');
 
 router.use(requireAuth, injectAuditContext, crmAuth, requireFeature('seo_bot'));
@@ -172,18 +174,54 @@ router.post('/content/:id/reroll-image',
   },
 );
 
-// ── POST /api/crm/seo/content/:id/social-post/generate — (re)generate LinkedIn copy ──
-router.post('/content/:id/social-post/generate',
-  requireSeoEditor,
+// ── GET /api/crm/seo/content/:id/social-posts — per-platform publish status ──
+router.get('/content/:id/social-posts',
   [param('id').isInt()],
   validate,
   async (req, res, next) => {
     try {
-      const { rows } = await db.query(`SELECT id FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`, [req.params.id, req.user.tenant_id]);
+      const { rows } = await db.query(
+        `SELECT platform, status, body, remote_url, error_message, published_at
+           FROM seo_social_posts WHERE content_id = $1 AND tenant_id = $2 ORDER BY platform`,
+        [req.params.id, req.user.tenant_id],
+      );
+      res.json(rows);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── PATCH /api/crm/seo/content/:id/social-posts/:platform — hand-edit copy ──
+router.patch('/content/:id/social-posts/:platform',
+  requireSeoEditor,
+  [param('id').isInt(), param('platform').isIn(['linkedin', 'facebook', 'instagram']), body('body').isString().trim().notEmpty()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `UPDATE seo_social_posts SET body = $1
+          WHERE content_id = $2 AND tenant_id = $3 AND platform = $4 RETURNING *`,
+        [req.body.body, req.params.id, req.user.tenant_id, req.params.platform],
+      );
       if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
-      await socialService.generateAndSaveSocialPost(req.params.id, config.frontendUrl);
-      const { rows: updated } = await db.query(`SELECT * FROM seo_content_pieces WHERE id = $1`, [req.params.id]);
-      res.json(updated[0]);
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── POST /api/crm/seo/content/:id/social-posts/:platform/retry — (re)publish one platform ──
+router.post('/content/:id/social-posts/:platform/retry',
+  requireSeoEditor,
+  [param('id').isInt(), param('platform').isIn(['linkedin', 'facebook', 'instagram'])],
+  validate,
+  async (req, res, next) => {
+    try {
+      await socialService.retryPlatform(req.params.id, req.user.tenant_id, req.params.platform, config.frontendUrl);
+      const { rows } = await db.query(
+        `SELECT platform, status, body, remote_url, error_message, published_at FROM seo_social_posts WHERE content_id = $1 AND tenant_id = $2 AND platform = $3`,
+        [req.params.id, req.user.tenant_id, req.params.platform],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.json(rows[0]);
     } catch (err) { next(err); }
   },
 );
@@ -208,8 +246,10 @@ router.post('/content/:id/approve',
       );
       if (!rows[0]) return res.status(409).json({ error: 'Wpis nie jest w stanie oczekującym na akceptację.' });
       logger.info('SEO content approved', { contentId: req.params.id, reviewedBy: req.user.id, resultStatus: rows[0].status });
-      // Fire-and-forget — a social post is a nice-to-have, not part of the publish gate itself.
-      if (rows[0].status === 'published') socialService.generateAndSaveSocialPost(rows[0].id, config.frontendUrl);
+      // One-click publish: approving also fires social publishing to every connected
+      // platform. Fire-and-forget — a slow/failed platform never blocks the response,
+      // per-platform outcome lands in seo_social_posts (retry button in the panel).
+      if (rows[0].status === 'published') socialService.publishToConnectedPlatforms(rows[0].id, req.user.tenant_id, config.frontendUrl);
       res.json(rows[0]);
     } catch (err) { next(err); }
   },
@@ -454,6 +494,65 @@ router.post('/gsc/sync', requireSeoEditor, async (req, res, next) => {
     await syncGscMetrics(req.user.tenant_id, rows[0].site_url);
     res.json({ synced: true });
   } catch (err) { next(err); }
+});
+
+// ── Social channel connections (LinkedIn Company Page, Facebook Page + linked Instagram) ──
+router.get('/social/accounts', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT platform, account_name, connected_at FROM tenant_social_accounts WHERE tenant_id = $1`,
+      [req.user.tenant_id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+router.delete('/social/accounts/:platform',
+  requireSeoEditor,
+  [param('platform').isIn(['linkedin', 'facebook', 'instagram'])],
+  validate,
+  async (req, res, next) => {
+    try {
+      await db.query(`DELETE FROM tenant_social_accounts WHERE tenant_id = $1 AND platform = $2`, [req.user.tenant_id, req.params.platform]);
+      res.status(204).end();
+    } catch (err) { next(err); }
+  },
+);
+
+router.get('/social/linkedin/oauth/url', requireSeoEditor, (req, res) => {
+  res.json({ url: linkedinService.getAuthUrl(req.user.tenant_id, req.user.id) });
+});
+
+router.get('/social/linkedin/oauth/callback', async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=${encodeURIComponent(error)}`);
+    const parsed = linkedinService.parseOAuthState(state);
+    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=invalid_state`);
+    await linkedinService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId);
+    res.redirect(`${config.frontendUrl}/crm/seo?social=connected&platform=linkedin`);
+  } catch (err) {
+    logger.error('LinkedIn OAuth callback failed', { error: err.message });
+    res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=callback_failed`);
+  }
+});
+
+router.get('/social/facebook/oauth/url', requireSeoEditor, (req, res) => {
+  res.json({ url: metaService.getAuthUrl(req.user.tenant_id, req.user.id) });
+});
+
+router.get('/social/facebook/oauth/callback', async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=${encodeURIComponent(error)}`);
+    const parsed = metaService.parseOAuthState(state);
+    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=invalid_state`);
+    await metaService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId);
+    res.redirect(`${config.frontendUrl}/crm/seo?social=connected&platform=facebook`);
+  } catch (err) {
+    logger.error('Meta OAuth callback failed', { error: err.message });
+    res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=callback_failed`);
+  }
 });
 
 module.exports = router;
