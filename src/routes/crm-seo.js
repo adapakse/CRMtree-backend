@@ -17,6 +17,7 @@ const seoContentService = require('../services/seoContentService');
 const strategyService = require('../services/seoStrategyService');
 const pexelsService = require('../services/pexelsService');
 const backlinkService = require('../services/seoBacklinkService');
+const socialService = require('../services/seoSocialService');
 const logger = require('../utils/logger');
 
 router.use(requireAuth, injectAuditContext, crmAuth, requireFeature('seo_bot'));
@@ -128,11 +129,12 @@ router.patch('/content/:id',
     body('meta_description').optional().isString().trim(),
     body('header_image_url').optional({ nullable: true }).isString().trim(),
     body('scheduled_at').optional({ nullable: true }).isISO8601(),
+    body('social_post_linkedin').optional({ nullable: true }).isString().trim(),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const fields = ['title', 'body', 'meta_description', 'header_image_url', 'scheduled_at'].filter((f) => req.body[f] !== undefined);
+      const fields = ['title', 'body', 'meta_description', 'header_image_url', 'scheduled_at', 'social_post_linkedin'].filter((f) => req.body[f] !== undefined);
       if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
       const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(', ');
       const { rows } = await db.query(
@@ -170,6 +172,22 @@ router.post('/content/:id/reroll-image',
   },
 );
 
+// ── POST /api/crm/seo/content/:id/social-post/generate — (re)generate LinkedIn copy ──
+router.post('/content/:id/social-post/generate',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(`SELECT id FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`, [req.params.id, req.user.tenant_id]);
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      await socialService.generateAndSaveSocialPost(req.params.id, config.frontendUrl);
+      const { rows: updated } = await db.query(`SELECT * FROM seo_content_pieces WHERE id = $1`, [req.params.id]);
+      res.json(updated[0]);
+    } catch (err) { next(err); }
+  },
+);
+
 // ── POST /api/crm/seo/content/:id/approve — mandatory human gate before publish ──
 router.post('/content/:id/approve',
   requireSeoEditor,
@@ -190,6 +208,8 @@ router.post('/content/:id/approve',
       );
       if (!rows[0]) return res.status(409).json({ error: 'Wpis nie jest w stanie oczekującym na akceptację.' });
       logger.info('SEO content approved', { contentId: req.params.id, reviewedBy: req.user.id, resultStatus: rows[0].status });
+      // Fire-and-forget — a social post is a nice-to-have, not part of the publish gate itself.
+      if (rows[0].status === 'published') socialService.generateAndSaveSocialPost(rows[0].id, config.frontendUrl);
       res.json(rows[0]);
     } catch (err) { next(err); }
   },

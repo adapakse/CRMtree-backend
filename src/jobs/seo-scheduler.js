@@ -6,7 +6,9 @@
 // to ten job faktycznie przełącza status na 'published' o wyznaczonej porze.
 
 const db = require('../config/database');
+const config = require('../config');
 const logger = require('../utils/logger');
+const socialService = require('../services/seoSocialService');
 
 async function publishDueArticles() {
   try {
@@ -18,6 +20,7 @@ async function publishDueArticles() {
     );
     for (const row of rows) {
       logger.info('[seo-scheduler] Published scheduled article', { contentId: row.id, tenantId: row.tenant_id, title: row.title });
+      socialService.generateAndSaveSocialPost(row.id, config.frontendUrl); // fire-and-forget
     }
   } catch (err) {
     logger.error('[seo-scheduler] Tick error', { error: err.message });

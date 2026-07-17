@@ -414,4 +414,4 @@ async function generateArticle(tenantId) {
   return contentRows[0];
 }
 
-module.exports = { generateArticle, countGeneratedToday, validateArticle, renderBody };
+module.exports = { generateArticle, countGeneratedToday, validateArticle, renderBody, BRAND_VOICE };
