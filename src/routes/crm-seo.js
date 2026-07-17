@@ -16,6 +16,7 @@ const { runForTenant: syncGscMetrics } = require('../jobs/gsc-metrics-sync');
 const seoContentService = require('../services/seoContentService');
 const strategyService = require('../services/seoStrategyService');
 const pexelsService = require('../services/pexelsService');
+const backlinkService = require('../services/seoBacklinkService');
 const logger = require('../utils/logger');
 
 router.use(requireAuth, injectAuditContext, crmAuth, requireFeature('seo_bot'));
@@ -98,6 +99,25 @@ router.get('/content/:id',
   },
 );
 
+// ── GET /api/crm/seo/content/:id/internal-links — outgoing links (audit trail) ──
+router.get('/content/:id/internal-links',
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT l.id, l.status, t.id AS to_content_id, t.title AS to_title, t.slug AS to_slug
+           FROM seo_internal_links l
+           JOIN seo_content_pieces t ON t.id = l.to_content_id
+          WHERE l.from_content_id = $1 AND l.tenant_id = $2
+          ORDER BY l.created_at`,
+        [req.params.id, req.user.tenant_id],
+      );
+      res.json(rows);
+    } catch (err) { next(err); }
+  },
+);
+
 // ── PATCH /api/crm/seo/content/:id — edit before approval (redaktor) ──────
 router.patch('/content/:id',
   requireSeoEditor,
@@ -107,11 +127,12 @@ router.patch('/content/:id',
     body('body').optional().isString().trim().notEmpty(),
     body('meta_description').optional().isString().trim(),
     body('header_image_url').optional({ nullable: true }).isString().trim(),
+    body('scheduled_at').optional({ nullable: true }).isISO8601(),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const fields = ['title', 'body', 'meta_description', 'header_image_url'].filter((f) => req.body[f] !== undefined);
+      const fields = ['title', 'body', 'meta_description', 'header_image_url', 'scheduled_at'].filter((f) => req.body[f] !== undefined);
       if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
       const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(', ');
       const { rows } = await db.query(
@@ -156,21 +177,25 @@ router.post('/content/:id/approve',
   validate,
   async (req, res, next) => {
     try {
+      // Approving with a future scheduled_at queues it instead of publishing immediately —
+      // the scheduler job (jobs/seo-scheduler.js) flips it to published when the time comes.
       const { rows } = await db.query(
         `UPDATE seo_content_pieces
-            SET status = 'published', published_at = now(), reviewed_by = $3
+            SET status = CASE WHEN scheduled_at IS NOT NULL AND scheduled_at > now() THEN 'scheduled' ELSE 'published' END,
+                published_at = CASE WHEN scheduled_at IS NOT NULL AND scheduled_at > now() THEN NULL ELSE now() END,
+                reviewed_by = $3
           WHERE id = $1 AND tenant_id = $2 AND status IN ('draft', 'in_review', 'needs_update')
           RETURNING *`,
         [req.params.id, req.user.tenant_id, req.user.id],
       );
       if (!rows[0]) return res.status(409).json({ error: 'Wpis nie jest w stanie oczekującym na akceptację.' });
-      logger.info('SEO content approved', { contentId: req.params.id, reviewedBy: req.user.id });
+      logger.info('SEO content approved', { contentId: req.params.id, reviewedBy: req.user.id, resultStatus: rows[0].status });
       res.json(rows[0]);
     } catch (err) { next(err); }
   },
 );
 
-// ── POST /api/crm/seo/content/:id/unpublish — pull a published article back to draft ──
+// ── POST /api/crm/seo/content/:id/unpublish — pull a published/scheduled article back to draft ──
 router.post('/content/:id/unpublish',
   requireSeoEditor,
   [param('id').isInt()],
@@ -179,12 +204,12 @@ router.post('/content/:id/unpublish',
     try {
       const { rows } = await db.query(
         `UPDATE seo_content_pieces
-            SET status = 'draft', published_at = NULL, reviewed_by = $3
-          WHERE id = $1 AND tenant_id = $2 AND status = 'published'
+            SET status = 'draft', published_at = NULL, scheduled_at = NULL, reviewed_by = $3
+          WHERE id = $1 AND tenant_id = $2 AND status IN ('published', 'scheduled')
           RETURNING *`,
         [req.params.id, req.user.tenant_id, req.user.id],
       );
-      if (!rows[0]) return res.status(409).json({ error: 'Wpis nie jest opublikowany.' });
+      if (!rows[0]) return res.status(409).json({ error: 'Wpis nie jest opublikowany ani zaplanowany.' });
       logger.info('SEO content unpublished', { contentId: req.params.id, unpublishedBy: req.user.id });
       res.json(rows[0]);
     } catch (err) { next(err); }
@@ -281,6 +306,87 @@ router.delete('/competitors/:id',
       );
       if (!rowCount) return res.status(404).json({ error: 'Nie znaleziono.' });
       res.status(204).end();
+    } catch (err) { next(err); }
+  },
+);
+
+// ── Cross-tenant backlinks — opt-in, industry_vertical-gated, capped ──────
+router.get('/backlinks/opt-in', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(`SELECT seo_backlinks_opt_in AS opt_in FROM tenants WHERE id = $1`, [req.user.tenant_id]);
+    res.json({ opt_in: rows[0]?.opt_in ?? false });
+  } catch (err) { next(err); }
+});
+
+router.get('/backlinks', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT b.id, b.status, b.tenant_id, b.partner_tenant_id, b.created_at,
+              fc.title AS from_title, fc.slug AS from_slug,
+              tc.title AS to_title, tc.slug AS to_slug
+         FROM seo_backlinks b
+         JOIN seo_content_pieces fc ON fc.id = b.from_content_id
+         JOIN seo_content_pieces tc ON tc.id = b.to_content_id
+        WHERE b.tenant_id = $1
+        ORDER BY b.created_at DESC`,
+      [req.user.tenant_id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+router.post('/backlinks/opt-in',
+  requireSeoEditor,
+  [body('opt_in').isBoolean()],
+  validate,
+  async (req, res, next) => {
+    try {
+      await db.query(`UPDATE tenants SET seo_backlinks_opt_in = $1 WHERE id = $2`, [req.body.opt_in, req.user.tenant_id]);
+      res.json({ opt_in: req.body.opt_in });
+    } catch (err) { next(err); }
+  },
+);
+
+router.post('/backlinks/find-candidates', requireSeoEditor, async (req, res, next) => {
+  try {
+    const suggestions = await backlinkService.findCandidates(req.user.tenant_id);
+    res.json(suggestions);
+  } catch (err) {
+    if (err.message.includes('seo_backlinks_opt_in') || err.message.includes('industry_vertical')) {
+      return res.status(409).json({ error: err.message });
+    }
+    next(err);
+  }
+});
+
+router.post('/backlinks/:id/accept',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `UPDATE seo_backlinks SET status = 'accepted' WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+router.post('/backlinks/:id/reject',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `UPDATE seo_backlinks SET status = 'rejected' WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.json(rows[0]);
     } catch (err) { next(err); }
   },
 );

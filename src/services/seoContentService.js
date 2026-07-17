@@ -21,6 +21,7 @@ const config = require('../config');
 const logger = require('../utils/logger');
 const strategyService = require('./seoStrategyService');
 const pexelsService = require('./pexelsService');
+const gscService = require('./gscService');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 
@@ -189,12 +190,13 @@ function renderBody(article) {
 
 // ── Pipeline stages ─────────────────────────────────────────────────────
 
-async function researchKeyword({ pillar, existingPhrases }) {
+async function researchKeyword({ pillar, existingPhrases, gapQueries = [] }) {
   const response = await client.messages.parse({
     model: RESEARCH_MODEL,
     max_tokens: 2000,
     system:
-      'You are an SEO keyword researcher for a B2B CRM company blog. Given a content pillar, propose ONE new target keyword phrase that fits within it, is distinct from already-used phrases, and has realistic search intent. Write the phrase and reasoning in Polish.',
+      'You are an SEO keyword researcher for a B2B CRM company blog. Given a content pillar, propose ONE new target keyword phrase that fits within it, is distinct from already-used phrases, and has realistic search intent. ' +
+      'If a real Google Search Console query is provided and fits the pillar well, strongly prefer reusing it verbatim — it is a confirmed, real search, not a guess. Write the phrase and reasoning in Polish.',
     messages: [
       {
         role: 'user',
@@ -204,6 +206,9 @@ async function researchKeyword({ pillar, existingPhrases }) {
           `Tematyka fraz dla tego filaru: ${pillar.target_keyword_theme}`,
           existingPhrases.length
             ? `Frazy już wykorzystane (nie powtarzaj):\n${existingPhrases.map((p) => `- ${p}`).join('\n')}`
+            : null,
+          gapQueries.length
+            ? `Realne zapytania z Google Search Console — ludzie już ich szukają, ale strona słabo się na nie pozycjonuje (szansa na treść):\n${gapQueries.map((q) => `- "${q.phrase}" (${q.impressions} wyświetleń, śr. pozycja ${q.position})`).join('\n')}`
             : null,
         ]
           .filter(Boolean)
@@ -219,7 +224,9 @@ async function researchKeyword({ pillar, existingPhrases }) {
 async function generateOutline({ keyword, pillar, publishedArticles }) {
   const response = await client.messages.parse({
     model: OUTLINE_MODEL,
-    max_tokens: 3000,
+    // 3000 was tight enough that a full 8-section outline + FAQ + link candidates
+    // occasionally got cut off mid-string, producing invalid JSON.
+    max_tokens: 4500,
     system: `You are an SEO content outline writer. ${BRAND_VOICE}`,
     messages: [
       {
@@ -309,7 +316,7 @@ async function generateArticle(tenantId) {
 
   const { rows: existingKeywords } = await db.query(`SELECT phrase FROM seo_keywords WHERE tenant_id = $1`, [tenantId]);
   const { rows: published } = await db.query(
-    `SELECT slug, title FROM seo_content_pieces WHERE tenant_id = $1 AND locale = 'pl' AND status = 'published'`,
+    `SELECT id, slug, title FROM seo_content_pieces WHERE tenant_id = $1 AND locale = 'pl' AND status = 'published'`,
     [tenantId],
   );
   const validSlugs = new Set(published.map((p) => p.slug));
@@ -317,13 +324,23 @@ async function generateArticle(tenantId) {
   let totalCostUsd = 0;
   const track = (stage) => { totalCostUsd += costOf(stage.model, stage.usage); };
 
-  const research = await researchKeyword({ pillar, existingPhrases: existingKeywords.map((k) => k.phrase) });
+  // Real GSC queries (site already gets impressions for, but ranks poorly on) beat guesses —
+  // gracefully skip when GSC isn't connected or the API call fails for any reason.
+  let gapQueries = [];
+  try {
+    gapQueries = await gscService.getContentGapQueries(tenantId);
+  } catch (err) {
+    logger.info('SEO keyword research: no GSC content-gap data', { tenantId, reason: err.message });
+  }
+
+  const research = await researchKeyword({ pillar, existingPhrases: existingKeywords.map((k) => k.phrase), gapQueries });
   track(research);
   const keyword = research.result;
+  const usedGscQuery = gapQueries.some((q) => q.phrase.trim().toLowerCase() === keyword.phrase.trim().toLowerCase());
 
   const { rows: keywordRows } = await db.query(
-    `INSERT INTO seo_keywords (tenant_id, phrase, source, priority, pillar_id) VALUES ($1, $2, 'llm', 0, $3) RETURNING id`,
-    [tenantId, keyword.phrase, pillar.id],
+    `INSERT INTO seo_keywords (tenant_id, phrase, source, priority, pillar_id) VALUES ($1, $2, $3, 0, $4) RETURNING id`,
+    [tenantId, keyword.phrase, usedGscQuery ? 'gsc' : 'llm', pillar.id],
   );
   const keywordId = keywordRows[0].id;
 
@@ -371,6 +388,20 @@ async function generateArticle(tenantId) {
   );
 
   await db.query(`UPDATE seo_keywords SET content_id = $1 WHERE id = $2`, [contentRows[0].id, keywordId]);
+
+  // Internal links are already live in the body (renderBody's "Zobacz też" section) —
+  // this is an audit trail of what got linked, not a pre-publish review gate.
+  if (article.internal_link_suggestions?.length) {
+    for (const link of article.internal_link_suggestions) {
+      const target = published.find((p) => p.slug === link.target_slug);
+      if (!target) continue;
+      await db.query(
+        `INSERT INTO seo_internal_links (tenant_id, from_content_id, to_content_id, status)
+         VALUES ($1, $2, $3, 'accepted')`,
+        [tenantId, contentRows[0].id, target.id],
+      );
+    }
+  }
 
   logger.info('SEO article generated', {
     tenantId,

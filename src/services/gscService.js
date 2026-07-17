@@ -133,10 +133,39 @@ async function syncMetricsForContent(tenantId, contentId, pageUrl, date) {
   );
 }
 
+// ── Content-gap queries: real searches with meaningful impressions but a
+// weak position — signals for what to write about next, fed into keyword
+// research as real-world context alongside Claude's own suggestions ─────────
+async function getContentGapQueries(tenantId, { days = 28, minImpressions = 5, minPosition = 10, limit = 20 } = {}) {
+  const { oauth2, siteUrl } = await getAuthForTenant(tenantId);
+  const searchconsole = google.searchconsole({ version: "v1", auth: oauth2 });
+
+  const end = new Date();
+  const start = new Date(end.getTime() - days * 24 * 3600 * 1000);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+
+  const { data } = await searchconsole.searchanalytics.query({
+    siteUrl,
+    requestBody: {
+      startDate: fmt(start),
+      endDate: fmt(end),
+      dimensions: ["query"],
+      rowLimit: 250,
+    },
+  });
+
+  return (data.rows || [])
+    .filter((r) => r.impressions >= minImpressions && r.position >= minPosition)
+    .sort((a, b) => b.impressions - a.impressions)
+    .slice(0, limit)
+    .map((r) => ({ phrase: r.keys[0], impressions: r.impressions, position: Math.round(r.position * 10) / 10 }));
+}
+
 module.exports = {
   getAuthUrl,
   parseOAuthState,
   exchangeCodeAndSave,
   getAuthForTenant,
   syncMetricsForContent,
+  getContentGapQueries,
 };

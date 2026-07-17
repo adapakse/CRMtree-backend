@@ -8,6 +8,8 @@ const pubsubPoller = require("./services/pubsubPoller");
 const { migrate }  = require("./db/migrate");
 const { startDailyScoresJob } = require("./jobs/daily-scores");
 const { startGscMetricsSyncJob } = require("./jobs/gsc-metrics-sync");
+const { startSeoSchedulerJob } = require("./jobs/seo-scheduler");
+const { startSeoContentRefreshJob } = require("./jobs/seo-content-refresh");
 
 async function start() {
   // ─── Startup security checks ──────────────────────────────
@@ -36,6 +38,8 @@ async function start() {
     pubsubPoller.start();
     startDailyScoresJob();
     startGscMetricsSyncJob();
+    startSeoSchedulerJob();
+    startSeoContentRefreshJob();
   });
 
   // ─── Graceful shutdown ────────────────────────────────────
