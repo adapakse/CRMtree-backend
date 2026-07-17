@@ -12,6 +12,7 @@ const { requireAuth } = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, requireFeature } = require('../middleware/crm-rbac');
 const gscService = require('../services/gscService');
+const { runForTenant: syncGscMetrics } = require('../jobs/gsc-metrics-sync');
 const seoContentService = require('../services/seoContentService');
 const strategyService = require('../services/seoStrategyService');
 const pexelsService = require('../services/pexelsService');
@@ -42,15 +43,26 @@ router.get('/content',
   async (req, res, next) => {
     try {
       const params = [req.user.tenant_id];
-      let where = 'tenant_id = $1';
+      let where = 'c.tenant_id = $1';
       if (req.query.status) {
         params.push(req.query.status);
-        where += ` AND status = $${params.length}`;
+        where += ` AND c.status = $${params.length}`;
       }
       const { rows } = await db.query(
-        `SELECT id, locale, title, slug, status, target_keyword, category,
-                scheduled_at, published_at, reviewed_by, created_at, updated_at
-           FROM seo_content_pieces WHERE ${where} ORDER BY created_at DESC`,
+        `SELECT c.id, c.locale, c.title, c.slug, c.status, c.target_keyword, c.category,
+                c.scheduled_at, c.published_at, c.reviewed_by, c.created_at, c.updated_at,
+                COALESCE(m.clicks_28d, 0) AS clicks_28d,
+                COALESCE(m.impressions_28d, 0) AS impressions_28d,
+                m.avg_position_28d
+           FROM seo_content_pieces c
+           LEFT JOIN LATERAL (
+             SELECT SUM(clicks)::int AS clicks_28d,
+                    SUM(impressions)::int AS impressions_28d,
+                    ROUND(AVG(avg_position)::numeric, 1) AS avg_position_28d
+               FROM seo_metrics
+              WHERE content_id = c.id AND date >= CURRENT_DATE - INTERVAL '28 days'
+           ) m ON true
+          WHERE ${where} ORDER BY c.created_at DESC`,
         params,
       );
       res.json(rows);
@@ -65,7 +77,19 @@ router.get('/content/:id',
   async (req, res, next) => {
     try {
       const { rows } = await db.query(
-        `SELECT * FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
+        `SELECT c.*,
+                COALESCE(m.clicks_28d, 0) AS clicks_28d,
+                COALESCE(m.impressions_28d, 0) AS impressions_28d,
+                m.avg_position_28d
+           FROM seo_content_pieces c
+           LEFT JOIN LATERAL (
+             SELECT SUM(clicks)::int AS clicks_28d,
+                    SUM(impressions)::int AS impressions_28d,
+                    ROUND(AVG(avg_position)::numeric, 1) AS avg_position_28d
+               FROM seo_metrics
+              WHERE content_id = c.id AND date >= CURRENT_DATE - INTERVAL '28 days'
+           ) m ON true
+          WHERE c.id = $1 AND c.tenant_id = $2`,
         [req.params.id, req.user.tenant_id],
       );
       if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
@@ -218,6 +242,49 @@ router.get('/pillars', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Competitor research — editors maintain the list, seoStrategyService reads
+// it when (re)generating the content pillar map ───────────────────────────
+router.get('/competitors', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, url, notes, created_at FROM seo_competitors WHERE tenant_id = $1 ORDER BY created_at DESC`,
+      [req.user.tenant_id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+router.post('/competitors',
+  requireSeoEditor,
+  [body('url').isString().trim().notEmpty(), body('notes').optional({ nullable: true }).isString().trim()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO seo_competitors (tenant_id, url, notes) VALUES ($1, $2, $3) RETURNING id, url, notes, created_at`,
+        [req.user.tenant_id, req.body.url, req.body.notes || null],
+      );
+      res.status(201).json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+router.delete('/competitors/:id',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rowCount } = await db.query(
+        `DELETE FROM seo_competitors WHERE id = $1 AND tenant_id = $2`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (!rowCount) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.status(204).end();
+    } catch (err) { next(err); }
+  },
+);
+
 // ── Google Search Console connection ───────────────────────────────────────
 router.get('/gsc/oauth/url', requireSeoEditor, (req, res) => {
   res.json({ url: gscService.getAuthUrl(req.user.tenant_id, req.user.id) });
@@ -247,6 +314,19 @@ router.get('/gsc/status', async (req, res, next) => {
       [req.user.tenant_id],
     );
     res.json({ connected: !!rows.length, ...(rows[0] || {}) });
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/crm/seo/gsc/sync — manual metrics sync (the daily job runs at 07:00) ──
+router.post('/gsc/sync', requireSeoEditor, async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      'SELECT site_url FROM tenant_gsc_tokens WHERE tenant_id = $1',
+      [req.user.tenant_id],
+    );
+    if (!rows.length) return res.status(409).json({ error: 'Search Console nie jest podłączony.' });
+    await syncGscMetrics(req.user.tenant_id, rows[0].site_url);
+    res.json({ synced: true });
   } catch (err) { next(err); }
 });
 

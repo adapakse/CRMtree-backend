@@ -7,6 +7,7 @@ const db           = require("./config/database");
 const pubsubPoller = require("./services/pubsubPoller");
 const { migrate }  = require("./db/migrate");
 const { startDailyScoresJob } = require("./jobs/daily-scores");
+const { startGscMetricsSyncJob } = require("./jobs/gsc-metrics-sync");
 
 async function start() {
   // ─── Startup security checks ──────────────────────────────
@@ -34,6 +35,7 @@ async function start() {
     });
     pubsubPoller.start();
     startDailyScoresJob();
+    startGscMetricsSyncJob();
   });
 
   // ─── Graceful shutdown ────────────────────────────────────
