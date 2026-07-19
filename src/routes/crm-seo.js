@@ -8,7 +8,7 @@ const router = require('express').Router();
 const { body, param, query } = require('express-validator');
 const db = require('../config/database');
 const config = require('../config');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireSuperAdmin } = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, requireFeature } = require('../middleware/crm-rbac');
 const gscService = require('../services/gscService');
@@ -20,6 +20,7 @@ const backlinkService = require('../services/seoBacklinkService');
 const socialService = require('../services/seoSocialService');
 const linkedinService = require('../services/socialPublish/linkedinService');
 const metaService = require('../services/socialPublish/metaService');
+const wordpressService = require('../services/socialPublish/wordpressService');
 const logger = require('../utils/logger');
 
 // ── OAuth callbacks — registered BEFORE the auth gate below on purpose.
@@ -377,6 +378,71 @@ router.get('/pillars', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Manual pillar CRUD — on top of the auto-generated map, an editor can add
+// their own pillar the generator didn't think of, or tweak/remove one.
+// Single-row operations only — never touches the rest of the map. ─────────
+router.post('/pillars',
+  requireSeoEditor,
+  [
+    body('name').isString().trim().notEmpty(),
+    body('description').isString().trim().notEmpty(),
+    body('target_keyword_theme').isString().trim().notEmpty(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO seo_content_pillars (tenant_id, name, description, target_keyword_theme, priority)
+         VALUES ($1, $2, $3, $4, (SELECT COALESCE(MAX(priority), -1) + 1 FROM seo_content_pillars WHERE tenant_id = $1))
+         RETURNING id, name, description, target_keyword_theme, priority`,
+        [req.user.tenant_id, req.body.name, req.body.description, req.body.target_keyword_theme],
+      );
+      res.status(201).json({ ...rows[0], article_count: 0 });
+    } catch (err) { next(err); }
+  },
+);
+
+router.patch('/pillars/:id',
+  requireSeoEditor,
+  [
+    param('id').isInt(),
+    body('name').optional().isString().trim().notEmpty(),
+    body('description').optional().isString().trim().notEmpty(),
+    body('target_keyword_theme').optional().isString().trim().notEmpty(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const fields = ['name', 'description', 'target_keyword_theme'].filter((f) => req.body[f] !== undefined);
+      if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
+      const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(', ');
+      const { rows } = await db.query(
+        `UPDATE seo_content_pillars SET ${setClause}
+          WHERE id = $1 AND tenant_id = $2 RETURNING id, name, description, target_keyword_theme, priority`,
+        [req.params.id, req.user.tenant_id, ...fields.map((f) => req.body[f])],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+router.delete('/pillars/:id',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rowCount } = await db.query(
+        `DELETE FROM seo_content_pillars WHERE id = $1 AND tenant_id = $2`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (!rowCount) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.status(204).end();
+    } catch (err) { next(err); }
+  },
+);
+
 // ── Competitor research — editors maintain the list, seoStrategyService reads
 // it when (re)generating the content pillar map ───────────────────────────
 router.get('/competitors', async (req, res, next) => {
@@ -532,21 +598,30 @@ router.post('/gsc/sync', requireSeoEditor, async (req, res, next) => {
 // ── Social channel connections (LinkedIn Company Page, Facebook Page + linked Instagram) ──
 router.get('/social/accounts', async (req, res, next) => {
   try {
-    const { rows } = await db.query(
+    const { rows: oauthAccounts } = await db.query(
       `SELECT platform, account_name, connected_at FROM tenant_social_accounts WHERE tenant_id = $1`,
       [req.user.tenant_id],
     );
-    res.json(rows);
+    const { rows: wpAccounts } = await db.query(
+      `SELECT site_url, connected_at FROM tenant_wordpress_connections WHERE tenant_id = $1`,
+      [req.user.tenant_id],
+    );
+    const wp = wpAccounts[0] ? [{ platform: 'wordpress', account_name: wpAccounts[0].site_url, connected_at: wpAccounts[0].connected_at }] : [];
+    res.json([...oauthAccounts, ...wp]);
   } catch (err) { next(err); }
 });
 
 router.delete('/social/accounts/:platform',
   requireSeoEditor,
-  [param('platform').isIn(['linkedin', 'facebook', 'instagram'])],
+  [param('platform').isIn(['linkedin', 'facebook', 'instagram', 'wordpress'])],
   validate,
   async (req, res, next) => {
     try {
-      await db.query(`DELETE FROM tenant_social_accounts WHERE tenant_id = $1 AND platform = $2`, [req.user.tenant_id, req.params.platform]);
+      if (req.params.platform === 'wordpress') {
+        await db.query(`DELETE FROM tenant_wordpress_connections WHERE tenant_id = $1`, [req.user.tenant_id]);
+      } else {
+        await db.query(`DELETE FROM tenant_social_accounts WHERE tenant_id = $1 AND platform = $2`, [req.user.tenant_id, req.params.platform]);
+      }
       res.status(204).end();
     } catch (err) { next(err); }
   },
@@ -559,5 +634,83 @@ router.get('/social/linkedin/oauth/url', requireSeoEditor, (req, res) => {
 router.get('/social/facebook/oauth/url', requireSeoEditor, (req, res) => {
   res.json({ url: metaService.getAuthUrl(req.user.tenant_id, req.user.id) });
 });
+
+// ── WordPress connector — client tenants only; CRMtree keeps its own native
+// blog. No OAuth: the client generates an Application Password in their own
+// WP admin (Users → Profile) and gives us the username + password directly. ──
+router.post('/social/wordpress/connect',
+  requireSeoEditor,
+  [
+    body('site_url').isString().trim().notEmpty(),
+    body('username').isString().trim().notEmpty(),
+    body('app_password').isString().trim().notEmpty(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      await wordpressService.connect(req.user.tenant_id, req.body.site_url, req.body.username, req.body.app_password, req.user.id);
+      res.status(201).json({ connected: true });
+    } catch (err) {
+      if (err.message.includes('zweryfikować')) return res.status(400).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+// ── Tenant SEO settings — business_description/industry_vertical feed the
+// content-pillar generator (seoStrategyService). Any SEO editor can tune
+// these, same permission as the rest of this module. ─────────────────────
+router.get('/tenant-settings', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT business_description, industry_vertical FROM tenants WHERE id = $1`,
+      [req.user.tenant_id],
+    );
+    res.json(rows[0] || {});
+  } catch (err) { next(err); }
+});
+
+router.patch('/tenant-settings',
+  requireSeoEditor,
+  [
+    body('business_description').optional({ nullable: true }).isString().trim(),
+    body('industry_vertical').optional({ nullable: true }).isString().trim(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const fields = ['business_description', 'industry_vertical'].filter((f) => req.body[f] !== undefined);
+      if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
+      const setClause = fields.map((f, i) => `${f} = $${i + 2}`).join(', ');
+      const { rows } = await db.query(
+        `UPDATE tenants SET ${setClause} WHERE id = $1 RETURNING business_description, industry_vertical`,
+        [req.user.tenant_id, ...fields.map((f) => req.body[f])],
+      );
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── WordPress publish mode — SuperAdmin-only trust decision made after
+// talking to the client (live "publish" vs safe "draft"), not an SEO
+// editor's call. Defaults to 'draft'. ─────────────────────────────────────
+router.get('/tenant-settings/wordpress-publish-mode', requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await db.query(`SELECT wordpress_publish_mode FROM tenants WHERE id = $1`, [req.user.tenant_id]);
+    res.json({ wordpress_publish_mode: rows[0]?.wordpress_publish_mode ?? 'draft' });
+  } catch (err) { next(err); }
+});
+
+router.patch('/tenant-settings/wordpress-publish-mode',
+  requireSuperAdmin,
+  [body('wordpress_publish_mode').isIn(['draft', 'publish'])],
+  validate,
+  async (req, res, next) => {
+    try {
+      await db.query(`UPDATE tenants SET wordpress_publish_mode = $1 WHERE id = $2`, [req.body.wordpress_publish_mode, req.user.tenant_id]);
+      res.json({ wordpress_publish_mode: req.body.wordpress_publish_mode });
+    } catch (err) { next(err); }
+  },
+);
 
 module.exports = router;

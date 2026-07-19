@@ -21,8 +21,10 @@ const db = require('../config/database');
 const config = require('../config');
 const logger = require('../utils/logger');
 const { BRAND_VOICE } = require('./seoContentService');
+const { renderBodyHtml } = require('../utils/seoMarkdown');
 const linkedinService = require('./socialPublish/linkedinService');
 const metaService = require('./socialPublish/metaService');
+const wordpressService = require('./socialPublish/wordpressService');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 const MODEL = 'claude-sonnet-5';
@@ -85,6 +87,22 @@ async function publishToConnectedPlatforms(contentId, tenantId, siteUrl) {
     if (!connected.size) return; // nothing connected — nothing to do, not an error
 
     const articleUrl = `${(siteUrl || '').replace(/\/$/, '')}/blog/${article.slug}`;
+
+    // WordPress publishes the article itself (title/body/excerpt), not a short social
+    // blurb — no LLM copy generation needed, skip straight to the connector.
+    if (connected.has('wordpress')) {
+      await publishOne(tenantId, contentId, 'wordpress', article.body, () =>
+        wordpressService.publishPost(tenantId, {
+          title: article.title,
+          contentHtml: renderBodyHtml(article.body),
+          excerpt: article.meta_description,
+          imageUrl: article.header_image_url,
+          slug: article.slug,
+        }));
+    }
+
+    const needsSocialCopy = connected.has('linkedin') || connected.has('facebook') || connected.has('instagram');
+    if (!needsSocialCopy) return;
     const copy = await generateCopyVariants({ title: article.title, metaDescription: article.meta_description, articleUrl });
 
     if (connected.has('linkedin')) {
@@ -130,16 +148,23 @@ async function retryPlatform(contentId, tenantId, platform, siteUrl) {
     [contentId, platform],
   );
   const articleUrl = `${(siteUrl || '').replace(/\/$/, '')}/blog/${article.slug}`;
+
   let body = existing[0]?.body;
   if (!body) {
-    const copy = await generateCopyVariants({ title: article.title, metaDescription: article.meta_description, articleUrl });
-    body = copy[platform];
+    body = platform === 'wordpress' ? article.body : (await generateCopyVariants({ title: article.title, metaDescription: article.meta_description, articleUrl }))[platform];
   }
 
   const publishFn = {
     linkedin: () => linkedinService.publishPost(tenantId, { text: body, articleUrl, articleTitle: article.title, articleDescription: article.meta_description }),
     facebook: () => metaService.publishToFacebook(tenantId, { text: body, articleUrl }),
     instagram: () => metaService.publishToInstagram(tenantId, { caption: body, imageUrl: article.header_image_url }),
+    wordpress: () => wordpressService.publishPost(tenantId, {
+      title: article.title,
+      contentHtml: renderBodyHtml(body),
+      excerpt: article.meta_description,
+      imageUrl: article.header_image_url,
+      slug: article.slug,
+    }),
   }[platform];
   if (!publishFn) throw new Error(`Nieznana platforma: ${platform}`);
 
