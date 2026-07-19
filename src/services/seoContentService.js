@@ -63,16 +63,19 @@ const KeywordResearchSchema = z.object({
   phrase: z.string(),
   intent: z.enum(['informational', 'transactional']),
   difficulty: z.enum(['low', 'medium', 'high']),
-  recommended_word_count: z.number().int().min(800).max(3000),
+  // Capped so the finished article stays under ~5 min reading time (200 wpm).
+  recommended_word_count: z.number().int().min(600).max(1000),
   reasoning: z.string(),
 });
 
 const OutlineSchema = z.object({
   h1: z.string(),
+  // Fewer sections than before (was 8) — with a ~1000-word cap, 8 sections
+  // would leave each one too thin to say anything useful.
   sections: z
     .array(z.object({ heading: z.string(), level: z.enum(['h2', 'h3']), summary: z.string() }))
     .min(3)
-    .max(8),
+    .max(5),
   faq_questions: z.array(z.string()).min(3).max(5),
   meta_title_draft: z.string(),
   meta_description_draft: z.string(),
@@ -127,9 +130,10 @@ function validateArticle(article, primaryKeyword, validSlugSet) {
   const errors = [];
   const bodyText = article.sections.map((s) => s.content_markdown).join(' ');
 
+  // 5 min reading time cap at ~200 wpm → max 1000 words.
   const wordCount = countWords(bodyText);
-  if (wordCount < 1200 || wordCount > 3000) {
-    errors.push(`Liczba słów (${wordCount}) poza zakresem 1200-3000.`);
+  if (wordCount < 500 || wordCount > 1000) {
+    errors.push(`Liczba słów (${wordCount}) poza zakresem 500-1000 (limit: ok. 5 minut czytania).`);
   }
 
   if (!article.meta_title || article.meta_title.length > 60) {
@@ -237,7 +241,7 @@ async function generateOutline({ keyword, pillar, publishedArticles }) {
           publishedArticles.length
             ? `Już opublikowane artykuły (kandydaci do linkowania wewnętrznego):\n${publishedArticles.map((a) => `- ${a.slug}: ${a.title}`).join('\n')}`
             : 'Brak jeszcze opublikowanych artykułów do linkowania wewnętrznego — zostaw internal_link_candidates puste.',
-          'Zaproponuj strukturę artykułu: H1, sekcje H2/H3 z krótkim opisem zawartości (maksymalnie 8 sekcji łącznie — połącz pokrewne wątki, jeśli masz ich więcej), pytania FAQ (3-5), szkic meta title/description, kandydatów na linki wewnętrzne.',
+          `Zaproponuj strukturę artykułu: H1, sekcje H2/H3 z krótkim opisem zawartości (maksymalnie 5 sekcji łącznie — połącz pokrewne wątki, jeśli masz ich więcej), pytania FAQ (3-5), szkic meta title/description, kandydatów na linki wewnętrzne. Cały artykuł ma zmieścić się w ok. ${keyword.recommended_word_count} słowach (maks. 1000 słów / ~5 minut czytania) — planuj sekcje odpowiednio zwięźle.`,
         ].join('\n\n'),
       },
     ],
@@ -258,6 +262,7 @@ async function generateDraft({ outline, keyword }) {
         role: 'user',
         content: [
           "Napisz pełny artykuł na podstawie tego outline'u.",
+          `Twardy limit długości: cały artykuł (bez FAQ) maksymalnie ${keyword.recommended_word_count} słów, w żadnym razie więcej niż 1000 słów łącznie — to ma być czytelne w ok. 5 minut, nie wyczerpujący poradnik. Pisz zwięźle, bez rozwlekania sekcji.`,
           `H1: ${outline.h1}`,
           `Fraza kluczowa: ${keyword.phrase}`,
           `Sekcje:\n${outline.sections.map((s) => `- [${s.level}] ${s.heading}: ${s.summary}`).join('\n')}`,
