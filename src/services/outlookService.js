@@ -417,6 +417,17 @@ async function sendEmail({ userId, to, cc, subject, body, inReplyTo = null, refe
     throw new Error(`Wysyłka failed: ${err.error?.message || sendRes.status}`);
   }
 
+  // conversationId above was captured from createReply, before the subject
+  // was patched and before the message was actually sent. If the subject no
+  // longer matches the original, Graph can silently move the sent message to
+  // a NEW conversation — re-fetch it by its stable id to get the real,
+  // post-send conversationId instead of trusting the stale draft-time value.
+  const sentRes = await graphFetch(userId, `/me/messages/${draftId}?$select=conversationId`);
+  if (sentRes.ok) {
+    const sentData = await sentRes.json();
+    if (sentData.conversationId) conversationId = sentData.conversationId;
+  }
+
   return { messageId: draftId, threadId: conversationId };
 }
 
