@@ -1,13 +1,22 @@
 "use strict";
 // src/routes/crm-zoho.js
 
-const express        = require("express");
-const router         = express.Router();
-const { pool }       = require("../config/database");
-const { requireAuth, requireSuperAdmin } = require("../middleware/auth");
-const { crmAuth }    = require("../middleware/crm-rbac");
-const zohoService    = require("../services/zohoService");
-const config         = require("../config");
+const express         = require("express");
+const router          = express.Router();
+const { pool }        = require("../config/database");
+const { requireAuth }  = require("../middleware/auth");
+const { crmAuth }     = require("../middleware/crm-rbac");
+const zohoService     = require("../services/zohoService");
+const zohoProcessor   = require("../services/zohoProcessor");
+const storageService  = require("../services/storageService");
+const config          = require("../config");
+const { v4: uuidv4 }  = require("uuid");
+const {
+  autoSaveLeadContacts,
+  autoSavePartnerContacts,
+  storeAttachment,
+} = require("../services/emailContactSync");
+const { isTrainingMode } = require("../utils/trainingMode");
 const { requireActiveEmailProvider, resolveProviderGate } = require("../middleware/email-provider");
 
 // Guards connect/send/sync actions — blocks them unless this tenant's active
@@ -31,89 +40,161 @@ async function resolvePartner(rawId, tenantId) {
   return rows[0] ?? null;
 }
 
+// Treść symulowanej odpowiedzi e-mail w trybie szkoleniowym
+const TRAINING_REPLY_BODY = `Dzień dobry,
+
+Dziękuję za wiadomość. Zapoznałem się z przesłaną ofertą i jestem zainteresowany dalszą rozmową.
+Proszę o kontakt w celu umówienia spotkania w przyszłym tygodniu.
+
+Z poważaniem,
+Jan Kowalski
+Dyrektor ds. Operacyjnych`;
+
+async function scheduleTrainingReplyLead(leadId, subject, threadId, userId, tenantId) {
+  setTimeout(async () => {
+    try {
+      const fakeReplyId = `training_reply_${uuidv4().replace(/-/g, '')}`;
+      await pool.query(
+        `INSERT INTO crm_lead_activities
+           (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, is_read, tenant_id)
+         VALUES ($1, 'email', $2, $3, NOW(), $4, $5, false, $6)`,
+        [leadId, `Re: ${subject}`, TRAINING_REPLY_BODY, threadId, fakeReplyId, tenantId],
+      );
+    } catch (e) {
+      console.warn('[Training] scheduleTrainingReplyLead failed:', e.message);
+    }
+  }, 45_000);
+}
+
+async function scheduleTrainingReplyPartner(partnerId, subject, threadId, tenantId) {
+  setTimeout(async () => {
+    try {
+      const fakeReplyId = `training_reply_${uuidv4().replace(/-/g, '')}`;
+      await pool.query(
+        `INSERT INTO crm_partner_activities
+           (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, is_read, tenant_id)
+         VALUES ($1, 'email', $2, $3, NOW(), $4, $5, false, $6)`,
+        [partnerId, `Re: ${subject}`, TRAINING_REPLY_BODY, threadId, fakeReplyId, tenantId],
+      );
+    } catch (e) {
+      console.warn('[Training] scheduleTrainingReplyPartner failed:', e.message);
+    }
+  }, 45_000);
+}
+
+// multer — do załączników w wysyłce
+let upload = null;
+try {
+  const multer = require("multer");
+  upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+} catch (_) {
+  console.warn("[Zoho] multer niedostępny — wysyłka bez załączników. Uruchom: npm install multer");
+}
+
+// ── Helpers (lokalnie — rejestracja ref. załączników bez pobierania treści) ────
+
+// Zapisuje metadane załączników do crm_email_attachments bez pobierania treści
+// (blob_path = NULL). Wywołana przy pobieraniu wątku — umożliwia późniejsze pobranie.
+async function registerAttachmentRefs({ leadId, partnerId, messageId, attachments, tenantId, mailboxUserId }) {
+  const idCol = leadId ? "lead_id" : "partner_id";
+  const idVal = leadId || partnerId;
+  for (const att of attachments || []) {
+    try {
+      await pool.query(
+        `INSERT INTO crm_email_attachments
+           (${idCol}, gmail_message_id, gmail_attachment_id, filename, mime_type, direction, tenant_id, mailbox_user_id)
+         VALUES ($1, $2, $3, $4, $5, 'received', $6, $7)
+         ON CONFLICT DO NOTHING`,
+        [idVal, messageId, att.attachmentId, att.filename, att.mimeType || "application/octet-stream", tenantId, mailboxUserId || null],
+      );
+    } catch (_) {}
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // OAUTH2
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get("/oauth/url", requireAuth, requireSuperAdmin, async (req, res, next) => {
+// Each CRM user connects their own Zoho Mail account — triggered inline from
+// "Nowy e-mail" (see crm-email.js dispatcher), not from a superadmin panel.
+// The tenant only chooses/configures WHICH provider is active; the mailbox
+// itself always belongs to req.user, never to the tenant as a whole.
+async function oauthUrlHandler(req, res, next) {
   try {
-    const tenantId = req.query.tenantId;
-    if (!tenantId) return res.status(400).json({ error: "tenantId jest wymagany" });
-
-    const gate = await resolveProviderGate(tenantId, "zoho");
+    const gate = await resolveProviderGate(req.tenantId, "zoho");
     if (!gate.ok) {
-      return res.status(403).json({ error: "Zoho nie jest aktywnym providerem dla tego tenanta" });
+      return res.status(gate.active ? 403 : 400).json({
+        error: gate.active
+          ? `Ta organizacja korzysta z innego dostawcy poczty (${gate.active}).`
+          : "Zoho nie jest aktywnym providerem dla tego tenanta.",
+        code: "PROVIDER_NOT_ACTIVE",
+      });
     }
-
-    const url = await zohoService.getTenantAuthUrl(tenantId, req.user.id);
+    const url = await zohoService.getAuthUrl(req.user.id);
     res.json({ url });
   } catch (err) { next(err); }
-});
+}
+router.get("/oauth/url", requireAuth, crmAuth, oauthUrlHandler);
 
 // No requireAuth — Zoho redirects the browser without Authorization header.
-// tenantId is encoded in the HMAC-signed state parameter generated by /oauth/url.
-// Zoho passes accounts-server (DC-specific token endpoint) and location in callback.
+// userId is safely encoded in the `state` param generated by /oauth/url.
+// Zoho passes accounts-server (DC-specific token endpoint) in the callback.
 router.get("/oauth/callback", async (req, res) => {
   try {
     const { code, error, state } = req.query;
     const accountsServer = req.query["accounts-server"] || req.query.accounts_server || "";
 
-    if (error) {
-      return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=${encodeURIComponent(error)}`);
-    }
-    if (!code) {
-      return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=no_code`);
-    }
-    if (!state) {
-      return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=missing_state`);
-    }
-    if (!accountsServer) {
-      return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=missing_accounts_server`);
-    }
+    if (error) return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=${encodeURIComponent(error)}`);
+    if (!code)  return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=no_code`);
+    if (!state) return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=missing_state`);
+    if (!accountsServer) return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=missing_accounts_server`);
 
-    const parsed = zohoService.parseTenantOAuthState(state);
-    if (!parsed?.tenantId) {
+    const userId = zohoService.parseOAuthState(state);
+    if (!userId) {
+      console.error("[Zoho] OAuth callback: invalid_state, raw state=", state);
       return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=invalid_state`);
     }
-    const { tenantId, initiatingUserId } = parsed;
 
+    const { rows: uRows } = await pool.query("SELECT tenant_id FROM users WHERE id = $1", [userId]);
+    const tenantId = uRows[0]?.tenant_id ?? null;
     const gate = await resolveProviderGate(tenantId, "zoho");
     if (!gate.ok) {
       return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=provider_not_active`);
     }
 
-    await zohoService.exchangeTenantCodeAndSave(code, tenantId, accountsServer, initiatingUserId);
+    console.log("[Zoho] OAuth callback: state OK, userId=", userId);
+    await zohoService.exchangeCodeAndSave(code, userId, accountsServer);
+    console.log("[Zoho] OAuth callback: tokens saved for userId=", userId);
 
     res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=connected`);
   } catch (err) {
-    console.error("[Zoho] OAuth callback error:", err.message);
+    console.error("[Zoho] OAuth callback error:", err.message, err.stack);
+    if (err.code === "MAILBOX_ALREADY_CONNECTED") {
+      return res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=email_already_connected`);
+    }
     res.redirect(`${config.frontendUrl}/crm/zoho/callback?status=error&reason=callback_failed`);
   }
 });
 
 async function statusHandler(req, res) {
   try {
-    const tenantId = req.query.tenantId;
-    if (!tenantId) return res.status(400).json({ error: "tenantId jest wymagany" });
-    const status = await zohoService.getTenantMailboxStatus(tenantId);
+    const status = await zohoService.getStatus(req.user.id);
     res.json(status);
   } catch (err) {
     res.status(500).json({ error: "Błąd serwera" });
   }
 }
-router.get("/status", requireAuth, requireSuperAdmin, statusHandler);
+router.get("/status", requireAuth, crmAuth, statusHandler);
 
 async function disconnectHandler(req, res) {
   try {
-    const tenantId = req.query.tenantId;
-    if (!tenantId) return res.status(400).json({ error: "tenantId jest wymagany" });
-    await zohoService.disconnectTenantMailbox(tenantId);
+    await zohoService.disconnect(req.user.id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Błąd serwera" });
   }
 }
-router.delete("/oauth/disconnect", requireAuth, requireSuperAdmin, disconnectHandler);
+router.delete("/oauth/disconnect", requireAuth, crmAuth, disconnectHandler);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WYSYŁKA — LEAD
@@ -122,70 +203,100 @@ router.delete("/oauth/disconnect", requireAuth, requireSuperAdmin, disconnectHan
 async function sendLeadHandler(req, res) {
   try {
     const leadId = parseInt(req.params.leadId);
-    const { to, cc, subject, body, inReplyTo, threadId: callerThreadId } = req.body;
+    const { to, cc, subject, body, threadId, inReplyTo } = req.body;
 
     if (!to || !subject) {
       return res.status(400).json({ error: "Pola 'to' i 'subject' są wymagane" });
     }
 
     const leadQ = await pool.query(
-      "SELECT id FROM crm_leads WHERE id = $1 AND tenant_id = $2",
-      [leadId, req.tenantId],
+      "SELECT id, company FROM crm_leads WHERE id = $1 AND tenant_id = $2",
+      [leadId, req.tenantId]
     );
     if (!leadQ.rows.length) return res.status(404).json({ error: "Lead nie znaleziony" });
 
-    // Verify caller-supplied threadId belongs to this lead/tenant and is a Zoho thread
-    let verifiedActivity = null;
-    if (inReplyTo && callerThreadId) {
-      const actQ = await pool.query(
-        `SELECT id, gmail_thread_id FROM crm_lead_activities
-         WHERE lead_id = $1 AND gmail_thread_id = $2
-           AND email_provider = 'zoho' AND tenant_id = $3 AND type = 'email'
-         LIMIT 1`,
-        [leadId, String(callerThreadId), req.tenantId],
+    // A reply within an existing thread must go out from the mailbox that
+    // owns it — same ownership model as Gmail/Outlook.
+    if (threadId) {
+      const ownerQ = await pool.query(
+        "SELECT mailbox_user_id FROM crm_lead_activities WHERE lead_id = $1 AND gmail_thread_id = $2 AND tenant_id = $3 LIMIT 1",
+        [leadId, threadId, req.tenantId],
       );
-      verifiedActivity = actQ.rows[0] || null;
+      const ownerId = ownerQ.rows[0]?.mailbox_user_id;
+      if (ownerId && ownerId !== req.user.id) {
+        return res.status(403).json({
+          error: "Ten wątek należy do innego użytkownika — nie możesz w nim odpowiadać. Wyślij nowego maila ze swojego konta.",
+          code:  "THREAD_NOT_OWNED",
+        });
+      }
     }
 
-    const sent = await zohoService.sendTenantEmail({
-      tenantId: req.tenantId,
-      userId: req.user.id,
-      to, cc: cc || null, subject,
-      body:      body || "",
-      inReplyTo: inReplyTo || null,
-    });
+    const training = await isTrainingMode(req.tenantId);
 
-    if (verifiedActivity) {
-      // Reply to a known thread — update the existing activity timestamp, no new card
-      await pool.query(
-        `UPDATE crm_lead_activities SET activity_at = NOW(), updated_at = NOW() WHERE id = $1`,
-        [verifiedActivity.id],
-      );
-      return res.json({
-        messageId:  sent.messageId,
-        threadId:   verifiedActivity.gmail_thread_id,
-        activityId: verifiedActivity.id,
+    let messageId, sentThreadId;
+
+    if (training) {
+      messageId    = `training_sent_${uuidv4().replace(/-/g, '')}`;
+      sentThreadId = threadId || `training_thread_${uuidv4().replace(/-/g, '')}`;
+    } else {
+      const attachments = (req.files || []).map((f) => ({
+        filename: f.originalname,
+        mimeType: f.mimetype,
+        data:     f.buffer.toString("base64"),
+        _buffer:  f.buffer,
+      }));
+
+      const sent = await zohoService.sendEmail({
+        userId:      req.user.id,
+        to, cc: cc || null, subject,
+        body:        body || "",
+        inReplyTo:   inReplyTo || null,
+        attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
+      messageId = sent.messageId;
+      // Zoho does not always report a threadId for a reply — fall back to the
+      // thread the reply was verified to belong to above, then to the new
+      // message's own id as a last resort for a genuinely new conversation.
+      sentThreadId = sent.threadId || threadId || sent.messageId;
+
+      for (const att of attachments) {
+        storeAttachment({
+          leadId,
+          messageId,
+          attachmentId: null,
+          filename:     att.filename,
+          mimeType:     att.mimeType,
+          buffer:       att._buffer,
+          direction:    "sent",
+          mailboxUserId: req.user.id,
+        }).catch((e) => console.warn("[Zoho] Sent attachment blob save failed:", e.message));
+      }
     }
 
-    // New message or reply to an unknown thread — insert a new activity
-    // For replies with no verified threadId, prefer Zoho's threadId over everything.
-    // If Zoho also returned null (no threadId for reply), use callerThreadId as last resort.
-    const threadIdToSave = sent.threadId || callerThreadId || sent.messageId;
+    // Zapisz aktywność (mailbox_user_id = created_by: nadawca jest zawsze
+    // właścicielem skrzynki dla wiadomości wychodzącej)
     const actR = await pool.query(
       `INSERT INTO crm_lead_activities
          (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id,
-          email_provider, created_by, is_read, tenant_id)
-       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, 'zoho', $6, true, $7)
+          email_provider, created_by, mailbox_user_id, is_read, tenant_id)
+       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, 'zoho', $6, $6, true, $7)
        RETURNING id`,
-      [leadId, subject, body || null, threadIdToSave, sent.messageId, req.user.id, req.tenantId],
+      [leadId, subject, body || null, sentThreadId, messageId, req.user.id, req.tenantId],
     );
 
-    res.json({ messageId: sent.messageId, threadId: threadIdToSave, activityId: actR.rows[0].id });
+    // Auto-zapis TYLKO odbiorców To (nie CC) do kontaktów leada
+    const toRecipients = String(to).split(",").map((s) => s.trim()).filter(Boolean);
+    await autoSaveLeadContacts(leadId, toRecipients, req.tenantId);
+
+    if (training) {
+      scheduleTrainingReplyLead(leadId, subject, sentThreadId, req.user.id, req.tenantId);
+    }
+
+    res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
     console.error("[Zoho] send/lead error:", err.message);
-    if (err.code === "PROVIDER_NOT_CONFIGURED") {
-      return res.status(err.status || 400).json({ error: err.message, code: err.code });
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
     }
     if (err.message?.includes("Brak połączonego konta")) {
       return res.status(401).json({ error: err.message });
@@ -193,7 +304,12 @@ async function sendLeadHandler(req, res) {
     res.status(500).json({ error: "Błąd wysyłki emaila: " + err.message });
   }
 }
-router.post("/send/lead/:leadId", requireAuth, crmAuth, zohoGate, sendLeadHandler);
+
+if (upload) {
+  router.post("/send/lead/:leadId", requireAuth, crmAuth, zohoGate, upload.array("attachments", 10), sendLeadHandler);
+} else {
+  router.post("/send/lead/:leadId", requireAuth, crmAuth, zohoGate, sendLeadHandler);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WYSYŁKA — PARTNER
@@ -201,7 +317,7 @@ router.post("/send/lead/:leadId", requireAuth, crmAuth, zohoGate, sendLeadHandle
 
 async function sendPartnerHandler(req, res) {
   try {
-    const { to, cc, subject, body, inReplyTo, threadId: callerThreadId } = req.body;
+    const { to, cc, subject, body, threadId, inReplyTo } = req.body;
 
     if (!to || !subject) {
       return res.status(400).json({ error: "Pola 'to' i 'subject' są wymagane" });
@@ -209,57 +325,82 @@ async function sendPartnerHandler(req, res) {
 
     const partner = await resolvePartner(req.params.partnerId, req.tenantId);
     if (!partner) return res.status(404).json({ error: "Partner nie znaleziony" });
+    const crmPartnerId = partner.id;
 
-    // Verify caller-supplied threadId belongs to this partner/tenant and is a Zoho thread
-    let verifiedActivity = null;
-    if (inReplyTo && callerThreadId) {
-      const actQ = await pool.query(
-        `SELECT id, gmail_thread_id FROM crm_partner_activities
-         WHERE partner_id = $1 AND gmail_thread_id = $2
-           AND email_provider = 'zoho' AND tenant_id = $3 AND type = 'email'
-         LIMIT 1`,
-        [partner.id, String(callerThreadId), req.tenantId],
+    if (threadId) {
+      const ownerQ = await pool.query(
+        "SELECT mailbox_user_id FROM crm_partner_activities WHERE partner_id = $1 AND gmail_thread_id = $2 AND tenant_id = $3 LIMIT 1",
+        [crmPartnerId, threadId, req.tenantId],
       );
-      verifiedActivity = actQ.rows[0] || null;
+      const ownerId = ownerQ.rows[0]?.mailbox_user_id;
+      if (ownerId && ownerId !== req.user.id) {
+        return res.status(403).json({
+          error: "Ten wątek należy do innego użytkownika — nie możesz w nim odpowiadać. Wyślij nowego maila ze swojego konta.",
+          code:  "THREAD_NOT_OWNED",
+        });
+      }
     }
 
-    const sent = await zohoService.sendTenantEmail({
-      tenantId: req.tenantId,
-      userId: req.user.id,
-      to, cc: cc || null, subject,
-      body:      body || "",
-      inReplyTo: inReplyTo || null,
-    });
+    const training = await isTrainingMode(req.tenantId);
 
-    if (verifiedActivity) {
-      // Reply to a known thread — update the existing activity timestamp, no new card
-      await pool.query(
-        `UPDATE crm_partner_activities SET activity_at = NOW(), updated_at = NOW() WHERE id = $1`,
-        [verifiedActivity.id],
-      );
-      return res.json({
-        messageId:  sent.messageId,
-        threadId:   verifiedActivity.gmail_thread_id,
-        activityId: verifiedActivity.id,
+    let messageId, sentThreadId;
+
+    if (training) {
+      messageId    = `training_sent_${uuidv4().replace(/-/g, '')}`;
+      sentThreadId = threadId || `training_thread_${uuidv4().replace(/-/g, '')}`;
+    } else {
+      const attachments = (req.files || []).map((f) => ({
+        filename: f.originalname,
+        mimeType: f.mimetype,
+        data:     f.buffer.toString("base64"),
+        _buffer:  f.buffer,
+      }));
+
+      const sent = await zohoService.sendEmail({
+        userId:      req.user.id,
+        to, cc: cc || null, subject,
+        body:        body || "",
+        inReplyTo:   inReplyTo || null,
+        attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
+      messageId = sent.messageId;
+      sentThreadId = sent.threadId || threadId || sent.messageId;
+
+      for (const att of attachments) {
+        storeAttachment({
+          partnerId: crmPartnerId,
+          messageId,
+          attachmentId: null,
+          filename:     att.filename,
+          mimeType:     att.mimeType,
+          buffer:       att._buffer,
+          direction:    "sent",
+          mailboxUserId: req.user.id,
+        }).catch((e) => console.warn("[Zoho] Sent attachment blob save failed:", e.message));
+      }
     }
 
-    // New message or reply to an unknown thread — insert a new activity
-    const threadIdToSave = sent.threadId || callerThreadId || sent.messageId;
     const actR = await pool.query(
       `INSERT INTO crm_partner_activities
          (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id,
-          email_provider, created_by, is_read, tenant_id)
-       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, 'zoho', $6, true, $7)
+          email_provider, created_by, mailbox_user_id, is_read, tenant_id)
+       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, 'zoho', $6, $6, true, $7)
        RETURNING id`,
-      [partner.id, subject, body || null, threadIdToSave, sent.messageId, req.user.id, req.tenantId],
+      [crmPartnerId, subject, body || null, sentThreadId, messageId, req.user.id, req.tenantId],
     );
 
-    res.json({ messageId: sent.messageId, threadId: threadIdToSave, activityId: actR.rows[0].id });
+    const toRecipients = String(to).split(",").map((s) => s.trim()).filter(Boolean);
+    await autoSavePartnerContacts(crmPartnerId, toRecipients, req.tenantId);
+
+    if (training) {
+      scheduleTrainingReplyPartner(crmPartnerId, subject, sentThreadId, req.tenantId);
+    }
+
+    res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
     console.error("[Zoho] send/partner error:", err.message);
-    if (err.code === "PROVIDER_NOT_CONFIGURED") {
-      return res.status(err.status || 400).json({ error: err.message, code: err.code });
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
     }
     if (err.message?.includes("Brak połączonego konta")) {
       return res.status(401).json({ error: err.message });
@@ -267,18 +408,67 @@ async function sendPartnerHandler(req, res) {
     res.status(500).json({ error: "Błąd wysyłki emaila: " + err.message });
   }
 }
-router.post("/send/partner/:partnerId", requireAuth, crmAuth, zohoGate, sendPartnerHandler);
+
+if (upload) {
+  router.post("/send/partner/:partnerId", requireAuth, crmAuth, zohoGate, upload.array("attachments", 10), sendPartnerHandler);
+} else {
+  router.post("/send/partner/:partnerId", requireAuth, crmAuth, zohoGate, sendPartnerHandler);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// WĄTEK — LEAD
+// POBIERANIE WĄTKÓW (z rejestracją załączników w DB)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function threadLeadHandler(req, res) {
   try {
-    const leadId   = parseInt(req.params.leadId);
-    const threadId = req.params.threadId;
-    const messages = await zohoService.getTenantThread(req.tenantId, threadId);
-    console.log(`[Zoho] getThread lead=${leadId} threadId=${threadId} → ${messages.length} wiadomości`);
+    const leadId = parseInt(req.params.leadId);
+
+    // Zoho threads live in one Zoho account — read with the token of
+    // whichever user's mailbox owns this thread, not the current viewer's.
+    const ownerQ = await pool.query(
+      `SELECT a.mailbox_user_id, u.email AS owner_email
+       FROM crm_lead_activities a
+       LEFT JOIN users u ON u.id = a.mailbox_user_id
+       WHERE a.lead_id = $1 AND a.gmail_thread_id = $2 AND a.tenant_id = $3
+       LIMIT 1`,
+      [leadId, req.params.threadId, req.tenantId],
+    );
+    const ownerId    = ownerQ.rows[0]?.mailbox_user_id || null;
+    const ownerEmail = ownerQ.rows[0]?.owner_email || null;
+    if (!ownerId) {
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.json({
+        messages: [], canReply: false, ownerEmail: null, unavailable: true,
+        reason: "Ten wątek nie ma przypisanego właściciela skrzynki — treść niedostępna.",
+      });
+    }
+
+    const messages = await zohoService.getThread(ownerId, req.params.threadId);
+
+    // Zoho's messages/view?threadId=X listing can miss messages (freshly
+    // sent ones in particular — confirmed live, not indexed immediately) even
+    // though they carry the identical threadId we stored. We already know
+    // every message we ever recorded for this thread from our own DB, so
+    // backfill anything Zoho's listing dropped by fetching it directly by id
+    // (same fix already applied to Outlook for its own listing gap).
+    const foundIds = new Set(messages.map(m => m.id));
+    const { rows: knownRows } = await pool.query(
+      `SELECT DISTINCT gmail_message_id FROM crm_lead_activities
+       WHERE lead_id = $1 AND gmail_thread_id = $2 AND tenant_id = $3 AND gmail_message_id IS NOT NULL`,
+      [leadId, req.params.threadId, req.tenantId],
+    );
+    const missingIds = knownRows.map(r => r.gmail_message_id).filter(id => !foundIds.has(id));
+    if (missingIds.length) {
+      const backfilled = await Promise.all(missingIds.map(id => zohoService.getMessage(ownerId, id).catch(() => null)));
+      for (const msg of backfilled) if (msg) messages.push(msg);
+      messages.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    }
+
+    for (const msg of messages) {
+      if (msg.attachments?.length) {
+        registerAttachmentRefs({ leadId, messageId: msg.id, attachments: msg.attachments, tenantId: req.tenantId, mailboxUserId: ownerId }).catch(() => {});
+      }
+    }
 
     const msgIds = messages.map(m => m.id);
     if (msgIds.length) {
@@ -289,9 +479,22 @@ async function threadLeadHandler(req, res) {
       );
       const outIds = new Set(outRows.map(r => r.gmail_message_id));
 
+      const incomingIds = msgIds.filter(id => !outIds.has(id));
+      if (incomingIds.length) {
+        pool.query(
+          `UPDATE crm_email_message_reads SET is_read = true, updated_at = NOW()
+           WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
+          [incomingIds, req.tenantId],
+        ).catch(e => console.warn("[Zoho] auto-mark read failed:", e.message));
+        pool.query(
+          `UPDATE crm_lead_activities SET is_read = true, updated_at = NOW()
+           WHERE lead_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false AND tenant_id = $3`,
+          [leadId, req.params.threadId, req.tenantId],
+        ).catch(e => console.warn("[Zoho] mark thread activity read failed:", e.message));
+      }
+
       const { rows: readRows } = await pool.query(
-        `SELECT gmail_message_id, is_read FROM crm_email_message_reads
-         WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
+        `SELECT gmail_message_id, is_read FROM crm_email_message_reads WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
         [msgIds, req.tenantId],
       );
       const readMap = Object.fromEntries(readRows.map(r => [r.gmail_message_id, r.is_read]));
@@ -299,43 +502,89 @@ async function threadLeadHandler(req, res) {
       for (const msg of messages) {
         const isKnownOutgoing = outIds.has(msg.id) || msg.isOutgoing === true;
         if (isKnownOutgoing) {
-          msg.is_read     = true;
-          msg.created_by  = "outgoing";
+          msg.is_read    = true;
+          msg.created_by = 'outgoing';
           msg.activity_id = outRows.find(r => r.gmail_message_id === msg.id)?.activity_id ?? null;
         } else {
-          msg.is_read     = readMap[msg.id] ?? false;
-          msg.created_by  = null;
+          msg.is_read    = readMap[msg.id] ?? false;
+          msg.created_by = null;
           msg.activity_id = null;
         }
       }
 
-      pool.query(
-        `UPDATE crm_lead_activities SET is_read = true, updated_at = NOW()
-         WHERE lead_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false AND tenant_id = $3`,
-        [leadId, threadId, req.tenantId],
-      ).catch(() => {});
+      const { rows: sentAtts } = await pool.query(
+        `SELECT gmail_message_id, filename, mime_type, blob_path, gmail_attachment_id
+         FROM crm_email_attachments
+         WHERE lead_id = $1 AND gmail_message_id = ANY($2) AND direction = 'sent' AND tenant_id = $3`,
+        [leadId, msgIds, req.tenantId],
+      );
+      for (const msg of messages) {
+        msg.sentAttachments = sentAtts
+          .filter(a => a.gmail_message_id === msg.id)
+          .map(a => ({ filename: a.filename, mimeType: a.mime_type, blobPath: a.blob_path }));
+      }
     }
 
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.json(messages);
+    res.json({ messages, canReply: ownerId === req.user.id, ownerEmail });
   } catch (err) {
     console.error("[Zoho] getThread/lead error:", err.message);
+    if (err.message?.includes("Brak połączonego konta")) {
+      return res.status(404).json({
+        error: "Ten wątek należy do konta, które zostało rozłączone — pełna treść jest niedostępna.",
+        code:  "MAILBOX_DISCONNECTED",
+      });
+    }
     res.status(500).json({ error: "Błąd pobierania wątku: " + err.message });
   }
 }
 router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, threadLeadHandler);
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// WĄTEK — PARTNER
-// ═══════════════════════════════════════════════════════════════════════════════
-
 async function threadPartnerHandler(req, res) {
   try {
-    const threadId = req.params.threadId;
-    const resolved = await resolvePartner(req.params.partnerId, req.tenantId);
+    const resolved  = await resolvePartner(req.params.partnerId, req.tenantId);
     const partnerId = resolved?.id ?? req.params.partnerId;
-    const messages  = await zohoService.getTenantThread(req.tenantId, threadId);
-    console.log(`[Zoho] getThread partner=${partnerId} threadId=${threadId} → ${messages.length} wiadomości`);
+
+    const ownerQ = await pool.query(
+      `SELECT a.mailbox_user_id, u.email AS owner_email
+       FROM crm_partner_activities a
+       LEFT JOIN users u ON u.id = a.mailbox_user_id
+       WHERE a.partner_id = $1 AND a.gmail_thread_id = $2 AND a.tenant_id = $3
+       LIMIT 1`,
+      [partnerId, req.params.threadId, req.tenantId],
+    );
+    const ownerId    = ownerQ.rows[0]?.mailbox_user_id || null;
+    const ownerEmail = ownerQ.rows[0]?.owner_email || null;
+    if (!ownerId) {
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.json({
+        messages: [], canReply: false, ownerEmail: null, unavailable: true,
+        reason: "Ten wątek nie ma przypisanego właściciela skrzynki — treść niedostępna.",
+      });
+    }
+
+    const messages = await zohoService.getThread(ownerId, req.params.threadId);
+
+    // See threadLeadHandler — Zoho's listing can miss messages it actually
+    // has; backfill from our own DB record of this thread's known ids.
+    const foundIds = new Set(messages.map(m => m.id));
+    const { rows: knownRows } = await pool.query(
+      `SELECT DISTINCT gmail_message_id FROM crm_partner_activities
+       WHERE partner_id = $1 AND gmail_thread_id = $2 AND tenant_id = $3 AND gmail_message_id IS NOT NULL`,
+      [partnerId, req.params.threadId, req.tenantId],
+    );
+    const missingIds = knownRows.map(r => r.gmail_message_id).filter(id => !foundIds.has(id));
+    if (missingIds.length) {
+      const backfilled = await Promise.all(missingIds.map(id => zohoService.getMessage(ownerId, id).catch(() => null)));
+      for (const msg of backfilled) if (msg) messages.push(msg);
+      messages.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    }
+
+    for (const msg of messages) {
+      if (msg.attachments?.length) {
+        registerAttachmentRefs({ partnerId, messageId: msg.id, attachments: msg.attachments, tenantId: req.tenantId, mailboxUserId: ownerId }).catch(() => {});
+      }
+    }
 
     const msgIds = messages.map(m => m.id);
     if (msgIds.length) {
@@ -346,9 +595,22 @@ async function threadPartnerHandler(req, res) {
       );
       const outIds = new Set(outRows.map(r => r.gmail_message_id));
 
+      const incomingIds = msgIds.filter(id => !outIds.has(id));
+      if (incomingIds.length) {
+        pool.query(
+          `UPDATE crm_email_message_reads SET is_read = true, updated_at = NOW()
+           WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
+          [incomingIds, req.tenantId],
+        ).catch(e => console.warn("[Zoho] auto-mark read failed:", e.message));
+        pool.query(
+          `UPDATE crm_partner_activities SET is_read = true, updated_at = NOW()
+           WHERE partner_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false AND tenant_id = $3`,
+          [partnerId, req.params.threadId, req.tenantId],
+        ).catch(e => console.warn("[Zoho] mark partner thread activity read failed:", e.message));
+      }
+
       const { rows: readRows } = await pool.query(
-        `SELECT gmail_message_id, is_read FROM crm_email_message_reads
-         WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
+        `SELECT gmail_message_id, is_read FROM crm_email_message_reads WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
         [msgIds, req.tenantId],
       );
       const readMap = Object.fromEntries(readRows.map(r => [r.gmail_message_id, r.is_read]));
@@ -356,70 +618,162 @@ async function threadPartnerHandler(req, res) {
       for (const msg of messages) {
         const isKnownOutgoing = outIds.has(msg.id) || msg.isOutgoing === true;
         if (isKnownOutgoing) {
-          msg.is_read     = true;
-          msg.created_by  = "outgoing";
+          msg.is_read    = true;
+          msg.created_by = 'outgoing';
           msg.activity_id = outRows.find(r => r.gmail_message_id === msg.id)?.activity_id ?? null;
         } else {
-          msg.is_read     = readMap[msg.id] ?? false;
-          msg.created_by  = null;
+          msg.is_read    = readMap[msg.id] ?? false;
+          msg.created_by = null;
           msg.activity_id = null;
         }
       }
 
-      pool.query(
-        `UPDATE crm_partner_activities SET is_read = true, updated_at = NOW()
-         WHERE partner_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false AND tenant_id = $3`,
-        [partnerId, threadId, req.tenantId],
-      ).catch(() => {});
+      const { rows: sentAtts } = await pool.query(
+        `SELECT gmail_message_id, filename, mime_type, blob_path
+         FROM crm_email_attachments
+         WHERE partner_id = $1 AND gmail_message_id = ANY($2) AND direction = 'sent' AND tenant_id = $3`,
+        [partnerId, msgIds, req.tenantId],
+      );
+      for (const msg of messages) {
+        msg.sentAttachments = sentAtts
+          .filter(a => a.gmail_message_id === msg.id)
+          .map(a => ({ filename: a.filename, mimeType: a.mime_type, blobPath: a.blob_path }));
+      }
     }
 
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.json(messages);
+    res.json({ messages, canReply: ownerId === req.user.id, ownerEmail });
   } catch (err) {
     console.error("[Zoho] getThread/partner error:", err.message);
+    if (err.message?.includes("Brak połączonego konta")) {
+      return res.status(404).json({
+        error: "Ten wątek należy do konta, które zostało rozłączone — pełna treść jest niedostępna.",
+        code:  "MAILBOX_DISCONNECTED",
+      });
+    }
     res.status(500).json({ error: "Błąd pobierania wątku: " + err.message });
   }
 }
 router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, threadPartnerHandler);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// RĘCZNE SPRAWDZENIE NOWYCH WIADOMOŚCI
+// POBIERANIE ZAŁĄCZNIKA
+// Serwuje z Azure Blob (trwałe), lub pobiera z Zoho API i zapisuje do Blob.
+// Działa nawet po rozłączeniu konta Zoho — o ile blob_path jest wypełniony.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+router.get("/sent-attachment/:messageId", requireAuth, crmAuth, async (req, res) => {
+  const { messageId } = req.params;
+  const filename = String(req.query.filename || "attachment").replace(/[^a-zA-Z0-9._\- ]/g, "_");
+  try {
+    const { rows } = await pool.query(
+      `SELECT blob_path FROM crm_email_attachments
+       WHERE gmail_message_id = $1 AND direction = 'sent' AND filename = $2 AND tenant_id = $3
+       LIMIT 1`,
+      [messageId, filename, req.tenantId],
+    );
+    if (!rows.length || !rows[0].blob_path) {
+      return res.status(404).json({ error: "Załącznik niedostępny." });
+    }
+    const sasUrl = await storageService.generateSasUrl(rows[0].blob_path, 10);
+    return res.redirect(302, sasUrl);
+  } catch (err) {
+    res.status(500).json({ error: "Błąd pobierania załącznika: " + err.message });
+  }
+});
+
+router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (req, res) => {
+  const { messageId, attachmentId } = req.params;
+  const filename = String(req.query.filename || "attachment").replace(/[^a-zA-Z0-9._\- ]/g, "_");
+  const mimeType = String(req.query.mime    || "application/octet-stream");
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT blob_path, filename, mime_type, mailbox_user_id
+       FROM crm_email_attachments
+       WHERE gmail_message_id = $1 AND gmail_attachment_id = $2 AND tenant_id = $3
+       LIMIT 1`,
+      [messageId, attachmentId, req.tenantId],
+    );
+
+    if (rows.length && rows[0].blob_path) {
+      const sasUrl = await storageService.generateSasUrl(rows[0].blob_path, 10);
+      return res.redirect(302, sasUrl);
+    }
+
+    if (!rows.length || !rows[0].mailbox_user_id) {
+      return res.status(404).json({ error: "Załącznik niedostępny — nieznany właściciel skrzynki." });
+    }
+    const buffer = await zohoService.getAttachmentBuffer(rows[0].mailbox_user_id, messageId, attachmentId);
+
+    const safeFilename = filename.replace(/\s+/g, "_");
+    const blobPath     = `crm-attachments/${new Date().toISOString().slice(0, 10)}-${uuidv4().slice(0, 8)}-${safeFilename}`;
+    storageService.uploadBuffer(blobPath, buffer, mimeType)
+      .then(() => pool.query(
+        `UPDATE crm_email_attachments
+         SET blob_path = $1
+         WHERE gmail_message_id = $2 AND gmail_attachment_id = $3 AND tenant_id = $4`,
+        [blobPath, messageId, attachmentId, req.tenantId],
+      ))
+      .catch((e) => console.warn("[Zoho] Attachment blob cache failed:", e.message));
+
+    res.set("Content-Type",        mimeType);
+    res.set("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.set("Content-Length",      buffer.length);
+    return res.send(buffer);
+
+  } catch (err) {
+    console.error("[Zoho] getAttachment error:", err.message);
+    if (err.message?.includes("Brak połączonego konta")) {
+      return res.status(404).json({
+        error: "Załącznik niedostępny — konto właściciela skrzynki zostało rozłączone.",
+      });
+    }
+    res.status(500).json({ error: "Błąd pobierania załącznika: " + err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEBUG — ręczne wyzwolenie sprawdzenia nowej poczty (bez czekania na poller)
 // POST /api/crm/zoho/debug/process
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function debugProcessHandler(req, res) {
   try {
     const { rows } = await pool.query(
-      "SELECT email, last_fetched_at FROM tenant_zoho_tokens WHERE tenant_id = $1",
-      [req.tenantId],
+      "SELECT email, last_fetched_at FROM user_zoho_tokens WHERE user_id = $1",
+      [req.user.id],
     );
-    if (!rows.length) return res.status(404).json({ error: "Brak połączonego konta Zoho" });
+    if (!rows.length) return res.status(404).json({ error: "Brak podłączonego konta Zoho" });
 
-    const { email } = rows[0];
-    const { newMessages } = await zohoService.getTenantNewMessages(req.tenantId);
+    const { email, last_fetched_at } = rows[0];
+    const note = !last_fetched_at
+      ? "last_fetched_at był pusty — ustawiono bazowy punkt. Wyślij do siebie email i kliknij ponownie."
+      : null;
+
+    const result = await zohoProcessor.processUserNotifications(req.user.id);
 
     res.json({
       ok: true,
       email,
-      newMessages_found: newMessages.length,
-      newMessages: newMessages.slice(0, 10).map(m => ({
-        id:         String(m.messageId),
-        subject:    m.subject,
-        from:       m.fromAddress,
-        threadId:   String(m.threadId || m.messageId),
-        receivedAt: new Date(parseInt(m.receivedTime, 10)).toISOString(),
-      })),
+      note,
+      newMessages_found: result?.processed ?? 0,
     });
   } catch (err) {
     console.error("[Zoho] debug/process error:", err.message);
-    const status = err.code === "PROVIDER_NOT_CONFIGURED" ? (err.status || 400) : 500;
-    res.status(status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    res.status(err.status || 500).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
   }
 }
 router.post("/debug/process", requireAuth, crmAuth, zohoGate, debugProcessHandler);
 
-// Handlers reused by the unified /api/crm/email dispatcher (crm-email.js).
+// Handlers reused by the unified /api/crm/email dispatcher (crm-email.js) so
+// dispatching to "whichever provider is active" never duplicates this logic.
+// oauthUrl/status/disconnect act on req.user's own mailbox — same auth as
+// every other handler here, no superadmin requirement.
 router.handlers = {
+  oauthUrl:      oauthUrlHandler,
+  status:        statusHandler,
+  disconnect:    disconnectHandler,
   sendLead:      sendLeadHandler,
   sendPartner:   sendPartnerHandler,
   threadLead:    threadLeadHandler,

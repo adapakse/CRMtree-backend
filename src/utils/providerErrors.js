@@ -15,4 +15,34 @@ class ProviderNotConfiguredError extends Error {
   }
 }
 
-module.exports = { ProviderNotConfiguredError };
+// Thrown when a tenant HAS an enabled tenant_email_providers row for this
+// provider, but one or more fields that must be filled in per tenant
+// (redirect_uri, azure_tenant_id, pubsub_topic, ...) are missing — instead of
+// silently falling back to a global .env value for that one field.
+class IncompleteProviderConfigError extends Error {
+  constructor(provider, missingFields) {
+    super(`Konfiguracja poczty (${provider}) dla tej organizacji jest niekompletna — brakuje pola: ${missingFields.join(', ')}. Uzupełnij ją w ustawieniach tenanta.`);
+    this.name          = 'IncompleteProviderConfigError';
+    this.status        = 400;
+    this.code          = 'PROVIDER_CONFIG_INCOMPLETE';
+    this.provider      = provider;
+    this.missingFields = missingFields;
+  }
+}
+
+// Thrown when a per-user mailbox connect (exchangeCodeAndSave) would attach
+// a Google/Microsoft/Zoho account that's already connected to a DIFFERENT
+// CRM user — the unique index on email (see migration 0208) makes this a DB
+// constraint violation; this wraps it into a message the oauth/callback
+// route can redirect with instead of a raw Postgres error.
+class MailboxAlreadyConnectedError extends Error {
+  constructor(provider) {
+    super(`To konto jest już połączone z innym użytkownikiem CRM. Poproś administratora o sprawdzenie, kto je podłączył, albo użyj innego konta ${provider === 'gmail' ? 'Google' : provider}.`);
+    this.name     = 'MailboxAlreadyConnectedError';
+    this.status   = 409;
+    this.code     = 'MAILBOX_ALREADY_CONNECTED';
+    this.provider = provider;
+  }
+}
+
+module.exports = { ProviderNotConfiguredError, IncompleteProviderConfigError, MailboxAlreadyConnectedError };

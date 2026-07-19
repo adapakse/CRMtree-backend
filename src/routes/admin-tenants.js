@@ -30,6 +30,7 @@ const { encrypt, decrypt } = require('../utils/encrypt');
 const { requireAuth, requireSuperAdmin, signAccessToken } = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { EMAIL_PROVIDER_KEYS } = require('../config/email-providers');
+const { getMissingRequiredFields } = require('../config/emailProviderRequiredFields');
 const { clearTrainingModeCache } = require('../utils/trainingMode');
 
 router.use(requireAuth, requireSuperAdmin, injectAuditContext);
@@ -544,6 +545,19 @@ router.put('/:id/email-providers/:provider',
         encSecret = existing[0].client_secret;
       } else {
         return res.status(400).json({ error: 'client_secret jest wymagany dla nowej konfiguracji' });
+      }
+
+      // All fields listed as required for this provider must be present —
+      // no partial config is saved that would later silently fall back to
+      // a global .env value at read time.
+      const missingFields = getMissingRequiredFields(req.params.provider, {
+        client_id, client_secret: encSecret, redirect_uri, extra_config,
+      });
+      if (missingFields.length) {
+        return res.status(400).json({
+          error: `Brakuje wymaganych pól konfiguracji (${req.params.provider}): ${missingFields.join(', ')}`,
+          missingFields,
+        });
       }
 
       const { rows } = await db.query(

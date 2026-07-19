@@ -5,7 +5,9 @@
 // connect/status/send/thread/sync. It resolves the tenant's active email
 // provider (tenants.active_email_provider, see config/email-providers.js)
 // server-side and delegates to that provider's existing, already-tested
-// route handlers — the CRM user never picks or switches a provider.
+// route handlers — the CRM user never picks or switches a provider, but DOES
+// connect/disconnect their own mailbox (each user brings their own account;
+// the tenant only chooses which provider is in use).
 //
 // Provider-specific routes (crm-gmail.js/crm-outlook.js/crm-zoho.js) remain
 // mounted separately for their OAuth callbacks (Google/Microsoft/Zoho redirect
@@ -59,7 +61,7 @@ async function getActiveProvider(tenantId) {
 }
 
 function sendProviderError(res, err, fallbackMessage) {
-  const status = err.code === 'PROVIDER_NOT_CONFIGURED' ? (err.status || 400) : 500;
+  const status = err.status || 500;
   res.status(status).json({
     error: status === 500 ? fallbackMessage + err.message : err.message,
     ...(err.code ? { code: err.code } : {}),
@@ -67,6 +69,8 @@ function sendProviderError(res, err, fallbackMessage) {
 }
 
 // ── status ────────────────────────────────────────────────────────────────
+// Reports whether the CURRENT USER (not the tenant as a whole) has a
+// connected mailbox for the tenant's active provider.
 router.get('/status', requireAuth, async (req, res) => {
   try {
     if (await isTrainingMode(req.tenantId)) {
@@ -76,7 +80,7 @@ router.get('/status', requireAuth, async (req, res) => {
     if (!provider) {
       return res.json({ provider: null, training: false, configured: false, connected: false });
     }
-    const real = await EMAIL_PROVIDERS[provider].service.getTenantMailboxStatus(req.tenantId);
+    const real = await EMAIL_PROVIDERS[provider].service.getStatus(req.user.id);
     res.json({ provider, training: false, configured: true, ...real });
   } catch (err) {
     console.error('[Email] status error:', err.message);
@@ -84,10 +88,38 @@ router.get('/status', requireAuth, async (req, res) => {
   }
 });
 
-// Connecting/changing/disconnecting the shared company mailbox is a
-// superadmin-only action performed from Tenant → Email (see admin-tenants.js
-// and crm-gmail.js/crm-outlook.js/crm-zoho.js oauth/url|disconnect routes).
-// Regular CRM users only send from the tenant's mailbox — no connect/disconnect here.
+// ── connect / disconnect own mailbox ─────────────────────────────────────
+// Every CRM user connects and can disconnect their OWN mailbox — triggered
+// inline from "Nowy e-mail", not from a settings page. The tenant only
+// chooses which provider is active (Tenant → Email, admin-tenants.js); it no
+// longer owns a shared mailbox to connect/disconnect.
+router.get('/oauth/url', requireAuth, crmAuth, async (req, res) => {
+  try {
+    const provider = await getActiveProvider(req.tenantId);
+    if (!provider) return res.status(400).json(NOT_CONFIGURED);
+    if (!PROVIDER_HANDLERS[provider].oauthUrl) {
+      return res.status(501).json({ error: `Łączenie własnego konta nie jest jeszcze dostępne dla ${provider}.` });
+    }
+    return PROVIDER_HANDLERS[provider].oauthUrl(req, res);
+  } catch (err) {
+    console.error('[Email] oauth/url error:', err.message);
+    res.status(500).json({ error: 'Błąd serwera' });
+  }
+});
+
+router.delete('/oauth/disconnect', requireAuth, crmAuth, async (req, res) => {
+  try {
+    const provider = await getActiveProvider(req.tenantId);
+    if (!provider) return res.status(400).json(NOT_CONFIGURED);
+    if (!PROVIDER_HANDLERS[provider].disconnect) {
+      return res.status(501).json({ error: `Rozłączanie własnego konta nie jest jeszcze dostępne dla ${provider}.` });
+    }
+    return PROVIDER_HANDLERS[provider].disconnect(req, res);
+  } catch (err) {
+    console.error('[Email] oauth/disconnect error:', err.message);
+    res.status(500).json({ error: 'Błąd serwera' });
+  }
+});
 
 // ── send — lead ───────────────────────────────────────────────────────────
 async function dispatchSendLead(req, res) {

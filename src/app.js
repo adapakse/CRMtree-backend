@@ -321,12 +321,19 @@ app.use(errorHandler);
 // ─── Gmail watch auto-renewal (co 6 dni) ──────────────────────────────────────
 // Gmail watch wygasa po 7 dniach — odnawiamy co 6 dni aby nie stracić push-notyfikacji.
 // Uruchamiamy przy starcie serwera, a potem co 6 * 24h.
-if (config.google.pubsubTopic) {
+// Uwaga: scheduler NIE jest już bramkowany globalnym config.google.pubsubTopic —
+// pubsub_topic jest wymagany per tenant (tenant_email_providers.extra_config),
+// nie globalnie z .env. Brak globalnego env nie może blokować odnowienia watchy
+// tenantom, które mają własny topic ustawiony; renewAllWatches i tak łapie
+// błędy per-user (patrz gmailService.js) — brak configu jednego tenanta/usera
+// nie przerywa pętli dla pozostałych.
+{
   const gmailService = require('./services/gmailService');
+  const { pool: gmailWatchPool } = require('./config/database');
   const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
 
   const scheduleWatchRenewal = () => {
-    gmailService.renewAllTenantWatches().catch(() => {});
+    gmailService.renewAllWatches(gmailWatchPool).catch(() => {});
     setTimeout(scheduleWatchRenewal, SIX_DAYS_MS);
   };
   // Pierwsze odnowienie po 60s od startu (serwer musi być gotowy)
