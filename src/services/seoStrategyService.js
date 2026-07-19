@@ -54,10 +54,14 @@ async function getPillars(tenantId) {
   return rows;
 }
 
-/** Returns existing pillars, generating them on first use. */
+/** Returns existing pillars, generating them on first use. Tenants without a business_description yet
+ * (fresh onboarding, not interviewed) get an empty list instead of a hard failure — they can still add
+ * pillars manually until the description is filled in and auto-generation becomes available. */
 async function ensurePillars(tenantId) {
   const existing = await getPillars(tenantId);
   if (existing.length) return existing;
+  const { rows: tenantRows } = await db.query(`SELECT business_description FROM tenants WHERE id = $1`, [tenantId]);
+  if (!tenantRows[0]?.business_description) return [];
   return generatePillars(tenantId);
 }
 
