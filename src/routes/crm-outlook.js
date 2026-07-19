@@ -255,7 +255,15 @@ async function sendLeadHandler(req, res) {
         attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
       messageId    = sent.messageId;
-      sentThreadId = sent.threadId;
+      // A reply to an existing CRM thread always stays in that thread — the
+      // provider's own returned threadId (conversationId) is only the anchor
+      // for a genuinely NEW message (no incoming threadId). Graph can assign
+      // a different conversationId to a reply once the subject changes, but
+      // that must never split the CRM's own view of the conversation —
+      // threadLeadHandler/threadPartnerHandler already backfill any message
+      // Graph's conversationId filter doesn't return, by fetching it
+      // directly by its known message id.
+      sentThreadId = threadId || sent.threadId;
 
       for (const att of attachments) {
         storeAttachment({
@@ -366,7 +374,15 @@ async function sendPartnerHandler(req, res) {
         attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
       messageId    = sent.messageId;
-      sentThreadId = sent.threadId;
+      // A reply to an existing CRM thread always stays in that thread — the
+      // provider's own returned threadId (conversationId) is only the anchor
+      // for a genuinely NEW message (no incoming threadId). Graph can assign
+      // a different conversationId to a reply once the subject changes, but
+      // that must never split the CRM's own view of the conversation —
+      // threadLeadHandler/threadPartnerHandler already backfill any message
+      // Graph's conversationId filter doesn't return, by fetching it
+      // directly by its known message id.
+      sentThreadId = threadId || sent.threadId;
 
       for (const att of attachments) {
         storeAttachment({

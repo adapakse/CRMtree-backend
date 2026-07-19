@@ -254,10 +254,13 @@ async function sendLeadHandler(req, res) {
         attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
       messageId = sent.messageId;
-      // Zoho does not always report a threadId for a reply — fall back to the
-      // thread the reply was verified to belong to above, then to the new
-      // message's own id as a last resort for a genuinely new conversation.
-      sentThreadId = sent.threadId || threadId || sent.messageId;
+      // A reply to an existing CRM thread always stays in that thread — never
+      // Zoho's own returned threadId, which isn't always reported for a
+      // reply and can differ from the original when the subject changes.
+      // sent.threadId is only the anchor for a genuinely NEW message (no
+      // incoming threadId); sent.messageId is the last-resort fallback for
+      // that case if Zoho's response has no threadId either.
+      sentThreadId = threadId || sent.threadId || sent.messageId;
 
       for (const att of attachments) {
         storeAttachment({
@@ -364,7 +367,13 @@ async function sendPartnerHandler(req, res) {
         attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
       messageId = sent.messageId;
-      sentThreadId = sent.threadId || threadId || sent.messageId;
+      // A reply to an existing CRM thread always stays in that thread — never
+      // Zoho's own returned threadId, which isn't always reported for a
+      // reply and can differ from the original when the subject changes.
+      // sent.threadId is only the anchor for a genuinely NEW message (no
+      // incoming threadId); sent.messageId is the last-resort fallback for
+      // that case if Zoho's response has no threadId either.
+      sentThreadId = threadId || sent.threadId || sent.messageId;
 
       for (const att of attachments) {
         storeAttachment({

@@ -373,7 +373,13 @@ async function sendLeadHandler(req, res) {
         attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
       messageId    = sent.messageId;
-      sentThreadId = sent.threadId;
+      // A reply to an existing CRM thread always stays in that thread — the
+      // provider's own returned threadId is only the anchor for a genuinely
+      // NEW message (no incoming threadId). Gmail always honors the explicit
+      // threadId we pass in, so this is a no-op for Gmail in practice, but
+      // keeping the same rule across all three providers is what makes the
+      // behavior consistent — see crm-outlook.js / crm-zoho.js.
+      sentThreadId = threadId || sent.threadId;
 
       for (const att of attachments) {
         storeAttachment({
@@ -485,7 +491,13 @@ async function sendPartnerHandler(req, res) {
         attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
       messageId    = sent.messageId;
-      sentThreadId = sent.threadId;
+      // A reply to an existing CRM thread always stays in that thread — the
+      // provider's own returned threadId is only the anchor for a genuinely
+      // NEW message (no incoming threadId). Gmail always honors the explicit
+      // threadId we pass in, so this is a no-op for Gmail in practice, but
+      // keeping the same rule across all three providers is what makes the
+      // behavior consistent — see crm-outlook.js / crm-zoho.js.
+      sentThreadId = threadId || sent.threadId;
 
       for (const att of attachments) {
         storeAttachment({
