@@ -22,6 +22,56 @@ const linkedinService = require('../services/socialPublish/linkedinService');
 const metaService = require('../services/socialPublish/metaService');
 const logger = require('../utils/logger');
 
+// ── OAuth callbacks — registered BEFORE the auth gate below on purpose.
+// These are hit by a plain browser redirect from Google/LinkedIn/Meta, which
+// never carries our Authorization header — requireAuth would 401 every one
+// of them before the handler ever ran. Identity instead comes from the
+// signed `state` param each service's parseOAuthState() verifies. ──────────
+router.get('/gsc/oauth/callback', async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=${encodeURIComponent(error)}`);
+    const parsed = gscService.parseOAuthState(state);
+    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=invalid_state`);
+
+    const { rows } = await db.query('SELECT slug FROM tenants WHERE id = $1', [parsed.tenantId]);
+    const siteUrl = `https://${rows[0]?.slug}.crmtree.pl/`; // placeholder until real onboarding captures the tenant's own domain
+    await gscService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId, siteUrl);
+    res.redirect(`${config.frontendUrl}/crm/seo?gsc=connected`);
+  } catch (err) {
+    logger.error('GSC OAuth callback failed', { error: err.message });
+    res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=callback_failed`);
+  }
+});
+
+router.get('/social/linkedin/oauth/callback', async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=${encodeURIComponent(error)}`);
+    const parsed = linkedinService.parseOAuthState(state);
+    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=invalid_state`);
+    await linkedinService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId);
+    res.redirect(`${config.frontendUrl}/crm/seo?social=connected&platform=linkedin`);
+  } catch (err) {
+    logger.error('LinkedIn OAuth callback failed', { error: err.message });
+    res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=callback_failed`);
+  }
+});
+
+router.get('/social/facebook/oauth/callback', async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=${encodeURIComponent(error)}`);
+    const parsed = metaService.parseOAuthState(state);
+    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=invalid_state`);
+    await metaService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId);
+    res.redirect(`${config.frontendUrl}/crm/seo?social=connected&platform=facebook`);
+  } catch (err) {
+    logger.error('Meta OAuth callback failed', { error: err.message });
+    res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=callback_failed`);
+  }
+});
+
 router.use(requireAuth, injectAuditContext, crmAuth, requireFeature('seo_bot'));
 
 // ── SEO editorial group check (mirrors the group_profiles/user_group_roles
@@ -456,23 +506,6 @@ router.get('/gsc/oauth/url', requireSeoEditor, (req, res) => {
   res.json({ url: gscService.getAuthUrl(req.user.tenant_id, req.user.id) });
 });
 
-router.get('/gsc/oauth/callback', async (req, res) => {
-  try {
-    const { code, state, error } = req.query;
-    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=${encodeURIComponent(error)}`);
-    const parsed = gscService.parseOAuthState(state);
-    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=invalid_state`);
-
-    const { rows } = await db.query('SELECT slug FROM tenants WHERE id = $1', [parsed.tenantId]);
-    const siteUrl = `https://${rows[0]?.slug}.crmtree.pl/`; // placeholder until real onboarding captures the tenant's own domain
-    await gscService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId, siteUrl);
-    res.redirect(`${config.frontendUrl}/crm/seo?gsc=connected`);
-  } catch (err) {
-    logger.error('GSC OAuth callback failed', { error: err.message });
-    res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=callback_failed`);
-  }
-});
-
 router.get('/gsc/status', async (req, res, next) => {
   try {
     const { rows } = await db.query(
@@ -523,36 +556,8 @@ router.get('/social/linkedin/oauth/url', requireSeoEditor, (req, res) => {
   res.json({ url: linkedinService.getAuthUrl(req.user.tenant_id, req.user.id) });
 });
 
-router.get('/social/linkedin/oauth/callback', async (req, res) => {
-  try {
-    const { code, state, error } = req.query;
-    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=${encodeURIComponent(error)}`);
-    const parsed = linkedinService.parseOAuthState(state);
-    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=invalid_state`);
-    await linkedinService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId);
-    res.redirect(`${config.frontendUrl}/crm/seo?social=connected&platform=linkedin`);
-  } catch (err) {
-    logger.error('LinkedIn OAuth callback failed', { error: err.message });
-    res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=callback_failed`);
-  }
-});
-
 router.get('/social/facebook/oauth/url', requireSeoEditor, (req, res) => {
   res.json({ url: metaService.getAuthUrl(req.user.tenant_id, req.user.id) });
-});
-
-router.get('/social/facebook/oauth/callback', async (req, res) => {
-  try {
-    const { code, state, error } = req.query;
-    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=${encodeURIComponent(error)}`);
-    const parsed = metaService.parseOAuthState(state);
-    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=invalid_state`);
-    await metaService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId);
-    res.redirect(`${config.frontendUrl}/crm/seo?social=connected&platform=facebook`);
-  } catch (err) {
-    logger.error('Meta OAuth callback failed', { error: err.message });
-    res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=callback_failed`);
-  }
 });
 
 module.exports = router;
