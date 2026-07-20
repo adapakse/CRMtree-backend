@@ -27,13 +27,21 @@ function normalizeSiteUrl(siteUrl) {
   return siteUrl.trim().replace(/\/$/, '');
 }
 
+// Node's default fetch UA (or its absence) trips hosting WAFs (ModSecurity on
+// cyberfolks.pl etc.) that block requests lacking a browser-like User-Agent —
+// confirmed against a real client site, 2026-07-19 (406 "Połączenie zablokowane").
+const REQUEST_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (compatible; CRMtree-SEObot/1.0; +https://crmtree.pl)',
+  Accept: 'application/json',
+};
+
 /** Validates credentials against the site before storing them. Throws on failure. */
 async function connect(tenantId, siteUrl, username, appPassword, userId) {
   const base = normalizeSiteUrl(siteUrl);
   let res;
   try {
     res = await fetch(`${base}/wp-json/wp/v2/users/me`, {
-      headers: { Authorization: authHeader(username, appPassword) },
+      headers: { ...REQUEST_HEADERS, Authorization: authHeader(username, appPassword) },
     });
   } catch (err) {
     // DNS/connection-level failure (site unreachable, wrong URL, etc.) — fetch()
@@ -71,6 +79,7 @@ async function uploadMedia(account, imageUrl, filename) {
     const uploadRes = await fetch(`${account.site_url}/wp-json/wp/v2/media`, {
       method: 'POST',
       headers: {
+        ...REQUEST_HEADERS,
         Authorization: authHeader(account.username, account.app_password),
         'Content-Type': contentType,
         'Content-Disposition': `attachment; filename="${filename}"`,
@@ -99,6 +108,7 @@ async function publishPost(tenantId, { title, contentHtml, excerpt, imageUrl, sl
   const res = await fetch(`${account.site_url}/wp-json/wp/v2/posts`, {
     method: 'POST',
     headers: {
+      ...REQUEST_HEADERS,
       Authorization: authHeader(account.username, account.app_password),
       'Content-Type': 'application/json',
     },
