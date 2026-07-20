@@ -19,6 +19,7 @@ const crypto = require('crypto');
 const db = require('../../config/database');
 const config = require('../../config');
 const logger = require('../../utils/logger');
+const { encrypt, decrypt } = require('../../utils/encrypt');
 
 const GRAPH_VERSION = 'v21.0'; // verify/bump against current Meta docs
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
@@ -93,7 +94,7 @@ async function exchangeCodeAndSave(code, tenantId, userId) {
      ON CONFLICT (tenant_id, platform) DO UPDATE SET
        external_account_id = EXCLUDED.external_account_id, account_name = EXCLUDED.account_name,
        access_token = EXCLUDED.access_token, connected_by = EXCLUDED.connected_by, updated_at = now()`,
-    [tenantId, page.id, page.name, page.access_token, userId],
+    [tenantId, page.id, page.name, encrypt(page.access_token), userId],
   );
 
   // 4) Instagram Business account linked to this page, if any.
@@ -108,7 +109,7 @@ async function exchangeCodeAndSave(code, tenantId, userId) {
        ON CONFLICT (tenant_id, platform) DO UPDATE SET
          external_account_id = EXCLUDED.external_account_id, account_name = EXCLUDED.account_name,
          access_token = EXCLUDED.access_token, connected_by = EXCLUDED.connected_by, updated_at = now()`,
-      [tenantId, igAccountId, `${page.name} (Instagram)`, page.access_token, userId],
+      [tenantId, igAccountId, `${page.name} (Instagram)`, encrypt(page.access_token), userId],
     );
   } else {
     logger.info('Meta: connected page has no linked Instagram Business account', { tenantId, pageId: page.id });
@@ -120,7 +121,8 @@ async function getAccount(tenantId, platform) {
     `SELECT external_account_id, access_token FROM tenant_social_accounts WHERE tenant_id = $1 AND platform = $2`,
     [tenantId, platform],
   );
-  return rows[0] || null;
+  if (!rows.length) return null;
+  return { ...rows[0], access_token: decrypt(rows[0].access_token) ?? rows[0].access_token };
 }
 
 /** Returns { remotePostId, remoteUrl }. */

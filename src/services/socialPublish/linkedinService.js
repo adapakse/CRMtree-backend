@@ -19,6 +19,7 @@ const crypto = require('crypto');
 const db = require('../../config/database');
 const config = require('../../config');
 const logger = require('../../utils/logger');
+const { encrypt, decrypt } = require('../../utils/encrypt');
 
 const AUTH_BASE = 'https://www.linkedin.com/oauth/v2';
 const API_BASE = 'https://api.linkedin.com';
@@ -100,8 +101,8 @@ async function exchangeCodeAndSave(code, tenantId, userId) {
       tenantId,
       orgUrn,
       orgName,
-      tokens.access_token,
-      tokens.refresh_token || null,
+      encrypt(tokens.access_token),
+      tokens.refresh_token ? encrypt(tokens.refresh_token) : null,
       tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000).toISOString() : null,
       userId,
     ],
@@ -114,7 +115,7 @@ async function getAccount(tenantId) {
     [tenantId],
   );
   if (!rows.length) return null;
-  return rows[0];
+  return { ...rows[0], access_token: decrypt(rows[0].access_token) ?? rows[0].access_token };
 }
 
 /** Publishes as the connected Company Page. Returns { remotePostId, remoteUrl }. */

@@ -8,6 +8,7 @@ const { google } = require("googleapis");
 const crypto = require("crypto");
 const { pool } = require("../config/database");
 const config = require("../config");
+const { encrypt, decrypt } = require("../utils/encrypt");
 
 const SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
 
@@ -74,8 +75,8 @@ async function exchangeCodeAndSave(code, tenantId, userId, siteUrl) {
     [
       tenantId,
       siteUrl,
-      tokens.access_token,
-      tokens.refresh_token || null,
+      encrypt(tokens.access_token),
+      tokens.refresh_token ? encrypt(tokens.refresh_token) : null,
       tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
       userId,
     ],
@@ -91,15 +92,15 @@ async function getAuthForTenant(tenantId) {
 
   const oauth2 = makeOAuth2Client();
   oauth2.setCredentials({
-    access_token: rows[0].access_token,
-    refresh_token: rows[0].refresh_token,
+    access_token: decrypt(rows[0].access_token) ?? rows[0].access_token,
+    refresh_token: decrypt(rows[0].refresh_token) ?? rows[0].refresh_token,
     expiry_date: rows[0].token_expiry ? new Date(rows[0].token_expiry).getTime() : null,
   });
 
   oauth2.on("tokens", async (tokens) => {
     const updates = ["access_token = $1", "updated_at = now()"];
-    const params = [tokens.access_token];
-    if (tokens.refresh_token) { updates.push(`refresh_token = $${params.length + 1}`); params.push(tokens.refresh_token); }
+    const params = [encrypt(tokens.access_token)];
+    if (tokens.refresh_token) { updates.push(`refresh_token = $${params.length + 1}`); params.push(encrypt(tokens.refresh_token)); }
     if (tokens.expiry_date) { updates.push(`token_expiry = $${params.length + 1}`); params.push(new Date(tokens.expiry_date).toISOString()); }
     params.push(tenantId);
     await pool.query(`UPDATE tenant_gsc_tokens SET ${updates.join(", ")} WHERE tenant_id = $${params.length}`, params);

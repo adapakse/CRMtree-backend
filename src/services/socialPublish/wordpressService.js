@@ -18,6 +18,7 @@
 
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
+const { encrypt, decrypt } = require('../../utils/encrypt');
 
 function authHeader(username, appPassword) {
   return `Basic ${Buffer.from(`${username}:${appPassword}`).toString('base64')}`;
@@ -56,7 +57,7 @@ async function connect(tenantId, siteUrl, username, appPassword, userId) {
      ON CONFLICT (tenant_id) DO UPDATE SET
        site_url = EXCLUDED.site_url, username = EXCLUDED.username, app_password = EXCLUDED.app_password,
        connected_by = EXCLUDED.connected_by, updated_at = now()`,
-    [tenantId, base, username, appPassword, userId],
+    [tenantId, base, username, encrypt(appPassword), userId],
   );
 }
 
@@ -65,7 +66,8 @@ async function getAccount(tenantId) {
     `SELECT site_url, username, app_password FROM tenant_wordpress_connections WHERE tenant_id = $1`,
     [tenantId],
   );
-  return rows[0] || null;
+  if (!rows.length) return null;
+  return { ...rows[0], app_password: decrypt(rows[0].app_password) ?? rows[0].app_password };
 }
 
 /** Downloads the image and uploads it to the WP media library. Returns the media ID, or null on any failure (non-fatal — post still publishes without a featured image). */
