@@ -36,7 +36,7 @@ router.use(requireAuth, requireSuperAdmin, injectAuditContext);
 
 const ALL_FEATURES = [
   'documents', 'leads', 'sales_reports', 'onboarding',
-  'partner_registry', 'dwh_integration', 'performance',
+  'partner_registry', 'dwh_integration', 'performance', 'whatsapp',
 ];
 
 // Returns the tenant row (id + any extraColumns) only if it exists and has
@@ -708,19 +708,11 @@ router.put('/:id/training-mode',
   }
 );
 
-// A secret field consisting only of mask characters (e.g. "********",
-// "••••••••", "●●●●●●", "······", optionally with surrounding whitespace) is
-// never a real value — it can only be a UI placeholder that leaked into the
-// submitted body. Treated identically to "not provided", so it can never
-// encrypt-and-overwrite an already-saved secret.
-function isMaskedSecretPlaceholder(value) {
-  if (typeof value !== 'string') return false;
-  const trimmed = value.trim();
-  return trimmed.length > 0 && /^[*•●·]+$/.test(trimmed);
-}
-
-// ── GET /:id/whatsapp-config — WhatsApp Business config (no secrets) ──────
-router.get('/:id/whatsapp-config',
+// ── GET /:id/whatsapp-users — connected numbers in a tenant (oversight only) ──
+// WhatsApp is configured per-user (My Settings), never by an admin — this is
+// read-only visibility for the super admin, mirroring the tenant-directory
+// endpoint tenant admins get in crm-whatsapp.js. Never includes secrets.
+router.get('/:id/whatsapp-users',
   [param('id').isUUID()], validate,
   async (req, res, next) => {
     try {
@@ -729,143 +721,15 @@ router.get('/:id/whatsapp-config',
       }
 
       const { rows } = await db.query(
-        `SELECT id, waba_id, phone_number_id, display_phone_number, is_enabled,
-                access_token, app_secret, webhook_verify_token, created_at, updated_at
-         FROM tenant_whatsapp_config
-         WHERE tenant_id = $1`,
-        [req.params.id]
+        `SELECT u.id AS user_id, u.display_name AS user_name, u.email,
+                c.display_phone_number, c.is_enabled, c.updated_at
+         FROM whatsapp_configs c
+         JOIN users u ON u.id = c.user_id
+         WHERE c.tenant_id = $1
+         ORDER BY u.display_name`,
+        [req.params.id],
       );
-      if (!rows.length) return res.json({ configured: false });
-
-      const row = rows[0];
-      res.json({
-        id: row.id,
-        waba_id: row.waba_id,
-        phone_number_id: row.phone_number_id,
-        display_phone_number: row.display_phone_number,
-        is_enabled: row.is_enabled,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        configured: true,
-        access_token_configured: !!row.access_token,
-        app_secret_configured: !!row.app_secret,
-        webhook_verify_token_configured: !!row.webhook_verify_token,
-      });
-    } catch (err) { next(err); }
-  }
-);
-
-// ── PUT /:id/whatsapp-config — upsert tenant WhatsApp Business config ─────
-// Secrets (access_token, app_secret, webhook_verify_token) follow the same
-// contract as tenant_email_providers.client_secret: omitted/blank on an
-// update keeps the previously saved encrypted value, required on first save.
-router.put('/:id/whatsapp-config',
-  [
-    param('id').isUUID(),
-    body('waba_id').isString().trim().notEmpty(),
-    body('phone_number_id').isString().trim().notEmpty(),
-    body('display_phone_number').optional({ nullable: true }).isString().trim(),
-    body('access_token').optional({ nullable: true }).isString(),
-    body('app_secret').optional({ nullable: true }).isString(),
-    body('webhook_verify_token').optional({ nullable: true }).isString(),
-    body('is_enabled').optional().isBoolean(),
-  ], validate,
-  async (req, res, next) => {
-    try {
-      if (!(await findAliveTenant(req.params.id))) {
-        return res.status(404).json({ error: 'Tenant not found' });
-      }
-
-      const {
-        waba_id, phone_number_id, display_phone_number,
-        access_token, app_secret, webhook_verify_token,
-        is_enabled = true,
-      } = req.body;
-
-      // Masked placeholders (e.g. "********") never count as a real value —
-      // fall back to "not provided" exactly as if the field were blank.
-      const accessTokenInput        = isMaskedSecretPlaceholder(access_token)         ? null : access_token;
-      const appSecretInput          = isMaskedSecretPlaceholder(app_secret)           ? null : app_secret;
-      const webhookVerifyTokenInput = isMaskedSecretPlaceholder(webhook_verify_token) ? null : webhook_verify_token;
-
-      const { rows: existing } = await db.query(
-        'SELECT access_token, app_secret, webhook_verify_token FROM tenant_whatsapp_config WHERE tenant_id = $1',
-        [req.params.id]
-      );
-      const prev = existing[0] || null;
-
-      let encAccessToken;
-      if (accessTokenInput) {
-        encAccessToken = encrypt(accessTokenInput);
-      } else if (prev) {
-        encAccessToken = prev.access_token;
-      } else {
-        return res.status(400).json({ error: 'access_token jest wymagany dla nowej konfiguracji' });
-      }
-
-      let encWebhookVerifyToken;
-      if (webhookVerifyTokenInput) {
-        encWebhookVerifyToken = encrypt(webhookVerifyTokenInput);
-      } else if (prev) {
-        encWebhookVerifyToken = prev.webhook_verify_token;
-      } else {
-        return res.status(400).json({ error: 'webhook_verify_token jest wymagany dla nowej konfiguracji' });
-      }
-
-      const encAppSecret = appSecretInput ? encrypt(appSecretInput) : (prev ? prev.app_secret : null);
-
-      const { rows } = await db.query(
-        `INSERT INTO tenant_whatsapp_config
-           (tenant_id, waba_id, phone_number_id, display_phone_number, access_token, app_secret, webhook_verify_token, is_enabled)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (tenant_id) DO UPDATE SET
-           waba_id              = EXCLUDED.waba_id,
-           phone_number_id      = EXCLUDED.phone_number_id,
-           display_phone_number = EXCLUDED.display_phone_number,
-           access_token         = EXCLUDED.access_token,
-           app_secret           = EXCLUDED.app_secret,
-           webhook_verify_token = EXCLUDED.webhook_verify_token,
-           is_enabled           = EXCLUDED.is_enabled,
-           updated_at           = NOW()
-         RETURNING id, waba_id, phone_number_id, display_phone_number, is_enabled, created_at, updated_at`,
-        [req.params.id, waba_id, phone_number_id, display_phone_number || null,
-         encAccessToken, encAppSecret, encWebhookVerifyToken, is_enabled]
-      );
-
-      logger.info('Super admin upserted WhatsApp config', {
-        tenantId: req.params.id, by: req.user.email,
-      });
-
-      res.json({
-        ...rows[0],
-        configured: true,
-        access_token_configured: true,
-        app_secret_configured: !!encAppSecret,
-        webhook_verify_token_configured: true,
-      });
-    } catch (err) { next(err); }
-  }
-);
-
-// ── DELETE /:id/whatsapp-config — remove tenant WhatsApp config ───────────
-router.delete('/:id/whatsapp-config',
-  [param('id').isUUID()], validate,
-  async (req, res, next) => {
-    try {
-      if (!(await findAliveTenant(req.params.id))) {
-        return res.status(404).json({ error: 'Tenant not found' });
-      }
-
-      const { rowCount } = await db.query(
-        'DELETE FROM tenant_whatsapp_config WHERE tenant_id = $1',
-        [req.params.id]
-      );
-      if (!rowCount) return res.status(404).json({ error: 'WhatsApp not configured' });
-
-      logger.info('Super admin deleted WhatsApp config', {
-        tenantId: req.params.id, by: req.user.email,
-      });
-      res.status(204).end();
+      res.json(rows);
     } catch (err) { next(err); }
   }
 );
