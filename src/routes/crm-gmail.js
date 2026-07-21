@@ -16,6 +16,7 @@ const {
   storeAttachment,
 } = require("../services/gmailProcessor");
 const { isTrainingMode } = require("../utils/trainingMode");
+const { isTrainingThreadId, buildTrainingThreadResponse } = require("../utils/trainingThread");
 const { requireActiveEmailProvider, resolveProviderGate } = require("../middleware/email-provider");
 
 // Guards connect/send/sync actions — blocks them unless this tenant's active
@@ -556,6 +557,15 @@ async function threadLeadHandler(req, res) {
   try {
     const leadId = parseInt(req.params.leadId);
 
+    if (isTrainingThreadId(req.params.threadId)) {
+      const result = await buildTrainingThreadResponse({
+        table: 'crm_lead_activities', idCol: 'lead_id', idVal: leadId,
+        threadId: req.params.threadId, tenantId: req.tenantId, currentUserId: req.user.id,
+      });
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.json(result);
+    }
+
     // Gmail threads live in one Google account — read with the token of
     // whichever user's mailbox owns this thread, not the current viewer's.
     const ownerQ = await pool.query(
@@ -667,6 +677,15 @@ async function threadPartnerHandler(req, res) {
   try {
     const resolved  = await resolvePartner(req.params.partnerId, req.tenantId, req.dwhPrefix);
     const partnerId = resolved?.id ?? req.params.partnerId;
+
+    if (isTrainingThreadId(req.params.threadId)) {
+      const result = await buildTrainingThreadResponse({
+        table: 'crm_partner_activities', idCol: 'partner_id', idVal: partnerId,
+        threadId: req.params.threadId, tenantId: req.tenantId, currentUserId: req.user.id,
+      });
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.json(result);
+    }
 
     // Gmail threads live in one Google account — read with the token of
     // whichever user's mailbox owns this thread, not the current viewer's.
