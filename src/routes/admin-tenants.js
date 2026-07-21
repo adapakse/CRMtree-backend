@@ -37,7 +37,7 @@ router.use(requireAuth, requireSuperAdmin, injectAuditContext);
 
 const ALL_FEATURES = [
   'documents', 'leads', 'sales_reports', 'onboarding',
-  'partner_registry', 'dwh_integration', 'performance',
+  'partner_registry', 'dwh_integration', 'performance', 'whatsapp',
 ];
 
 // Returns the tenant row (id + any extraColumns) only if it exists and has
@@ -718,6 +718,32 @@ router.put('/:id/training-mode',
         tenantId: req.params.id, enabled, by: req.user.email,
       });
       res.json({ id: req.params.id, crm_training_mode: enabled });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── GET /:id/whatsapp-users — connected numbers in a tenant (oversight only) ──
+// WhatsApp is configured per-user (My Settings), never by an admin — this is
+// read-only visibility for the super admin, mirroring the tenant-directory
+// endpoint tenant admins get in crm-whatsapp.js. Never includes secrets.
+router.get('/:id/whatsapp-users',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      if (!(await findAliveTenant(req.params.id))) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const { rows } = await db.query(
+        `SELECT u.id AS user_id, u.display_name AS user_name, u.email,
+                c.display_phone_number, c.is_enabled, c.updated_at
+         FROM whatsapp_configs c
+         JOIN users u ON u.id = c.user_id
+         WHERE c.tenant_id = $1
+         ORDER BY u.display_name`,
+        [req.params.id],
+      );
+      res.json(rows);
     } catch (err) { next(err); }
   }
 );
