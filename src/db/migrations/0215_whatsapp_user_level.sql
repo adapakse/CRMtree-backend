@@ -1,14 +1,19 @@
 -- 0215_whatsapp_user_level.sql
--- Replaces the tenant-level WhatsApp model (0206/0207: one shared company
--- number per tenant, superadmin-only) with a per-user model: each CRM user
--- connects their own WhatsApp Business number from their own Meta app.
--- Tenant admin/super admin no longer hold numbers or secrets — they only
--- gate/observe (see tenant_features 'whatsapp' flag, added in 0214, and the
--- read-only directory endpoints in crm-whatsapp.js).
+-- WhatsApp Business config, per-user: each CRM user connects their own
+-- number from their own Meta app. Tenant admin/super admin never hold
+-- numbers or secrets — they only gate/observe (see tenant_features
+-- 'whatsapp' flag, added in 0214, and the read-only directory endpoints in
+-- crm-whatsapp.js).
 --
--- Dropped instead of altered: both tables only ever held throwaway test data
--- (one test tenant config, a handful of test messages), never deployed
--- beyond this branch, so there is nothing worth migrating forward.
+-- The DROP IF EXISTS guards below are defensive, not a migration-forward
+-- step: an earlier, briefly-lived tenant-level model on this branch
+-- (superadmin-managed, one number per tenant) created tables with these
+-- same names before being replaced by this per-user model. That earlier
+-- model's own migrations were removed from this branch's history entirely
+-- (never deployed beyond it, held only throwaway test data, and their
+-- numbering collided with unrelated migrations already merged into
+-- develop) — these DROPs just make this migration safe to (re-)run on any
+-- environment that happened to apply that short-lived version first.
 
 DROP TABLE IF EXISTS whatsapp_messages;
 DROP TABLE IF EXISTS tenant_whatsapp_config;
