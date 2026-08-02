@@ -27,6 +27,10 @@ const adminDataRoutes 	  = require('./routes/admin-data');
 const adminTenantsRoutes  = require('./routes/admin-tenants');
 const profileRoutes       = require('./routes/profile');
 const crmGmail 		  = require('./routes/crm-gmail');
+const crmOutlook      = require('./routes/crm-outlook');
+const crmZoho         = require('./routes/crm-zoho');
+const crmEmail        = require('./routes/crm-email');
+const crmWhatsapp     = require('./routes/crm-whatsapp');
 const publicBlogRoutes    = require('./routes/public-blog');
 
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
@@ -93,7 +97,8 @@ app.use('/api/', rateLimit({
   skip: (req) => (
     config.isDev ||
     req.path.startsWith('/auth/') ||
-    req.path === '/signing/webhook'
+    req.path === '/signing/webhook' ||
+    req.path === '/crm/whatsapp/webhook'
   ),
 }));
 
@@ -113,7 +118,18 @@ app.use((req, res, next) => {
   }
 });
 
-app.use(express.json({ limit: '10mb' }));
+// WhatsApp webhook signature verification (X-Hub-Signature-256) needs the
+// exact raw bytes Meta signed, not the re-serialized JSON — capturing it here
+// via express.json()'s own verify hook avoids a second manual body-reader
+// (unlike /signing/webhook above) and doesn't affect any other route's parsing.
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    if (req.path === '/api/crm/whatsapp/webhook') {
+      req.rawBody = buf;
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(compression());
 
@@ -153,7 +169,11 @@ app.use('/api/admin/settings',  settingsRoutes);
 app.use('/api/admin/data',     adminDataRoutes);
 app.use('/api/admin/tenants', adminTenantsRoutes);
 app.use('/api/profile',         profileRoutes);
-app.use('/api/crm/gmail', crmGmail);
+app.use('/api/crm/gmail',   crmGmail);
+app.use('/api/crm/outlook', crmOutlook);
+app.use('/api/crm/zoho',    crmZoho);
+app.use('/api/crm/email',   crmEmail);
+app.use('/api/crm/whatsapp', crmWhatsapp);
 
 app.use('/api/groups',          groupRoutes);
 app.use('/api/document-groups', documentGroupRoutes);
@@ -315,13 +335,19 @@ app.use(errorHandler);
 // ─── Gmail watch auto-renewal (co 6 dni) ──────────────────────────────────────
 // Gmail watch wygasa po 7 dniach — odnawiamy co 6 dni aby nie stracić push-notyfikacji.
 // Uruchamiamy przy starcie serwera, a potem co 6 * 24h.
-if (config.google.pubsubTopic) {
+// Uwaga: scheduler NIE jest już bramkowany globalnym config.google.pubsubTopic —
+// pubsub_topic jest wymagany per tenant (tenant_email_providers.extra_config),
+// nie globalnie z .env. Brak globalnego env nie może blokować odnowienia watchy
+// tenantom, które mają własny topic ustawiony; renewAllWatches i tak łapie
+// błędy per-user (patrz gmailService.js) — brak configu jednego tenanta/usera
+// nie przerywa pętli dla pozostałych.
+{
   const gmailService = require('./services/gmailService');
-  const { pool: dbPool } = require('./config/database');
+  const { pool: gmailWatchPool } = require('./config/database');
   const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
 
   const scheduleWatchRenewal = () => {
-    gmailService.renewAllWatches(dbPool).catch(() => {});
+    gmailService.renewAllWatches(gmailWatchPool).catch(() => {});
     setTimeout(scheduleWatchRenewal, SIX_DAYS_MS);
   };
   // Pierwsze odnowienie po 60s od startu (serwer musi być gotowy)

@@ -1,12 +1,13 @@
 "use strict";
-// src/routes/crm-gmail.js
+// src/routes/crm-outlook.js
 
 const express         = require("express");
 const router          = express.Router();
 const { pool }        = require("../config/database");
 const { requireAuth }  = require("../middleware/auth");
 const { crmAuth }     = require("../middleware/crm-rbac");
-const gmailService    = require("../services/gmailService");
+const outlookService  = require("../services/outlookService");
+const outlookProcessor = require("../services/outlookProcessor");
 const storageService  = require("../services/storageService");
 const config          = require("../config");
 const { v4: uuidv4 }  = require("uuid");
@@ -14,20 +15,18 @@ const {
   autoSaveLeadContacts,
   autoSavePartnerContacts,
   storeAttachment,
-} = require("../services/gmailProcessor");
+} = require("../services/emailContactSync");
 const { isTrainingMode } = require("../utils/trainingMode");
 const { isTrainingThreadId, buildTrainingThreadResponse } = require("../utils/trainingThread");
 const { requireActiveEmailProvider, resolveProviderGate } = require("../middleware/email-provider");
 
 // Guards connect/send/sync actions — blocks them unless this tenant's active
-// provider is 'gmail' (bypassed automatically for crm_training_mode tenants).
-const gmailGate = requireActiveEmailProvider("gmail");
+// provider is 'outlook' (bypassed automatically for crm_training_mode tenants).
+const outlookGate = requireActiveEmailProvider("outlook");
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Resolves partner by UUID (crm_partners.id) or integer (dwh_partner_id).
-// Returns { id: uuid, company } or null.
-async function resolvePartner(rawId, tenantId, dwhPrefix = 'crmtree_gold') {
+async function resolvePartner(rawId, tenantId) {
   if (UUID_RE.test(String(rawId))) {
     const { rows } = await pool.query(
       "SELECT id, company FROM crm_partners WHERE id = $1 AND tenant_id = $2", [rawId, tenantId]
@@ -39,21 +38,7 @@ async function resolvePartner(rawId, tenantId, dwhPrefix = 'crmtree_gold') {
   const { rows } = await pool.query(
     "SELECT id, company FROM crm_partners WHERE dwh_partner_id = $1 AND tenant_id = $2", [num, tenantId]
   );
-  if (rows.length) return rows[0];
-  // Not in crm_partners yet — lazy-create from DWH
-  const dm = await pool.query(
-    `SELECT COALESCE(NULLIF(trim(company_name),''), NULLIF(trim(name),''), partner_id::text) AS company
-     FROM dwh.${dwhPrefix}_partner WHERE partner_id = $1`, [num]
-  );
-  if (!dm.rows.length) return null;
-  const ins = await pool.query(
-    `INSERT INTO crm_partners (company, dwh_partner_id, status, onboarding_step, created_at, updated_at, tenant_id)
-     VALUES ($1, $2, 'active', 3, now(), now(), $3)
-     ON CONFLICT (dwh_partner_id) DO UPDATE SET updated_at = now()
-     RETURNING id, company`,
-    [dm.rows[0].company, num, tenantId]
-  );
-  return ins.rows[0] ?? null;
+  return rows[0] ?? null;
 }
 
 // Treść symulowanej odpowiedzi e-mail w trybie szkoleniowym
@@ -104,15 +89,13 @@ try {
   const multer = require("multer");
   upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 } catch (_) {
-  console.warn("[Gmail] multer niedostępny — wysyłka bez załączników. Uruchom: npm install multer");
+  console.warn("[Outlook] multer niedostępny — wysyłka bez załączników. Uruchom: npm install multer");
 }
 
 // ── Helpers (lokalnie — rejestracja ref. załączników bez pobierania treści) ────
 
-/**
- * Zapisuje metadane załączników do crm_email_attachments bez pobierania treści (blob_path = NULL).
- * Wywołana przy pobieraniu wątku — umożliwia późniejsze pobranie.
- */
+// Zapisuje metadane załączników do crm_email_attachments bez pobierania treści
+// (blob_path = NULL). Wywołana przy pobieraniu wątku — umożliwia późniejsze pobranie.
 async function registerAttachmentRefs({ leadId, partnerId, messageId, attachments, tenantId, mailboxUserId }) {
   const idCol = leadId ? "lead_id" : "partner_id";
   const idVal = leadId || partnerId;
@@ -133,75 +116,69 @@ async function registerAttachmentRefs({ leadId, partnerId, messageId, attachment
 // OAUTH2
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Each CRM user connects their own Gmail account — triggered inline from
-// "Nowy e-mail" (see crm-email.js dispatcher), not from a superadmin panel.
-// The tenant only chooses/configures WHICH provider is active; the mailbox
-// itself always belongs to req.user, never to the tenant as a whole.
+// Each CRM user connects their own Microsoft 365 account — triggered inline
+// from "Nowy e-mail" (see crm-email.js dispatcher), not from a superadmin
+// panel. The tenant only chooses/configures WHICH provider is active; the
+// mailbox itself always belongs to req.user, never to the tenant as a whole.
 async function oauthUrlHandler(req, res, next) {
   try {
-    const gate = await resolveProviderGate(req.tenantId, "gmail");
+    const gate = await resolveProviderGate(req.tenantId, "outlook");
     if (!gate.ok) {
       return res.status(gate.active ? 403 : 400).json({
         error: gate.active
           ? `Ta organizacja korzysta z innego dostawcy poczty (${gate.active}).`
-          : "Gmail nie jest aktywnym providerem dla tego tenanta.",
+          : "Outlook nie jest aktywnym providerem dla tego tenanta.",
         code: "PROVIDER_NOT_ACTIVE",
       });
     }
-    const url = await gmailService.getAuthUrl(req.user.id, req.tenantId);
+    const url = await outlookService.getAuthUrl(req.user.id, req.tenantId);
     res.json({ url });
   } catch (err) { next(err); }
 }
 router.get("/oauth/url", requireAuth, crmAuth, oauthUrlHandler);
 
-// Brak requireAuth — Google redirectuje przeglądarkę bez headera Authorization.
+// Brak requireAuth — Microsoft redirectuje przeglądarkę bez headera Authorization.
 // userId jest bezpiecznie zakodowany w parametrze `state` wygenerowanym przez /oauth/url.
 router.get("/oauth/callback", async (req, res) => {
   try {
     const { code, error, state } = req.query;
-    if (error) return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=${encodeURIComponent(error)}`);
-    if (!code)  return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=no_code`);
-    if (!state) return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=missing_state`);
+    if (error) return res.redirect(`${config.frontendUrl}/crm/outlook/callback?status=error&reason=${encodeURIComponent(error)}`);
+    if (!code)  return res.redirect(`${config.frontendUrl}/crm/outlook/callback?status=error&reason=no_code`);
+    if (!state) return res.redirect(`${config.frontendUrl}/crm/outlook/callback?status=error&reason=missing_state`);
 
-    const userId = gmailService.parseOAuthState(state);
+    const userId = outlookService.parseOAuthState(state);
     if (!userId) {
-      console.error("[Gmail] OAuth callback: invalid_state, raw state=", state);
-      return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=invalid_state`);
+      console.error("[Outlook] OAuth callback: invalid_state, raw state=", state);
+      return res.redirect(`${config.frontendUrl}/crm/outlook/callback?status=error&reason=invalid_state`);
     }
 
     const { rows: uRows } = await pool.query("SELECT tenant_id FROM users WHERE id = $1", [userId]);
     const tenantId = uRows[0]?.tenant_id ?? null;
-    const gate = await resolveProviderGate(tenantId, "gmail");
+    const gate = await resolveProviderGate(tenantId, "outlook");
     if (!gate.ok) {
-      return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=provider_not_active`);
+      return res.redirect(`${config.frontendUrl}/crm/outlook/callback?status=error&reason=provider_not_active`);
     }
 
-    console.log("[Gmail] OAuth callback: state OK, userId=", userId);
-    await gmailService.exchangeCodeAndSave(code, userId);
-    console.log("[Gmail] OAuth callback: tokens saved for userId=", userId);
+    console.log("[Outlook] OAuth callback: state OK, userId=", userId);
+    await outlookService.exchangeCodeAndSave(code, userId);
+    console.log("[Outlook] OAuth callback: tokens saved for userId=", userId);
 
-    // Zarejestruj Pub/Sub watch — połączenie skrzynki ma się udać nawet jeśli
-    // to się nie powiedzie (np. niekompletna konfiguracja pubsub_topic dla
-    // tenanta), ale błąd musi być widoczny w logach, nie połykany po cichu.
-    try {
-      await gmailService.registerWatch(userId);
-    } catch (err) {
-      console.warn("[Gmail] registerWatch po OAuth callback nie powiódł się:", err.message);
-    }
+    // Ustaw punkt startowy delta query (ignoruj błąd — pierwszy poll zrobi to sam)
+    try { await outlookService.initDeltaLink(userId); } catch (_) {}
 
-    res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=connected`);
+    res.redirect(`${config.frontendUrl}/crm/outlook/callback?status=connected`);
   } catch (err) {
-    console.error("[Gmail] OAuth callback error:", err.message, err.stack);
+    console.error("[Outlook] OAuth callback error:", err.message, err.stack);
     if (err.code === "MAILBOX_ALREADY_CONNECTED") {
-      return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=email_already_connected`);
+      return res.redirect(`${config.frontendUrl}/crm/outlook/callback?status=error&reason=email_already_connected`);
     }
-    res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=callback_failed`);
+    res.redirect(`${config.frontendUrl}/crm/outlook/callback?status=error&reason=callback_failed`);
   }
 });
 
 async function statusHandler(req, res) {
   try {
-    const status = await gmailService.getStatus(req.user.id);
+    const status = await outlookService.getStatus(req.user.id);
     res.json(status);
   } catch (err) {
     res.status(500).json({ error: "Błąd serwera" });
@@ -209,103 +186,9 @@ async function statusHandler(req, res) {
 }
 router.get("/status", requireAuth, crmAuth, statusHandler);
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// GOOGLE DRIVE PICKER
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// GET /api/crm/gmail/drive-config — zwraca API key + clientId dla Pickera (browser-side)
-router.get("/drive-config", requireAuth, (req, res) => {
-  const { clientId, apiKey } = config.google;
-  if (!apiKey || !clientId) {
-    return res.status(503).json({ error: "Drive Picker nie jest skonfigurowany (brak GOOGLE_API_KEY)" });
-  }
-  // appId = numeryczny prefix clientId (przed myślnikiem)
-  const appId = clientId.split("-")[0];
-  res.json({ apiKey, clientId, appId });
-});
-
-// GET /api/crm/gmail/drive-token — zwraca świeży access_token; wykrywa brak scope drive.readonly
-router.get("/drive-token", requireAuth, async (req, res) => {
-  try {
-    const oauth2 = await gmailService.getAuthForUser(req.user.id);
-    const { token } = await oauth2.getAccessToken();
-
-    // Sprawdź scope przez tokeninfo — nie wymaga włączonego Drive API
-    const infoRes  = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`);
-    const infoJson = await infoRes.json();
-    const scopes   = (infoJson.scope || '').split(' ');
-    const hasDrive = scopes.some(s => s.includes('drive'));
-
-    if (!hasDrive) return res.json({ needsReauth: true });
-
-    res.json({ access_token: token });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// Mapowanie Google Workspace → format eksportu (PDF jako domyślny dla maili)
-const GAPPS_EXPORT = {
-  "application/vnd.google-apps.document":     { mime: "application/pdf", ext: ".pdf" },
-  "application/vnd.google-apps.spreadsheet":  { mime: "application/pdf", ext: ".pdf" },
-  "application/vnd.google-apps.presentation": { mime: "application/pdf", ext: ".pdf" },
-  "application/vnd.google-apps.drawing":      { mime: "application/pdf", ext: ".pdf" },
-};
-
-// GET /api/crm/gmail/drive/file/:fileId — proxy pobierania pliku z Drive
-router.get("/drive/file/:fileId", requireAuth, async (req, res) => {
-  try {
-    const { google: googleapis } = require("googleapis");
-    const oauth2 = await gmailService.getAuthForUser(req.user.id);
-    const drive  = googleapis.drive({ version: "v3", auth: oauth2 });
-
-    // Pobierz metadane
-    const meta = await drive.files.get({
-      fileId: req.params.fileId,
-      fields: "name,mimeType",
-      supportsAllDrives: true,
-    });
-
-    const srcMime  = meta.data.mimeType || "application/octet-stream";
-    const baseName = meta.data.name     || "plik";
-    const exportCfg = GAPPS_EXPORT[srcMime];
-
-    let fileStream, outMime, filename;
-
-    if (exportCfg) {
-      // Plik Google Workspace — eksportuj do PDF
-      const expRes = await drive.files.export(
-        { fileId: req.params.fileId, mimeType: exportCfg.mime },
-        { responseType: "stream" }
-      );
-      fileStream = expRes.data;
-      outMime    = exportCfg.mime;
-      filename   = baseName.endsWith(exportCfg.ext) ? baseName : baseName + exportCfg.ext;
-    } else {
-      // Zwykły plik — pobierz binarnie
-      const dlRes = await drive.files.get(
-        { fileId: req.params.fileId, alt: "media", supportsAllDrives: true },
-        { responseType: "stream" }
-      );
-      fileStream = dlRes.data;
-      outMime    = srcMime;
-      filename   = baseName;
-    }
-
-    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-    res.setHeader("Content-Type", outMime);
-    fileStream.pipe(res);
-  } catch (err) {
-    const status = err.code || err.status;
-    const msg    = err.errors?.[0]?.message || err.message || "Nieznany błąd";
-    console.error(`[Drive] download error (${status}):`, msg);
-    res.status(500).json({ error: `Nie udało się pobrać pliku z Google Drive: ${msg}` });
-  }
-});
-
 async function disconnectHandler(req, res) {
   try {
-    await gmailService.disconnect(req.user.id);
+    await outlookService.disconnect(req.user.id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Błąd serwera" });
@@ -333,8 +216,8 @@ async function sendLeadHandler(req, res) {
     if (!leadQ.rows.length) return res.status(404).json({ error: "Lead nie znaleziony" });
 
     // A reply within an existing thread must go out from the mailbox that
-    // owns it — Gmail threads are scoped to one Google account and cannot be
-    // continued from another user's connected mailbox.
+    // owns it — Outlook conversations are scoped to one Microsoft account
+    // and cannot be continued from another user's connected mailbox.
     if (threadId) {
       const ownerQ = await pool.query(
         "SELECT mailbox_user_id FROM crm_lead_activities WHERE lead_id = $1 AND gmail_thread_id = $2 AND tenant_id = $3 LIMIT 1",
@@ -364,22 +247,23 @@ async function sendLeadHandler(req, res) {
         _buffer:  f.buffer,
       }));
 
-      const sent = await gmailService.sendEmail({
+      const sent = await outlookService.sendEmail({
         userId:      req.user.id,
         to, cc: cc || null, subject,
         body:        body || "",
-        threadId:    threadId   || null,
         inReplyTo:   inReplyTo  || null,
         references:  references || null,
         attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
       messageId    = sent.messageId;
       // A reply to an existing CRM thread always stays in that thread — the
-      // provider's own returned threadId is only the anchor for a genuinely
-      // NEW message (no incoming threadId). Gmail always honors the explicit
-      // threadId we pass in, so this is a no-op for Gmail in practice, but
-      // keeping the same rule across all three providers is what makes the
-      // behavior consistent — see crm-outlook.js / crm-zoho.js.
+      // provider's own returned threadId (conversationId) is only the anchor
+      // for a genuinely NEW message (no incoming threadId). Graph can assign
+      // a different conversationId to a reply once the subject changes, but
+      // that must never split the CRM's own view of the conversation —
+      // threadLeadHandler/threadPartnerHandler already backfill any message
+      // Graph's conversationId filter doesn't return, by fetching it
+      // directly by its known message id.
       sentThreadId = threadId || sent.threadId;
 
       for (const att of attachments) {
@@ -392,7 +276,7 @@ async function sendLeadHandler(req, res) {
           buffer:       att._buffer,
           direction:    "sent",
           mailboxUserId: req.user.id,
-        }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
+        }).catch((e) => console.warn("[Outlook] Sent attachment blob save failed:", e.message));
       }
     }
 
@@ -400,14 +284,14 @@ async function sendLeadHandler(req, res) {
     // właścicielem skrzynki dla wiadomości wychodzącej)
     const actR = await pool.query(
       `INSERT INTO crm_lead_activities
-         (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, mailbox_user_id, is_read, tenant_id)
-       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, $6, true, $7)
+         (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id,
+          email_provider, created_by, mailbox_user_id, is_read, tenant_id)
+       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, 'outlook', $6, $6, true, $7)
        RETURNING id`,
       [leadId, subject, body || null, sentThreadId, messageId, req.user.id, req.tenantId],
     );
 
     // Auto-zapis TYLKO odbiorców To (nie CC) do kontaktów leada
-    // CC celowo pomijane — może zawierać wewnętrznych pracowników lub osoby trzecie
     const toRecipients = String(to).split(",").map((s) => s.trim()).filter(Boolean);
     await autoSaveLeadContacts(leadId, toRecipients, req.tenantId);
 
@@ -417,7 +301,7 @@ async function sendLeadHandler(req, res) {
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
-    console.error("[Gmail] send/lead error:", err.message);
+    console.error("[Outlook] send/lead error:", err.message);
     if (err.status) {
       return res.status(err.status).json({ error: err.message, code: err.code });
     }
@@ -429,9 +313,9 @@ async function sendLeadHandler(req, res) {
 }
 
 if (upload) {
-  router.post("/send/lead/:leadId", requireAuth, crmAuth, gmailGate, upload.array("attachments", 10), sendLeadHandler);
+  router.post("/send/lead/:leadId", requireAuth, crmAuth, outlookGate, upload.array("attachments", 10), sendLeadHandler);
 } else {
-  router.post("/send/lead/:leadId", requireAuth, crmAuth, gmailGate, sendLeadHandler);
+  router.post("/send/lead/:leadId", requireAuth, crmAuth, outlookGate, sendLeadHandler);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -446,13 +330,13 @@ async function sendPartnerHandler(req, res) {
       return res.status(400).json({ error: "Pola 'to' i 'subject' są wymagane" });
     }
 
-    const partner = await resolvePartner(req.params.partnerId, req.tenantId, req.dwhPrefix);
+    const partner = await resolvePartner(req.params.partnerId, req.tenantId);
     if (!partner) return res.status(404).json({ error: "Partner nie znaleziony" });
     const crmPartnerId = partner.id;
 
     // A reply within an existing thread must go out from the mailbox that
-    // owns it — Gmail threads are scoped to one Google account and cannot be
-    // continued from another user's connected mailbox.
+    // owns it — Outlook conversations are scoped to one Microsoft account
+    // and cannot be continued from another user's connected mailbox.
     if (threadId) {
       const ownerQ = await pool.query(
         "SELECT mailbox_user_id FROM crm_partner_activities WHERE partner_id = $1 AND gmail_thread_id = $2 AND tenant_id = $3 LIMIT 1",
@@ -482,22 +366,23 @@ async function sendPartnerHandler(req, res) {
         _buffer:  f.buffer,
       }));
 
-      const sent = await gmailService.sendEmail({
+      const sent = await outlookService.sendEmail({
         userId:      req.user.id,
         to, cc: cc || null, subject,
         body:        body || "",
-        threadId:    threadId   || null,
         inReplyTo:   inReplyTo  || null,
         references:  references || null,
         attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
       messageId    = sent.messageId;
       // A reply to an existing CRM thread always stays in that thread — the
-      // provider's own returned threadId is only the anchor for a genuinely
-      // NEW message (no incoming threadId). Gmail always honors the explicit
-      // threadId we pass in, so this is a no-op for Gmail in practice, but
-      // keeping the same rule across all three providers is what makes the
-      // behavior consistent — see crm-outlook.js / crm-zoho.js.
+      // provider's own returned threadId (conversationId) is only the anchor
+      // for a genuinely NEW message (no incoming threadId). Graph can assign
+      // a different conversationId to a reply once the subject changes, but
+      // that must never split the CRM's own view of the conversation —
+      // threadLeadHandler/threadPartnerHandler already backfill any message
+      // Graph's conversationId filter doesn't return, by fetching it
+      // directly by its known message id.
       sentThreadId = threadId || sent.threadId;
 
       for (const att of attachments) {
@@ -510,14 +395,15 @@ async function sendPartnerHandler(req, res) {
           buffer:       att._buffer,
           direction:    "sent",
           mailboxUserId: req.user.id,
-        }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
+        }).catch((e) => console.warn("[Outlook] Sent attachment blob save failed:", e.message));
       }
     }
 
     const actR = await pool.query(
       `INSERT INTO crm_partner_activities
-         (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, mailbox_user_id, is_read, tenant_id)
-       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, $6, true, $7)
+         (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id,
+          email_provider, created_by, mailbox_user_id, is_read, tenant_id)
+       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, 'outlook', $6, $6, true, $7)
        RETURNING id`,
       [crmPartnerId, subject, body || null, sentThreadId, messageId, req.user.id, req.tenantId],
     );
@@ -532,7 +418,7 @@ async function sendPartnerHandler(req, res) {
 
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
-    console.error("[Gmail] send/partner error:", err.message);
+    console.error("[Outlook] send/partner error:", err.message);
     if (err.status) {
       return res.status(err.status).json({ error: err.message, code: err.code });
     }
@@ -544,9 +430,9 @@ async function sendPartnerHandler(req, res) {
 }
 
 if (upload) {
-  router.post("/send/partner/:partnerId", requireAuth, crmAuth, gmailGate, upload.array("attachments", 10), sendPartnerHandler);
+  router.post("/send/partner/:partnerId", requireAuth, crmAuth, outlookGate, upload.array("attachments", 10), sendPartnerHandler);
 } else {
-  router.post("/send/partner/:partnerId", requireAuth, crmAuth, gmailGate, sendPartnerHandler);
+  router.post("/send/partner/:partnerId", requireAuth, crmAuth, outlookGate, sendPartnerHandler);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -566,8 +452,9 @@ async function threadLeadHandler(req, res) {
       return res.json(result);
     }
 
-    // Gmail threads live in one Google account — read with the token of
-    // whichever user's mailbox owns this thread, not the current viewer's.
+    // Outlook conversations live in one Microsoft account — read with the
+    // token of whichever user's mailbox owns this thread, not the current
+    // viewer's.
     const ownerQ = await pool.query(
       `SELECT a.mailbox_user_id, u.email AS owner_email
        FROM crm_lead_activities a
@@ -586,7 +473,27 @@ async function threadLeadHandler(req, res) {
       });
     }
 
-    const messages = await gmailService.getThread(ownerId, req.params.threadId);
+    const messages = await outlookService.getThread(ownerId, req.params.threadId);
+
+    // Microsoft Graph's conversationId filter (used by outlookService.getThread)
+    // silently omits messages whose subject was changed relative to the
+    // conversation's original topic, even though they carry the identical
+    // conversationId — confirmed directly against Graph, not a threadId/
+    // conversationId assignment bug. We already know every message we ever
+    // recorded for this thread from our own DB, so backfill anything Graph's
+    // filter dropped by fetching it directly by id.
+    const foundIds = new Set(messages.map(m => m.id));
+    const { rows: knownRows } = await pool.query(
+      `SELECT DISTINCT gmail_message_id FROM crm_lead_activities
+       WHERE lead_id = $1 AND gmail_thread_id = $2 AND tenant_id = $3 AND gmail_message_id IS NOT NULL`,
+      [leadId, req.params.threadId, req.tenantId],
+    );
+    const missingIds = knownRows.map(r => r.gmail_message_id).filter(id => !foundIds.has(id));
+    if (missingIds.length) {
+      const backfilled = await Promise.all(missingIds.map(id => outlookService.getMessage(ownerId, id).catch(() => null)));
+      for (const msg of backfilled) if (msg) messages.push(msg);
+      messages.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    }
 
     for (const msg of messages) {
       if (msg.attachments?.length) {
@@ -596,7 +503,6 @@ async function threadLeadHandler(req, res) {
 
     const msgIds = messages.map(m => m.id);
     if (msgIds.length) {
-      // Wiadomości wychodzące — mają wiersz w crm_lead_activities (created_by != NULL)
       const { rows: outRows } = await pool.query(
         `SELECT id AS activity_id, gmail_message_id FROM crm_lead_activities
          WHERE lead_id = $1 AND gmail_message_id = ANY($2) AND tenant_id = $3`,
@@ -604,26 +510,20 @@ async function threadLeadHandler(req, res) {
       );
       const outIds = new Set(outRows.map(r => r.gmail_message_id));
 
-      // Wiadomości przychodzące — oznacz istniejące rekordy jako przeczytane.
-      // Tylko UPDATE, nie INSERT — INSERT jest wyłącznie odpowiedzialnością processNotification.
-      // Gdybyśmy tu insertowali, processNotification uznałby wiadomość za "już przetworzoną" i nie
-      // ustawiłby is_read=false → badge nigdy by nie pokazał.
       const incomingIds = msgIds.filter(id => !outIds.has(id));
       if (incomingIds.length) {
         pool.query(
           `UPDATE crm_email_message_reads SET is_read = true, updated_at = NOW()
            WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
           [incomingIds, req.tenantId],
-        ).catch(e => console.warn("[Gmail] auto-mark read failed:", e.message));
-        // Oznacz aktywność wątku jako przeczytaną (jeśli była nieprzeczytana)
+        ).catch(e => console.warn("[Outlook] auto-mark read failed:", e.message));
         pool.query(
           `UPDATE crm_lead_activities SET is_read = true, updated_at = NOW()
            WHERE lead_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false AND tenant_id = $3`,
           [leadId, req.params.threadId, req.tenantId],
-        ).catch(e => console.warn("[Gmail] mark thread activity read failed:", e.message));
+        ).catch(e => console.warn("[Outlook] mark thread activity read failed:", e.message));
       }
 
-      // Pobierz aktualny stan is_read z bazy (po UPDATE powyżej)
       const { rows: readRows } = await pool.query(
         `SELECT gmail_message_id, is_read FROM crm_email_message_reads WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
         [msgIds, req.tenantId],
@@ -636,15 +536,12 @@ async function threadLeadHandler(req, res) {
           msg.created_by = 'outgoing';
           msg.activity_id = outRows.find(r => r.gmail_message_id === msg.id)?.activity_id ?? null;
         } else {
-          // Jeśli nie ma wiersza w crm_email_message_reads — wiadomość nie była jeszcze
-          // przetworzona przez processNotification, traktujemy jako nieprzeczytaną wizualnie.
           msg.is_read    = readMap[msg.id] ?? false;
           msg.created_by = null;
           msg.activity_id = null;
         }
       }
 
-      // Dołącz wysłane załączniki z bazy (direction='sent')
       const { rows: sentAtts } = await pool.query(
         `SELECT gmail_message_id, filename, mime_type, blob_path, gmail_attachment_id
          FROM crm_email_attachments
@@ -661,7 +558,7 @@ async function threadLeadHandler(req, res) {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json({ messages, canReply: ownerId === req.user.id, ownerEmail });
   } catch (err) {
-    console.error("[Gmail] getThread/lead error:", err.message);
+    console.error("[Outlook] getThread/lead error:", err.message);
     if (err.message?.includes("Brak połączonego konta")) {
       return res.status(404).json({
         error: "Ten wątek należy do konta, które zostało rozłączone — pełna treść jest niedostępna.",
@@ -675,7 +572,7 @@ router.get("/thread/lead/:leadId/:threadId", requireAuth, crmAuth, threadLeadHan
 
 async function threadPartnerHandler(req, res) {
   try {
-    const resolved  = await resolvePartner(req.params.partnerId, req.tenantId, req.dwhPrefix);
+    const resolved  = await resolvePartner(req.params.partnerId, req.tenantId);
     const partnerId = resolved?.id ?? req.params.partnerId;
 
     if (isTrainingThreadId(req.params.threadId)) {
@@ -687,8 +584,6 @@ async function threadPartnerHandler(req, res) {
       return res.json(result);
     }
 
-    // Gmail threads live in one Google account — read with the token of
-    // whichever user's mailbox owns this thread, not the current viewer's.
     const ownerQ = await pool.query(
       `SELECT a.mailbox_user_id, u.email AS owner_email
        FROM crm_partner_activities a
@@ -707,7 +602,23 @@ async function threadPartnerHandler(req, res) {
       });
     }
 
-    const messages = await gmailService.getThread(ownerId, req.params.threadId);
+    const messages = await outlookService.getThread(ownerId, req.params.threadId);
+
+    // See threadLeadHandler — Graph's conversationId filter silently drops
+    // messages whose subject changed, so backfill anything missing from our
+    // own DB record of this thread's known message ids.
+    const foundIds = new Set(messages.map(m => m.id));
+    const { rows: knownRows } = await pool.query(
+      `SELECT DISTINCT gmail_message_id FROM crm_partner_activities
+       WHERE partner_id = $1 AND gmail_thread_id = $2 AND tenant_id = $3 AND gmail_message_id IS NOT NULL`,
+      [partnerId, req.params.threadId, req.tenantId],
+    );
+    const missingIds = knownRows.map(r => r.gmail_message_id).filter(id => !foundIds.has(id));
+    if (missingIds.length) {
+      const backfilled = await Promise.all(missingIds.map(id => outlookService.getMessage(ownerId, id).catch(() => null)));
+      for (const msg of backfilled) if (msg) messages.push(msg);
+      messages.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    }
 
     for (const msg of messages) {
       if (msg.attachments?.length) {
@@ -724,19 +635,18 @@ async function threadPartnerHandler(req, res) {
       );
       const outIds = new Set(outRows.map(r => r.gmail_message_id));
 
-      // Wiadomości przychodzące — tylko UPDATE istniejących rekordów (nie INSERT).
       const incomingIds = msgIds.filter(id => !outIds.has(id));
       if (incomingIds.length) {
         pool.query(
           `UPDATE crm_email_message_reads SET is_read = true, updated_at = NOW()
            WHERE gmail_message_id = ANY($1) AND tenant_id = $2`,
           [incomingIds, req.tenantId],
-        ).catch(e => console.warn("[Gmail] auto-mark read failed:", e.message));
+        ).catch(e => console.warn("[Outlook] auto-mark read failed:", e.message));
         pool.query(
           `UPDATE crm_partner_activities SET is_read = true, updated_at = NOW()
            WHERE partner_id = $1 AND gmail_thread_id = $2 AND type = 'email' AND is_read = false AND tenant_id = $3`,
           [partnerId, req.params.threadId, req.tenantId],
-        ).catch(e => console.warn("[Gmail] mark partner thread activity read failed:", e.message));
+        ).catch(e => console.warn("[Outlook] mark partner thread activity read failed:", e.message));
       }
 
       const { rows: readRows } = await pool.query(
@@ -773,7 +683,7 @@ async function threadPartnerHandler(req, res) {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json({ messages, canReply: ownerId === req.user.id, ownerEmail });
   } catch (err) {
-    console.error("[Gmail] getThread/partner error:", err.message);
+    console.error("[Outlook] getThread/partner error:", err.message);
     if (err.message?.includes("Brak połączonego konta")) {
       return res.status(404).json({
         error: "Ten wątek należy do konta, które zostało rozłączone — pełna treść jest niedostępna.",
@@ -786,37 +696,14 @@ async function threadPartnerHandler(req, res) {
 router.get("/thread/partner/:partnerId/:threadId", requireAuth, crmAuth, threadPartnerHandler);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// STAN PRZECZYTANIA — poziom pojedynczej wiadomości Gmail
-// ═══════════════════════════════════════════════════════════════════════════════
-
-router.patch('/messages/:msgId/read', requireAuth, crmAuth, async (req, res) => {
-  try {
-    const { msgId } = req.params;
-    const isRead = req.body.is_read !== undefined ? !!req.body.is_read : true;
-    await pool.query(
-      `INSERT INTO crm_email_message_reads (gmail_message_id, is_read, updated_at, tenant_id)
-       VALUES ($1, $2, NOW(), $3)
-       ON CONFLICT (gmail_message_id) DO UPDATE SET is_read = $2, updated_at = NOW()`,
-      [msgId, isRead, req.tenantId],
-    );
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('[Gmail] patch message read error:', err.message);
-    res.status(500).json({ error: 'Błąd aktualizacji stanu przeczytania' });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // POBIERANIE ZAŁĄCZNIKA
-// Serwuje z Azure Blob (trwałe), lub pobiera z Gmail API i zapisuje do Blob.
-// Działa nawet po rozłączeniu konta Gmail — o ile blob_path jest wypełniony.
+// Serwuje z Azure Blob (trwałe), lub pobiera z Graph API i zapisuje do Blob.
+// Działa nawet po rozłączeniu konta Outlook — o ile blob_path jest wypełniony.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Serwuje wysłany załącznik z Azure Blob (direction='sent', identified by messageId + filename)
 router.get("/sent-attachment/:messageId", requireAuth, crmAuth, async (req, res) => {
   const { messageId } = req.params;
   const filename = String(req.query.filename || "attachment").replace(/[^a-zA-Z0-9._\- ]/g, "_");
-  const mimeType = String(req.query.mime    || "application/octet-stream");
   try {
     const { rows } = await pool.query(
       `SELECT blob_path FROM crm_email_attachments
@@ -840,7 +727,6 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
   const mimeType = String(req.query.mime    || "application/octet-stream");
 
   try {
-    // 1. Sprawdź czy mamy blobPath w DB
     const { rows } = await pool.query(
       `SELECT blob_path, filename, mime_type, mailbox_user_id
        FROM crm_email_attachments
@@ -850,19 +736,15 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
     );
 
     if (rows.length && rows[0].blob_path) {
-      // Serwuj przez SAS URL (redirect) — przeglądarka pobiera bezpośrednio z Azure
       const sasUrl = await storageService.generateSasUrl(rows[0].blob_path, 10);
       return res.redirect(302, sasUrl);
     }
 
-    // 2. Nie ma w Blob — pobierz z Gmail API tokenem właściciela skrzynki,
-    // do której należy ta wiadomość (nie bieżącego widza).
     if (!rows.length || !rows[0].mailbox_user_id) {
       return res.status(404).json({ error: "Załącznik niedostępny — nieznany właściciel skrzynki." });
     }
-    const buffer = await gmailService.getAttachmentBuffer(rows[0].mailbox_user_id, messageId, attachmentId);
+    const buffer = await outlookService.getAttachmentBuffer(rows[0].mailbox_user_id, messageId, attachmentId);
 
-    // 3. Zapisz do Blob asynchronicznie, żeby następne pobranie było z Blob
     const safeFilename = filename.replace(/\s+/g, "_");
     const blobPath     = `crm-attachments/${new Date().toISOString().slice(0, 10)}-${uuidv4().slice(0, 8)}-${safeFilename}`;
     storageService.uploadBuffer(blobPath, buffer, mimeType)
@@ -872,16 +754,15 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
          WHERE gmail_message_id = $2 AND gmail_attachment_id = $3 AND tenant_id = $4`,
         [blobPath, messageId, attachmentId, req.tenantId],
       ))
-      .catch((e) => console.warn("[Gmail] Attachment blob cache failed:", e.message));
+      .catch((e) => console.warn("[Outlook] Attachment blob cache failed:", e.message));
 
-    // 4. Wyślij do klienta
     res.set("Content-Type",        mimeType);
     res.set("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
     res.set("Content-Length",      buffer.length);
     return res.send(buffer);
 
   } catch (err) {
-    console.error("[Gmail] getAttachment error:", err.message);
+    console.error("[Outlook] getAttachment error:", err.message);
     if (err.message?.includes("Brak połączonego konta")) {
       return res.status(404).json({
         error: "Załącznik niedostępny — konto właściciela skrzynki zostało rozłączone.",
@@ -892,87 +773,38 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// WATCH — rejestracja/odświeżenie powiadomień Gmail (topic Pub/Sub)
-// Auto-import emaili obsługuje pubsubPoller (pull), nie webhook.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-router.post("/webhook/register", requireAuth, gmailGate, async (req, res) => {
-  try {
-    const result = await gmailService.registerWatch(req.user.id);
-    if (!result) return res.status(503).json({ error: "GOOGLE_PUBSUB_TOPIC nie jest skonfigurowany" });
-    res.json({ ok: true, historyId: result.historyId, expiration: result.expiration });
-  } catch (err) {
-    console.error("[Gmail] registerWatch error:", err.message);
-    res.status(err.status || 500).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// DEBUG — ręczne wyzwolenie przetwarzania historii Gmail (tylko admin/dev)
-// POST /api/crm/gmail/debug/process
-// Pozwala przetestować processNotification bez Pub/Sub.
+// DEBUG — ręczne wyzwolenie sprawdzenia nowej poczty (bez czekania na poller)
+// POST /api/crm/outlook/debug/process
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function debugProcessHandler(req, res) {
   try {
-    const { processNotification } = require("../services/gmailProcessor");
-
-    // Pobierz token skrzynki bieżącego usera
     const { rows } = await pool.query(
-      "SELECT email, history_id FROM user_gmail_tokens WHERE user_id = $1",
+      "SELECT email, delta_link FROM user_outlook_tokens WHERE user_id = $1",
       [req.user.id],
     );
-    if (!rows.length) return res.status(404).json({ error: "Brak podłączonego konta Gmail" });
+    if (!rows.length) return res.status(404).json({ error: "Brak podłączonego konta Outlook" });
 
-    let { email, history_id } = rows[0];
+    const { email, delta_link } = rows[0];
+    const note = !delta_link
+      ? "delta_link był pusty — ustawiono bazowy punkt. Wyślij do siebie email i kliknij ponownie."
+      : null;
 
-    // Jeśli history_id nie ustawiony — pobierz bieżący historyId z Gmail API i zapisz
-    if (!history_id) {
-      history_id = await gmailService.getCurrentHistoryId(req.user.id);
-      await pool.query(
-        "UPDATE user_gmail_tokens SET history_id = $1 WHERE user_id = $2",
-        [history_id, req.user.id],
-      );
-      const { rows: readRows } = await pool.query("SELECT * FROM crm_email_message_reads ORDER BY updated_at DESC LIMIT 10");
-      return res.json({
-        ok: true,
-        email,
-        note: "history_id był pusty — ustawiono bieżący historyId. Wyślij odpowiedź na email i kliknij ponownie.",
-        historyId_after:   history_id,
-        newMessages_found: 0,
-        messageIds_found:  [],
-        recent_message_reads: readRows,
-      });
-    }
-
-    // processNotification handles getNewMessages, historyId update, recovery and dedup internally
-    const result = await processNotification(email, history_id);
-
-    // Stan po przetworzeniu
-    const { rows: after } = await pool.query(
-      "SELECT history_id FROM user_gmail_tokens WHERE user_id = $1",
-      [req.user.id],
-    );
-    const { rows: readRows } = await pool.query(
-      "SELECT * FROM crm_email_message_reads ORDER BY updated_at DESC LIMIT 10",
-    );
+    const result = await outlookProcessor.processUserNotifications(req.user.id);
 
     res.json({
-      ok:                true,
+      ok: true,
       email,
-      recovered:         result?.recovered      || false,
-      historyId_before:  history_id,
-      historyId_after:   after[0]?.history_id,
-      newMessages_found: result?.recovered ? (result.recoveredCount ?? 0) : (result.processed ?? 0),
-      messageIds_found:  [],
-      recent_message_reads: readRows,
+      note,
+      deltaLink_initialized: !delta_link,
+      newMessages_found: result?.processed ?? 0,
     });
   } catch (err) {
-    console.error("[Gmail] debug/process error:", err.message);
+    console.error("[Outlook] debug/process error:", err.message);
     res.status(err.status || 500).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
   }
 }
-router.post("/debug/process", requireAuth, crmAuth, gmailGate, debugProcessHandler);
+router.post("/debug/process", requireAuth, crmAuth, outlookGate, debugProcessHandler);
 
 // Handlers reused by the unified /api/crm/email dispatcher (crm-email.js) so
 // dispatching to "whichever provider is active" never duplicates this logic.
