@@ -2,24 +2,58 @@
 -- WhatsApp Business config, per-user: each CRM user connects their own
 -- number from their own Meta app. Tenant admin/super admin never hold
 -- numbers or secrets — they only gate/observe (see tenant_features
--- 'whatsapp' flag, added in 0214, and the read-only directory endpoints in
+-- 'whatsapp' flag, added in 0229, and the read-only directory endpoints in
 -- crm-whatsapp.js).
 --
--- The DROP IF EXISTS guards below are defensive, not a migration-forward
--- step: an earlier, briefly-lived tenant-level model on this branch
--- (superadmin-managed, one number per tenant) created tables with these
--- same names before being replaced by this per-user model. That earlier
--- model's own migrations were removed from this branch's history entirely
--- (never deployed beyond it, held only throwaway test data, and their
--- numbering collided with unrelated migrations already merged into
--- develop) — these DROPs just make this migration safe to (re-)run on any
--- environment that happened to apply that short-lived version first.
+-- Idempotent / data-preserving. This exact migration has already run once
+-- on this branch under an older filename (historically
+-- 0215_whatsapp_user_level.sql) before a merge-driven renumbering —
+-- migrate.js tracks "applied" strictly by filename, so the rename made a DB
+-- that already had this migration's tables look unmigrated again. An
+-- earlier version of this file "fixed" that by unconditionally dropping
+-- whatsapp_configs/whatsapp_messages before recreating them, which silently
+-- destroyed real local per-user configs and message history that had been
+-- sitting in those tables for weeks. Never do that again — every statement
+-- below must be safe to (re-)run against three different starting states
+-- without touching existing rows:
+--   1. Fresh DB — neither table exists yet. Creates both.
+--   2. This migration already applied under a different filename —
+--      whatsapp_configs/whatsapp_messages already exist in the current
+--      per-user shape (whatsapp_configs has a user_id column;
+--      whatsapp_messages has an owner_user_id column), holding real data.
+--      Must be a true no-op here: CREATE ... IF NOT EXISTS skips both
+--      tables entirely, nothing is dropped.
+--   3. The older, since-deleted tenant-level prototype ran instead
+--      (0206_tenant_whatsapp_config.sql / 0207_whatsapp_messages.sql —
+--      confirmed dead code, held only throwaway test data, removed from
+--      this branch's history; see CLAUDE.md). That left
+--      tenant_whatsapp_config (a name never reused by the per-user model —
+--      always safe to drop unconditionally) and possibly a
+--      whatsapp_messages table in the OLD per-tenant shape (no
+--      owner_user_id column, tenant-scoped dedup index instead of
+--      per-owner). Only that specific old shape gets replaced — detected
+--      by the ABSENCE of owner_user_id, never by mere presence of the
+--      table, so real per-user history is never mistaken for the dead
+--      prototype's leftovers.
 
-DROP TABLE IF EXISTS whatsapp_messages;
-DROP TABLE IF EXISTS whatsapp_configs;
 DROP TABLE IF EXISTS tenant_whatsapp_config;
 
-CREATE TABLE whatsapp_configs (
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables WHERE table_name = 'whatsapp_messages'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'whatsapp_messages' AND column_name = 'owner_user_id'
+  ) THEN
+    -- Old per-tenant shape from the dead tenant-level prototype — replace it.
+    -- A whatsapp_messages table that already HAS owner_user_id is the
+    -- current per-user model with real data and must never reach here.
+    DROP TABLE whatsapp_messages;
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS whatsapp_configs (
   id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id             UUID        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   user_id               UUID        NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
@@ -34,14 +68,14 @@ CREATE TABLE whatsapp_configs (
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_whatsapp_configs_tenant ON whatsapp_configs(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_configs_tenant ON whatsapp_configs(tenant_id);
 
 COMMENT ON TABLE  whatsapp_configs                     IS 'Per-user WhatsApp Business Cloud API config — each CRM user connects their own number from their own Meta app; tenant_id is kept only for tenant-scoped isolation/oversight, never a shared channel.';
 COMMENT ON COLUMN whatsapp_configs.access_token        IS 'AES-256-GCM encrypted — use src/utils/encrypt.js to decrypt';
 COMMENT ON COLUMN whatsapp_configs.app_secret           IS 'AES-256-GCM encrypted — use src/utils/encrypt.js to decrypt. Optional at setup, needed to verify webhook signatures.';
 COMMENT ON COLUMN whatsapp_configs.webhook_verify_token IS 'AES-256-GCM encrypted — use src/utils/encrypt.js to decrypt. Generated by the CRM on connect; the user pastes it into their own Meta App webhook config.';
 
-CREATE TABLE whatsapp_messages (
+CREATE TABLE IF NOT EXISTS whatsapp_messages (
   id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id        UUID        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   owner_user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -58,15 +92,15 @@ CREATE TABLE whatsapp_messages (
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_whatsapp_messages_tenant  ON whatsapp_messages(tenant_id);
-CREATE INDEX idx_whatsapp_messages_owner   ON whatsapp_messages(owner_user_id);
-CREATE INDEX idx_whatsapp_messages_lead    ON whatsapp_messages(lead_id)    WHERE lead_id IS NOT NULL;
-CREATE INDEX idx_whatsapp_messages_partner ON whatsapp_messages(partner_id) WHERE partner_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_tenant  ON whatsapp_messages(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_owner   ON whatsapp_messages(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_lead    ON whatsapp_messages(lead_id)    WHERE lead_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_partner ON whatsapp_messages(partner_id) WHERE partner_id IS NOT NULL;
 
 -- Guards against duplicate rows on Meta's at-least-once webhook retries.
 -- Scoped per owner_user_id (each user's own phone_number_id), tighter than
 -- the old per-tenant scoping since numbers are no longer shared in-tenant.
-CREATE UNIQUE INDEX idx_whatsapp_messages_meta_id
+CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_messages_meta_id
   ON whatsapp_messages(owner_user_id, meta_message_id) WHERE meta_message_id IS NOT NULL;
 
 COMMENT ON TABLE whatsapp_messages IS 'Per-user WhatsApp conversation log. owner_user_id identifies whose connected number the message went through; lead_id/partner_id identify who it is with.';
