@@ -16,6 +16,7 @@
 -- environment that happened to apply that short-lived version first.
 
 DROP TABLE IF EXISTS whatsapp_messages;
+DROP TABLE IF EXISTS whatsapp_configs;
 DROP TABLE IF EXISTS tenant_whatsapp_config;
 
 CREATE TABLE whatsapp_configs (
