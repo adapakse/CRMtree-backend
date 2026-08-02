@@ -1,4 +1,4 @@
--- 0198_email_provider_column.sql
+-- 0216_email_provider_column.sql
 -- Adds email_provider column to activity tables to distinguish Gmail from Outlook
 -- threads stored in the same gmail_thread_id / gmail_message_id columns.
 

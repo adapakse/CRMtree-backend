@@ -1,4 +1,4 @@
--- 0205_audit_action_tenant_deleted.sql
+-- 0223_audit_action_tenant_deleted.sql
 -- Adds the audit_action value used when a super admin soft-deletes a tenant.
 --
 -- WAŻNE: ALTER TYPE ADD VALUE nie może być wewnątrz bloku transakcji razem

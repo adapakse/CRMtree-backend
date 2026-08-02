@@ -1,5 +1,5 @@
--- 0209_outlook_per_user_mailbox.sql
--- Mirrors 0208_gmail_per_user_mailbox.sql for Outlook: reverts sending from
+-- 0225_outlook_per_user_mailbox.sql
+-- Mirrors 0224_gmail_per_user_mailbox.sql for Outlook: reverts sending from
 -- the shared tenant mailbox back to per-user mailboxes. Provider configuration
 -- (OAuth Client, azure_tenant_id) stays on the tenant (tenant_email_providers);
 -- each CRM user connects their own Microsoft 365 account and sends/receives

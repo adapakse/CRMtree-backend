@@ -1,4 +1,4 @@
--- 0208_gmail_per_user_mailbox.sql
+-- 0224_gmail_per_user_mailbox.sql
 -- Reverts Gmail sending from the shared tenant mailbox back to per-user
 -- mailboxes: provider configuration (OAuth Client, Pub/Sub) stays on the
 -- tenant (tenant_email_providers), but each CRM user connects their own

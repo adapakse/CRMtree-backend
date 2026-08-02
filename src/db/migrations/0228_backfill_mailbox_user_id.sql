@@ -1,4 +1,4 @@
--- 0212_backfill_mailbox_user_id.sql
+-- 0228_backfill_mailbox_user_id.sql
 -- 0208/0209/0210 added mailbox_user_id via plain ALTER TABLE ADD COLUMN, so
 -- every email activity row written before those migrations ran was left with
 -- mailbox_user_id = NULL. threadLeadHandler/threadPartnerHandler require it

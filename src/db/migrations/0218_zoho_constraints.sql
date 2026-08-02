@@ -1,4 +1,4 @@
--- 0200_zoho_constraints.sql
+-- 0218_zoho_constraints.sql
 -- Extend email_provider and provider CHECK constraints to include 'zoho'.
 -- PostgreSQL auto-names inline CHECK constraints as {table}_{column}_check.
 

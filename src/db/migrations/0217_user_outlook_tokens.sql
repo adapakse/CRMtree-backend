@@ -1,4 +1,4 @@
--- 0199_user_outlook_tokens.sql
+-- 0217_user_outlook_tokens.sql
 -- Per-user Microsoft Graph OAuth2 tokens for Outlook integration.
 -- delta_link stores the @odata.deltaLink token for incremental message fetch
 -- (equivalent to history_id in user_gmail_tokens).

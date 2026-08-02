@@ -1,4 +1,4 @@
--- 0203_tenant_email_tokens.sql
+-- 0221_tenant_email_tokens.sql
 -- One shared company mailbox per tenant, per provider — OAuth tokens now
 -- belong to the tenant, not to an individual CRM user.
 --

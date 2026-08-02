@@ -1,4 +1,4 @@
--- 0201_user_zoho_tokens.sql
+-- 0219_user_zoho_tokens.sql
 -- Per-user Zoho Mail OAuth2 tokens.
 -- accounts_server: DC-specific token endpoint from OAuth callback (e.g. https://accounts.zoho.eu).
 --   Used for refresh and revoke — stored directly from callback param, not derived.

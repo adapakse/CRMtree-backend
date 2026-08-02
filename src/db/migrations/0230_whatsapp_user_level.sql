@@ -1,4 +1,4 @@
--- 0215_whatsapp_user_level.sql
+-- 0230_whatsapp_user_level.sql
 -- WhatsApp Business config, per-user: each CRM user connects their own
 -- number from their own Meta app. Tenant admin/super admin never hold
 -- numbers or secrets — they only gate/observe (see tenant_features

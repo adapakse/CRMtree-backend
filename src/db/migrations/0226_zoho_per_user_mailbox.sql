@@ -1,4 +1,4 @@
--- 0210_zoho_per_user_mailbox.sql
+-- 0226_zoho_per_user_mailbox.sql
 -- Mirrors 0208/0209 for Zoho Mail: reverts sending from the shared tenant
 -- mailbox back to per-user mailboxes. Provider configuration (OAuth Client)
 -- stays on the tenant (tenant_email_providers); each CRM user connects their
