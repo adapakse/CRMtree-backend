@@ -46,6 +46,38 @@ class WhatsappInvalidPhoneError extends Error {
   }
 }
 
+class WhatsappMetaVerificationError extends Error {
+  constructor(metaMessage) {
+    super(`Nie udało się zweryfikować numeru w Meta: ${metaMessage}`);
+    this.name   = 'WhatsappMetaVerificationError';
+    this.status = 400;
+    this.code   = 'WHATSAPP_META_VERIFICATION_FAILED';
+  }
+}
+
+// Ground truth for a phone number lives in Meta, not in whatever an admin
+// types — a phone_number_id can silently point at the wrong resource (e.g.
+// Meta's free Test Number instead of the real business number). Called on
+// every tenant config save; display_phone_number is never accepted as
+// free-text input, only ever this function's return value.
+async function fetchPhoneNumberInfoFromMeta(phoneNumberId, accessToken) {
+  const res = await fetch(
+    `${GRAPH_BASE}/${phoneNumberId}?fields=display_phone_number,verified_name,code_verification_status,quality_rating`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.display_phone_number) {
+    const metaMessage = data?.error?.message || `HTTP ${res.status}`;
+    throw new WhatsappMetaVerificationError(metaMessage);
+  }
+  return {
+    displayPhoneNumber: data.display_phone_number,
+    verifiedName: data.verified_name || null,
+    codeVerificationStatus: data.code_verification_status || null,
+    qualityRating: data.quality_rating || null,
+  };
+}
+
 function generateWebhookVerifyToken() {
   return crypto.randomBytes(24).toString('hex');
 }
@@ -60,7 +92,8 @@ function generateWebhookVerifyToken() {
 // a third-party credential, so re-displaying it is safe.
 async function getTenantConfig(tenantId) {
   const { rows } = await pool.query(
-    `SELECT id, waba_id, phone_number_id, display_phone_number, is_enabled,
+    `SELECT id, waba_id, phone_number_id, display_phone_number, verified_name,
+            code_verification_status, is_enabled,
             access_token, app_secret, webhook_verify_token, created_at, updated_at
      FROM tenant_whatsapp_config
      WHERE tenant_id = $1`,
@@ -73,6 +106,8 @@ async function getTenantConfig(tenantId) {
     waba_id: row.waba_id,
     phone_number_id: row.phone_number_id,
     display_phone_number: row.display_phone_number,
+    verified_name: row.verified_name,
+    code_verification_status: row.code_verification_status,
     is_enabled: row.is_enabled,
     access_token_configured: Boolean(row.access_token),
     app_secret_configured: Boolean(row.app_secret),
@@ -102,6 +137,13 @@ async function getTenantStatus(tenantId) {
 // omitted/blank on an update keeps the previously saved encrypted value,
 // required on first save. webhook_verify_token is never accepted from the
 // client — generated here on first connect, kept stable across updates.
+//
+// display_phone_number/verified_name/code_verification_status are never
+// accepted as input — always (re-)fetched from Meta on every save, using
+// whichever access_token this save will end up storing (the new one if
+// provided, otherwise the existing decrypted one). A phone_number_id/token
+// pair Meta can't resolve fails the whole save rather than silently storing
+// a number that doesn't match the number actually wired up.
 async function upsertTenantConfig(tenantId, input) {
   const { rows: existing } = await pool.query(
     'SELECT access_token, app_secret, webhook_verify_token FROM tenant_whatsapp_config WHERE tenant_id = $1',
@@ -118,23 +160,28 @@ async function upsertTenantConfig(tenantId, input) {
     throw err;
   }
 
+  const accessTokenForValidation = input.access_token || decrypt(prev.access_token);
+  const metaInfo = await fetchPhoneNumberInfoFromMeta(input.phone_number_id, accessTokenForValidation);
+
   const encAppSecret = input.app_secret ? encrypt(input.app_secret) : (prev ? prev.app_secret : null);
   const encVerifyToken = prev ? prev.webhook_verify_token : encrypt(generateWebhookVerifyToken());
 
   const { rows } = await pool.query(
     `INSERT INTO tenant_whatsapp_config
-       (tenant_id, waba_id, phone_number_id, display_phone_number, access_token, app_secret, webhook_verify_token, is_enabled)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (tenant_id, waba_id, phone_number_id, display_phone_number, verified_name, code_verification_status, access_token, app_secret, webhook_verify_token, is_enabled)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      ON CONFLICT (tenant_id) DO UPDATE SET
-       waba_id              = EXCLUDED.waba_id,
-       phone_number_id      = EXCLUDED.phone_number_id,
-       display_phone_number = EXCLUDED.display_phone_number,
-       access_token         = EXCLUDED.access_token,
-       app_secret           = EXCLUDED.app_secret,
-       is_enabled           = EXCLUDED.is_enabled,
-       updated_at           = NOW()
-     RETURNING id, waba_id, phone_number_id, display_phone_number, is_enabled, created_at, updated_at`,
-    [tenantId, input.waba_id, input.phone_number_id, input.display_phone_number || null,
+       waba_id                  = EXCLUDED.waba_id,
+       phone_number_id          = EXCLUDED.phone_number_id,
+       display_phone_number     = EXCLUDED.display_phone_number,
+       verified_name            = EXCLUDED.verified_name,
+       code_verification_status = EXCLUDED.code_verification_status,
+       access_token             = EXCLUDED.access_token,
+       app_secret               = EXCLUDED.app_secret,
+       is_enabled               = EXCLUDED.is_enabled,
+       updated_at                = NOW()
+     RETURNING id, waba_id, phone_number_id, display_phone_number, verified_name, code_verification_status, is_enabled, created_at, updated_at`,
+    [tenantId, input.waba_id, input.phone_number_id, metaInfo.displayPhoneNumber, metaInfo.verifiedName, metaInfo.codeVerificationStatus,
       encAccessToken, encAppSecret, encVerifyToken, input.is_enabled !== false],
   );
   return {
@@ -392,10 +439,11 @@ async function updateMessageStatus({ tenantId, metaMessageId, status }) {
   );
 }
 
-// generateWebhookVerifyToken, the three Whatsapp*Error classes, and
-// findCrmRecordByPhone are used only inside this file (by upsertTenantConfig,
-// sendTextMessage's throws, and resolveIncomingSender respectively) — not
-// re-exported, since nothing outside this module references them by name.
+// generateWebhookVerifyToken, the four Whatsapp*Error classes,
+// fetchPhoneNumberInfoFromMeta, and findCrmRecordByPhone are used only
+// inside this file (by upsertTenantConfig, sendTextMessage's throws, and
+// resolveIncomingSender respectively) — not re-exported, since nothing
+// outside this module references them by name.
 module.exports = {
   getTenantConfig,
   getTenantStatus,

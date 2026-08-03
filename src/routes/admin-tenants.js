@@ -743,12 +743,16 @@ router.get('/:id/whatsapp-config',
 // tenant_email_providers.client_secret: omitted/blank on an update keeps the
 // previously saved encrypted value, required on first save.
 // webhook_verify_token is never accepted here — the CRM generates it.
+// display_phone_number is never accepted here either — upsertTenantConfig
+// fetches it (plus verified_name/code_verification_status) straight from
+// Meta and rejects the save if the phone_number_id/access_token pair can't
+// be resolved, so a mistyped or wrong-resource phone_number_id can never
+// silently disagree with the number shown in the UI.
 router.put('/:id/whatsapp-config',
   [
     param('id').isUUID(),
     body('waba_id').isString().trim().notEmpty(),
     body('phone_number_id').isString().trim().notEmpty(),
-    body('display_phone_number').optional({ nullable: true }).isString().trim(),
     body('access_token').optional({ nullable: true }).isString(),
     body('app_secret').optional({ nullable: true }).isString(),
     body('is_enabled').optional().isBoolean(),
@@ -767,7 +771,6 @@ router.put('/:id/whatsapp-config',
       const saved = await whatsappService.upsertTenantConfig(req.params.id, {
         waba_id: req.body.waba_id,
         phone_number_id: req.body.phone_number_id,
-        display_phone_number: req.body.display_phone_number || null,
         access_token: accessTokenInput,
         app_secret: appSecretInput,
         is_enabled: req.body.is_enabled,
