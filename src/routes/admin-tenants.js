@@ -32,6 +32,18 @@ const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { EMAIL_PROVIDER_KEYS } = require('../config/email-providers');
 const { getMissingRequiredFields } = require('../config/emailProviderRequiredFields');
 const { clearTrainingModeCache } = require('../utils/trainingMode');
+const whatsappService = require('../services/whatsappService');
+
+// A secret field consisting only of mask characters (e.g. "********",
+// "••••••••", "●●●●●●", "······", optionally with surrounding whitespace) is
+// never a real value — it can only be a UI placeholder that leaked into the
+// submitted body. Treated identically to "not provided", so it can never
+// encrypt-and-overwrite an already-saved secret.
+function isMaskedSecretPlaceholder(value) {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && /^[*•●·]+$/.test(trimmed);
+}
 
 router.use(requireAuth, requireSuperAdmin, injectAuditContext);
 
@@ -722,11 +734,8 @@ router.put('/:id/training-mode',
   }
 );
 
-// ── GET /:id/whatsapp-users — connected numbers in a tenant (oversight only) ──
-// WhatsApp is configured per-user (My Settings), never by an admin — this is
-// read-only visibility for the super admin, mirroring the tenant-directory
-// endpoint tenant admins get in crm-whatsapp.js. Never includes secrets.
-router.get('/:id/whatsapp-users',
+// ── GET /:id/whatsapp-config — WhatsApp Business config (no secrets) ──────
+router.get('/:id/whatsapp-config',
   [param('id').isUUID()], validate,
   async (req, res, next) => {
     try {
@@ -734,16 +743,75 @@ router.get('/:id/whatsapp-users',
         return res.status(404).json({ error: 'Tenant not found' });
       }
 
-      const { rows } = await db.query(
-        `SELECT u.id AS user_id, u.display_name AS user_name, u.email,
-                c.display_phone_number, c.is_enabled, c.updated_at
-         FROM whatsapp_configs c
-         JOIN users u ON u.id = c.user_id
-         WHERE c.tenant_id = $1
-         ORDER BY u.display_name`,
-        [req.params.id],
-      );
-      res.json(rows);
+      const cfg = await whatsappService.getTenantConfig(req.params.id);
+      res.json(cfg ? { ...cfg, configured: true } : { configured: false });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /:id/whatsapp-config — upsert tenant WhatsApp Business config ─────
+// Secrets (access_token, app_secret) follow the same contract as
+// tenant_email_providers.client_secret: omitted/blank on an update keeps the
+// previously saved encrypted value, required on first save.
+// webhook_verify_token is never accepted here — the CRM generates it.
+router.put('/:id/whatsapp-config',
+  [
+    param('id').isUUID(),
+    body('waba_id').isString().trim().notEmpty(),
+    body('phone_number_id').isString().trim().notEmpty(),
+    body('display_phone_number').optional({ nullable: true }).isString().trim(),
+    body('access_token').optional({ nullable: true }).isString(),
+    body('app_secret').optional({ nullable: true }).isString(),
+    body('is_enabled').optional().isBoolean(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      if (!(await findAliveTenant(req.params.id))) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      // Masked placeholders (e.g. "********") never count as a real value —
+      // fall back to "not provided" exactly as if the field were blank.
+      const accessTokenInput = isMaskedSecretPlaceholder(req.body.access_token) ? null : (req.body.access_token || null);
+      const appSecretInput   = isMaskedSecretPlaceholder(req.body.app_secret) ? null : (req.body.app_secret || null);
+
+      const saved = await whatsappService.upsertTenantConfig(req.params.id, {
+        waba_id: req.body.waba_id,
+        phone_number_id: req.body.phone_number_id,
+        display_phone_number: req.body.display_phone_number || null,
+        access_token: accessTokenInput,
+        app_secret: appSecretInput,
+        is_enabled: req.body.is_enabled,
+      });
+
+      logger.info('Super admin upserted WhatsApp config', {
+        tenantId: req.params.id, by: req.user.email,
+      });
+
+      res.json({ ...saved, configured: true });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  }
+);
+
+// ── DELETE /:id/whatsapp-config — remove tenant WhatsApp config ───────────
+router.delete('/:id/whatsapp-config',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      if (!(await findAliveTenant(req.params.id))) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const deleted = await whatsappService.deleteTenantConfig(req.params.id);
+      if (!deleted) return res.status(404).json({ error: 'WhatsApp not configured' });
+
+      logger.info('Super admin deleted WhatsApp config', {
+        tenantId: req.params.id, by: req.user.email,
+      });
+      res.status(204).end();
     } catch (err) { next(err); }
   }
 );
