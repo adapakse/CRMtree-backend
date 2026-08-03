@@ -1,12 +1,12 @@
 'use strict';
 // src/routes/crm-whatsapp.js
 //
-// CRM WhatsApp API — self-service per-user config, outbound send, inbound
-// webhook (messages/statuses), and read-only directories for oversight. No
-// message templates yet.
+// CRM WhatsApp API — outbound send, inbound webhook (messages/statuses), and
+// conversation history. No message templates yet.
 //
-// Each CRM user connects their own WhatsApp Business number (My Settings —
-// /my-config below); there is no tenant-wide or admin-managed number. tenantId
+// One shared company WhatsApp Business number per tenant, configured by a
+// super admin in Tenant management (see routes/admin-tenants.js,
+// tenant_whatsapp_config) — never per-user, never self-service here. tenantId
 // for the authenticated endpoints always comes from req.user (set by
 // requireAuth) — never from the request body/params — so a lead/partner
 // belonging to another tenant can never be messaged.
@@ -80,14 +80,14 @@ router.post('/webhook', async (req, res) => {
     });
 
     if (!phoneNumberId) {
-      // Nothing routable to a user — ack so Meta doesn't retry, save nothing.
+      // Nothing routable to a tenant — ack so Meta doesn't retry, save nothing.
       // A dashboard "Test" send often hits this, since its sample payload
       // doesn't always carry a real metadata.phone_number_id.
       logger.info('whatsapp webhook skipped', { reason: 'NO_PHONE_NUMBER_ID' });
       return res.status(200).json({ received: true });
     }
 
-    const config = await whatsappService.findConfigByPhoneNumberId(phoneNumberId);
+    const config = await whatsappService.findTenantConfigByPhoneNumberId(phoneNumberId);
     logger.info('whatsapp webhook config lookup', { configFound: Boolean(config) });
     if (!config) {
       // Unknown/disabled phone_number_id — ack, save nothing.
@@ -96,8 +96,8 @@ router.post('/webhook', async (req, res) => {
     }
 
     if (!config.appSecretEncrypted) {
-      logger.warn('WhatsApp webhook: user has no app_secret configured, cannot verify signature', {
-        ownerUserId: config.ownerUserId,
+      logger.warn('WhatsApp webhook: tenant has no app_secret configured, cannot verify signature', {
+        tenantId: config.tenantId,
       });
       logger.info('whatsapp webhook skipped', { reason: 'NO_APP_SECRET' });
       return res.status(401).json({ error: 'Signature verification not configured for this number' });
@@ -108,7 +108,7 @@ router.post('/webhook', async (req, res) => {
     const signatureValid  = whatsappService.verifyWebhookSignature(req.rawBody, appSecret, signatureHeader);
     logger.info('whatsapp webhook signature check', { signatureValid });
     if (!signatureValid) {
-      logger.warn('WhatsApp webhook: signature verification failed', { ownerUserId: config.ownerUserId });
+      logger.warn('WhatsApp webhook: signature verification failed', { tenantId: config.tenantId });
       logger.info('whatsapp webhook skipped', { reason: 'INVALID_SIGNATURE' });
       return res.status(401).json({ error: 'Invalid signature' });
     }
@@ -127,7 +127,7 @@ router.post('/webhook', async (req, res) => {
         const fromDigits = whatsappService.normalizePhoneDigits(message.from);
         const {
           leadId, partnerId, conversationMatchFound, crmPhoneMatchFound, assignedTo,
-        } = await whatsappService.resolveIncomingSender(config.tenantId, config.ownerUserId, fromDigits);
+        } = await whatsappService.resolveIncomingSender(config.tenantId, fromDigits);
 
         logger.info('whatsapp webhook incoming match', {
           conversationMatchFound, crmPhoneMatchFound, assignedTo,
@@ -135,7 +135,6 @@ router.post('/webhook', async (req, res) => {
 
         await whatsappService.saveIncomingMessage({
           tenantId:      config.tenantId,
-          ownerUserId:   config.ownerUserId,
           leadId, partnerId,
           fromPhone:     fromDigits ? `+${fromDigits}` : String(message.from || ''),
           toPhone:       config.displayPhoneNumber,
@@ -149,7 +148,7 @@ router.post('/webhook', async (req, res) => {
       for (const status of value.statuses || []) {
         if (!status.id || !status.status) continue;
         await whatsappService.updateMessageStatus({
-          ownerUserId:   config.ownerUserId,
+          tenantId:      config.tenantId,
           metaMessageId: status.id,
           status:        status.status,
         });
@@ -158,7 +157,7 @@ router.post('/webhook', async (req, res) => {
     }
 
     logger.info('whatsapp webhook processed', {
-      ownerUserId: config.ownerUserId, savedIncomingCount, updatedStatusCount,
+      tenantId: config.tenantId, savedIncomingCount, updatedStatusCount,
     });
 
     res.status(200).json({ received: true });
@@ -209,81 +208,10 @@ function sendServiceError(res, err, fallbackMessage) {
   res.status(500).json({ error: fallbackMessage });
 }
 
-// Placeholder used by the frontend to mean "unchanged" for a masked secret
-// field — matches the convention already used for tenant email providers.
-function isMaskedSecretPlaceholder(value) {
-  if (typeof value !== 'string') return false;
-  const trimmed = value.trim();
-  return trimmed.length > 0 && /^[*•●·]+$/.test(trimmed);
-}
-
-// ── GET /my-config — my own WhatsApp connection (My Settings) ─────────────
-router.get('/my-config', async (req, res, next) => {
-  try {
-    const cfg = await whatsappService.getMyConfig(req.user.id);
-    res.json(cfg ? { ...cfg, configured: true } : { configured: false });
-  } catch (err) { next(err); }
-});
-
-// ── PUT /my-config — connect/update my own WhatsApp number ────────────────
-router.put('/my-config',
-  [
-    body('waba_id').isString().trim().notEmpty(),
-    body('phone_number_id').isString().trim().notEmpty(),
-    body('display_phone_number').optional({ nullable: true }).isString().trim(),
-    body('access_token').optional({ nullable: true }).isString(),
-    body('app_secret').optional({ nullable: true }).isString(),
-    body('is_enabled').optional().isBoolean(),
-  ], validate,
-  async (req, res) => {
-    try {
-      const accessTokenInput = isMaskedSecretPlaceholder(req.body.access_token) ? null : (req.body.access_token || null);
-      const appSecretInput   = isMaskedSecretPlaceholder(req.body.app_secret) ? null : (req.body.app_secret || null);
-
-      const saved = await whatsappService.upsertMyConfig(req.user.id, req.tenantId, {
-        waba_id: req.body.waba_id,
-        phone_number_id: req.body.phone_number_id,
-        display_phone_number: req.body.display_phone_number || null,
-        access_token: accessTokenInput,
-        app_secret: appSecretInput,
-        is_enabled: req.body.is_enabled,
-      });
-
-      logger.info('User connected/updated own WhatsApp number', { userId: req.user.id, phoneNumberId: saved.phone_number_id });
-      res.json({ ...saved, configured: true });
-    } catch (err) {
-      if (err.status) return res.status(err.status).json({ error: err.message });
-      logger.error('Błąd zapisu konfiguracji WhatsApp', { error: err.message });
-      res.status(500).json({ error: 'Błąd zapisu konfiguracji WhatsApp' });
-    }
-  },
-);
-
-// ── DELETE /my-config — disconnect my WhatsApp number ──────────────────────
-// Conversation history stays (whatsapp_messages.owner_user_id is independent
-// of whatsapp_configs), only the live connection is removed.
-router.delete('/my-config', async (req, res, next) => {
-  try {
-    const deleted = await whatsappService.deleteMyConfig(req.user.id);
-    if (!deleted) return res.status(404).json({ error: 'WhatsApp nie jest podłączony' });
-    logger.info('User disconnected own WhatsApp number', { userId: req.user.id });
-    res.status(204).end();
-  } catch (err) { next(err); }
-});
-
-// ── GET /tenant-directory — connected numbers in my tenant (managers/admins only) ──
-router.get('/tenant-directory', async (req, res, next) => {
-  try {
-    if (!req.isCrmManager) return res.status(403).json({ error: 'Brak uprawnień' });
-    const rows = await whatsappService.getTenantDirectory(req.tenantId);
-    res.json(rows);
-  } catch (err) { next(err); }
-});
-
-// ── GET /status — is WhatsApp configured for the current user? ────────────
+// ── GET /status — is WhatsApp configured for my tenant? ───────────────────
 router.get('/status', async (req, res, next) => {
   try {
-    const status = await whatsappService.getMyStatus(req.user.id);
+    const status = await whatsappService.getTenantStatus(req.tenantId);
     res.json(status);
   } catch (err) { next(err); }
 });
@@ -313,15 +241,15 @@ router.post('/send/lead/:leadId',
       }
 
       const { messageId, fromPhone } = await whatsappService.sendTextMessage({
-        userId: req.user.id, to: toPhone, body: req.body.message,
+        tenantId: req.tenantId, to: toPhone, body: req.body.message,
       });
 
       const { rows: msgRows } = await db.query(
         `INSERT INTO whatsapp_messages
-           (tenant_id, owner_user_id, lead_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by)
-         VALUES ($1, $2, $3, 'outgoing', $4, $5, $6, $7, 'sent', $8)
+           (tenant_id, lead_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by)
+         VALUES ($1, $2, 'outgoing', $3, $4, $5, $6, 'sent', $7)
          RETURNING id`,
-        [req.tenantId, req.user.id, lead.id, fromPhone, toPhone, req.body.message, messageId, req.user.id],
+        [req.tenantId, lead.id, fromPhone, toPhone, req.body.message, messageId, req.user.id],
       );
 
       logger.info('WhatsApp message sent (lead)', { tenantId: req.tenantId, leadId: lead.id, by: req.user.email });
@@ -352,15 +280,15 @@ router.post('/send/partner/:partnerId',
       }
 
       const { messageId, fromPhone } = await whatsappService.sendTextMessage({
-        userId: req.user.id, to: toPhone, body: req.body.message,
+        tenantId: req.tenantId, to: toPhone, body: req.body.message,
       });
 
       const { rows: msgRows } = await db.query(
         `INSERT INTO whatsapp_messages
-           (tenant_id, owner_user_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by)
-         VALUES ($1, $2, $3, 'outgoing', $4, $5, $6, $7, 'sent', $8)
+           (tenant_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by)
+         VALUES ($1, $2, 'outgoing', $3, $4, $5, $6, 'sent', $7)
          RETURNING id`,
-        [req.tenantId, req.user.id, partner.id, fromPhone, toPhone, req.body.message, messageId, req.user.id],
+        [req.tenantId, partner.id, fromPhone, toPhone, req.body.message, messageId, req.user.id],
       );
 
       logger.info('WhatsApp message sent (partner)', { tenantId: req.tenantId, partnerId: partner.id, by: req.user.email });
@@ -370,16 +298,6 @@ router.post('/send/partner/:partnerId',
     }
   },
 );
-
-// Visibility: the number owner sees their own conversations; a tenant admin
-// or sales_manager (req.isCrmManager, set by crmAuth) sees every
-// conversation in the tenant. Any other CRM user sees nothing for a thread
-// that isn't theirs, rather than a 403 — an empty history reads the same as
-// "no conversation yet" and avoids leaking that a thread exists.
-function ownerVisibilityClause(req, paramIndex) {
-  if (req.isCrmManager) return { clause: '', params: [] };
-  return { clause: ` AND m.owner_user_id = $${paramIndex}`, params: [req.user.id] };
-}
 
 // ── GET /history/lead/:leadId — WhatsApp conversation for this lead ────────
 router.get('/history/lead/:leadId',
@@ -393,15 +311,14 @@ router.get('/history/lead/:leadId',
       );
       if (!leadRows.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
-      const visibility = ownerVisibilityClause(req, 3);
       const { rows } = await db.query(
         `SELECT m.id, m.created_at, m.direction, m.from_phone, m.to_phone, m.body, m.status,
                 u.display_name AS created_by_name
          FROM whatsapp_messages m
          LEFT JOIN users u ON u.id = m.created_by
-         WHERE m.lead_id = $1 AND m.tenant_id = $2${visibility.clause}
+         WHERE m.lead_id = $1 AND m.tenant_id = $2
          ORDER BY m.created_at ASC`,
-        [leadId, req.tenantId, ...visibility.params],
+        [leadId, req.tenantId],
       );
 
       res.json(rows.map(r => ({
@@ -426,15 +343,14 @@ router.get('/history/partner/:partnerId',
       const partner = await resolvePartnerForWhatsapp(req.params.partnerId, req.tenantId);
       if (!partner) return res.status(404).json({ error: 'Partner nie znaleziony' });
 
-      const visibility = ownerVisibilityClause(req, 3);
       const { rows } = await db.query(
         `SELECT m.id, m.created_at, m.direction, m.from_phone, m.to_phone, m.body, m.status,
                 u.display_name AS created_by_name
          FROM whatsapp_messages m
          LEFT JOIN users u ON u.id = m.created_by
-         WHERE m.partner_id = $1 AND m.tenant_id = $2${visibility.clause}
+         WHERE m.partner_id = $1 AND m.tenant_id = $2
          ORDER BY m.created_at ASC`,
-        [partner.id, req.tenantId, ...visibility.params],
+        [partner.id, req.tenantId],
       );
 
       res.json(rows.map(r => ({
