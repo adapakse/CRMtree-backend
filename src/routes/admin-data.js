@@ -58,7 +58,7 @@ router.delete('/documents/:id',
       await db.query('DELETE FROM document_tags        WHERE document_id=$1 AND tenant_id=$2', [id, req.tenantId]);
       await db.query('DELETE FROM crm_lead_documents   WHERE document_id=$1 AND tenant_id=$2', [id, req.tenantId]);
       await db.query('DELETE FROM crm_partner_documents WHERE document_id=$1 AND tenant_id=$2', [id, req.tenantId]);
-      await db.query('DELETE FROM audit_logs           WHERE document_id=$1 AND tenant_id=$2', [id, req.tenantId]);
+      await db.query(`DELETE FROM audit_logs WHERE document_id=$1 AND tenant_id=$2 AND action <> 'user_login'`, [id, req.tenantId]);
 
       // 4. Delete document itself
       await db.query('DELETE FROM documents WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]);
@@ -92,7 +92,7 @@ router.delete('/leads/:id',
 
       await db.query('DELETE FROM crm_lead_activities  WHERE lead_id=$1 AND tenant_id=$2', [id, req.tenantId]);
       await db.query('DELETE FROM crm_lead_documents   WHERE lead_id=$1 AND tenant_id=$2', [id, req.tenantId]);
-      await db.query(`DELETE FROM audit_logs WHERE metadata->>'lead_id' = $1::text AND tenant_id=$2`, [String(id), req.tenantId]);
+      await db.query(`DELETE FROM audit_logs WHERE metadata->>'lead_id' = $1::text AND tenant_id=$2 AND action <> 'user_login'`, [String(id), req.tenantId]);
       await db.query('DELETE FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]);
 
       logger.info('Admin hard-deleted lead', { leadId: id, by: req.user.email });
@@ -115,7 +115,7 @@ router.delete('/partners/:id',
       await db.query('DELETE FROM crm_partner_activities WHERE partner_id=$1 AND tenant_id=$2', [id, req.tenantId]);
       await db.query('DELETE FROM crm_partner_documents  WHERE partner_id=$1 AND tenant_id=$2', [id, req.tenantId]);
       await db.query('DELETE FROM crm_sales_data         WHERE partner_id=$1 AND tenant_id=$2', [id, req.tenantId]);
-      await db.query(`DELETE FROM audit_logs WHERE metadata->>'partner_id' = $1::text AND tenant_id=$2`, [String(id), req.tenantId]);
+      await db.query(`DELETE FROM audit_logs WHERE metadata->>'partner_id' = $1::text AND tenant_id=$2 AND action <> 'user_login'`, [String(id), req.tenantId]);
 
       // Dissociate any leads that were converted to this partner
       await db.query('UPDATE crm_leads SET converted_at=NULL WHERE id IN (SELECT id FROM crm_leads WHERE id=$1)', [id]);
@@ -163,7 +163,10 @@ router.post('/purge', async (req, res, next) => {
     await db.query('DELETE FROM crm_sales_data         WHERE tenant_id=$1', [req.tenantId]);
     await db.query('DELETE FROM crm_sales_budgets      WHERE tenant_id=$1', [req.tenantId]);
     await db.query('DELETE FROM crm_import_logs        WHERE tenant_id=$1', [req.tenantId]);
-    await db.query('DELETE FROM audit_logs             WHERE tenant_id=$1', [req.tenantId]);
+    // 'user_login' rows feed billing's active-user count (billingService.countActiveUsers)
+    // — a test-data purge must never erase login history needed for an
+    // already-elapsed, not-yet-invoiced billing period.
+    await db.query(`DELETE FROM audit_logs WHERE tenant_id=$1 AND action <> 'user_login'`, [req.tenantId]);
     await db.query('DELETE FROM documents              WHERE tenant_id=$1', [req.tenantId]);
     await db.query('DELETE FROM crm_leads              WHERE tenant_id=$1', [req.tenantId]);
     await db.query('DELETE FROM crm_partners           WHERE tenant_id=$1', [req.tenantId]);
@@ -278,7 +281,7 @@ router.post('/purge-category', async (req, res, next) => {
       await db.query('DELETE FROM document_tags        WHERE tenant_id=$1', [req.tenantId]);
       await db.query('DELETE FROM crm_lead_documents   WHERE tenant_id=$1', [req.tenantId]);
       await db.query('DELETE FROM crm_partner_documents WHERE tenant_id=$1', [req.tenantId]);
-      await db.query('DELETE FROM audit_logs WHERE document_id IS NOT NULL AND tenant_id=$1', [req.tenantId]);
+      await db.query(`DELETE FROM audit_logs WHERE document_id IS NOT NULL AND tenant_id=$1 AND action <> 'user_login'`, [req.tenantId]);
       const { rowCount } = await db.query('DELETE FROM documents WHERE tenant_id=$1', [req.tenantId]);
       await db.query('DELETE FROM document_groups WHERE tenant_id=$1', [req.tenantId]);
       deleted = rowCount || 0;
@@ -290,7 +293,7 @@ router.post('/purge-category', async (req, res, next) => {
       await db.query('DELETE FROM crm_lead_activities WHERE tenant_id=$1', [req.tenantId]);
       await db.query('DELETE FROM crm_lead_documents  WHERE tenant_id=$1', [req.tenantId]);
       await db.query(`DELETE FROM crm_import_logs WHERE import_type = 'leads' AND tenant_id=$1`, [req.tenantId]);
-      await db.query(`DELETE FROM audit_logs WHERE metadata->>'lead_id' IS NOT NULL AND document_id IS NULL AND tenant_id=$1`, [req.tenantId]);
+      await db.query(`DELETE FROM audit_logs WHERE metadata->>'lead_id' IS NOT NULL AND document_id IS NULL AND tenant_id=$1 AND action <> 'user_login'`, [req.tenantId]);
       const { rows: logos } = await db.query('SELECT logo_url FROM crm_leads WHERE logo_url IS NOT NULL AND tenant_id=$1', [req.tenantId]);
       const { rowCount } = await db.query('DELETE FROM crm_leads WHERE tenant_id=$1', [req.tenantId]);
       deleted = rowCount || 0;
@@ -303,7 +306,7 @@ router.post('/purge-category', async (req, res, next) => {
       await db.query('DELETE FROM crm_sales_data         WHERE tenant_id=$1', [req.tenantId]);
       await db.query('DELETE FROM crm_sales_budgets      WHERE tenant_id=$1', [req.tenantId]);
       await db.query(`DELETE FROM crm_import_logs WHERE import_type IN ('partners','sales') AND tenant_id=$1`, [req.tenantId]);
-      await db.query(`DELETE FROM audit_logs WHERE metadata->>'partner_id' IS NOT NULL AND document_id IS NULL AND tenant_id=$1`, [req.tenantId]);
+      await db.query(`DELETE FROM audit_logs WHERE metadata->>'partner_id' IS NOT NULL AND document_id IS NULL AND tenant_id=$1 AND action <> 'user_login'`, [req.tenantId]);
       const { rows: logos } = await db.query('SELECT logo_url FROM crm_partners WHERE logo_url IS NOT NULL AND tenant_id=$1', [req.tenantId]);
       const { rowCount } = await db.query('DELETE FROM crm_partners WHERE tenant_id=$1', [req.tenantId]);
       deleted = rowCount || 0;

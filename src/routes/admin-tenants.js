@@ -209,10 +209,18 @@ router.get('/:id',
         `SELECT value = 'true' AS enabled FROM app_settings WHERE tenant_id = $1 AND key = 'crm_training_mode'`,
         [req.params.id]
       );
+      const { rows: subscriptionRows } = await db.query(
+        `SELECT ts.plan_id, ts.billing_cycle, ts.started_at, bp.code AS plan_code, bp.name AS plan_name
+         FROM tenant_subscriptions ts
+         JOIN billing_plans bp ON bp.id = ts.plan_id
+         WHERE ts.tenant_id = $1`,
+        [req.params.id]
+      );
 
       res.json({
         ...rows[0], features, auth_configs: authConfigs,
         crm_training_mode: trainingRows[0]?.enabled ?? false,
+        subscription: subscriptionRows[0] || null,
       });
     } catch (err) { next(err); }
   }
@@ -324,6 +332,73 @@ router.put('/:id/features',
       );
       logger.info('Super admin updated features', { tenantId: req.params.id, by: req.user.email });
       res.json(rows);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /:id/subscription — assign/update billing plan + cycle ────
+router.put('/:id/subscription',
+  [
+    param('id').isUUID(),
+    body('planId').isUUID(),
+    body('billingCycle').isIn(['monthly', 'annual']),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const tenant = await findAliveTenant(req.params.id);
+      if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+      const { rows: planRows } = await db.query(
+        `SELECT id FROM billing_plans WHERE id = $1 AND is_active = true`,
+        [req.body.planId]
+      );
+      if (!planRows.length) return res.status(400).json({ error: 'Unknown or inactive billing plan' });
+
+      const { before, after } = await db.transaction(async (client) => {
+        const { rows: beforeRows } = await client.query(
+          `SELECT plan_id, billing_cycle FROM tenant_subscriptions WHERE tenant_id = $1`,
+          [req.params.id]
+        );
+
+        const { rows } = await client.query(
+          `INSERT INTO tenant_subscriptions (tenant_id, plan_id, billing_cycle, updated_by)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (tenant_id) DO UPDATE SET
+             plan_id = $2, billing_cycle = $3, updated_by = $4, updated_at = NOW()
+           RETURNING plan_id, billing_cycle, started_at`,
+          [req.params.id, req.body.planId, req.body.billingCycle, req.user.id]
+        );
+
+        // Close the currently-open history row (if any) and open a new one —
+        // billing-run resolves "which plan/price applied to period X" from
+        // this log instead of the current tenant_subscriptions row, so a
+        // plan change here must not silently re-price already-closed periods.
+        await client.query(
+          `UPDATE tenant_subscription_history
+           SET effective_to = NOW()
+           WHERE tenant_id = $1 AND effective_to IS NULL`,
+          [req.params.id]
+        );
+        await client.query(
+          `INSERT INTO tenant_subscription_history (tenant_id, plan_id, billing_cycle, changed_by)
+           VALUES ($1, $2, $3, $4)`,
+          [req.params.id, req.body.planId, req.body.billingCycle, req.user.id]
+        );
+
+        return { before: beforeRows[0] || null, after: rows[0] };
+      });
+
+      await audit.log({
+        user:        req.user,
+        action:      'tenant_subscription_updated',
+        beforeState: before,
+        afterState:  after,
+        metadata:    { tenant_id: req.params.id },
+        ipAddress:   req.auditContext?.ipAddress,
+      });
+
+      logger.info('Super admin updated tenant subscription', { tenantId: req.params.id, by: req.user.email });
+      res.json(after);
     } catch (err) { next(err); }
   }
 );
