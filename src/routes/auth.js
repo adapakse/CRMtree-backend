@@ -11,6 +11,16 @@ const { requireAuth, requireAdmin, signAccessToken, signRefreshToken, saveRefres
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
 
+// Blocks new token issuance (password login, SAML, dev-login) for a
+// soft-deleted tenant — the same live-DB check requireAuth already does on
+// every request for already-issued tokens, applied here at the point a
+// fresh token would otherwise be handed out.
+async function isTenantDeleted(tenantId) {
+  if (!tenantId) return false;
+  const { rows } = await db.query('SELECT deleted_at FROM tenants WHERE id = $1', [tenantId]);
+  return !!rows[0]?.deleted_at;
+}
+
 // ─── SAML routes — aktywne TYLKO na produkcji (NODE_ENV=production) ──────────
 // Lokalnie i na htcd (NODE_ENV=development) używany jest stub poniżej.
 if (process.env.NODE_ENV !== 'development') {
@@ -78,6 +88,11 @@ if (process.env.NODE_ENV !== 'development') {
       try {
         const user = req.user;
         logger.info('[SAML] Uwierzytelnienie pomyślne', { email: user.email });
+
+        if (await isTenantDeleted(user.tenant_id)) {
+          logger.warn('[SAML] Tenant usunięty — odmowa logowania', { email: user.email, tenantId: user.tenant_id });
+          return res.redirect(`${config.frontendUrl}/login?error=tenant_deleted`);
+        }
 
         const accessToken                   = signAccessToken(user);
         const { token: refreshToken, hash } = signRefreshToken(user);
@@ -178,6 +193,7 @@ router.post('/login', injectAuditContext, async (req, res, next) => {
     const user = rows[0];
 
     if (!user.is_active)      return res.status(401).json({ error: 'Konto jest nieaktywne' });
+    if (await isTenantDeleted(user.tenant_id)) return res.status(401).json({ error: 'Tenant nie jest już dostępny.' });
     if (!user.password_hash)  return res.status(401).json({ error: 'To konto używa logowania SSO — zaloguj się przez Google Workspace' });
 
     const ok = await bcrypt.compare(password, user.password_hash);
@@ -373,7 +389,11 @@ if (process.env.NODE_ENV === 'development') {
       );
       if (!rows.length) return res.status(404).json({ error: 'User not found or inactive' });
 
-      const user                            = rows[0];
+      const user = rows[0];
+      if (await isTenantDeleted(user.tenant_id)) {
+        return res.status(404).json({ error: 'User not found or inactive' });
+      }
+
       const accessToken                     = signAccessToken(user);
       const { token: refreshToken, hash }   = signRefreshToken(user);
       await saveRefreshToken(user.id, user.tenant_id, hash);

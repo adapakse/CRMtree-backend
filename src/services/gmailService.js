@@ -7,6 +7,12 @@ const crypto     = require("crypto");
 const { pool }   = require("../config/database");
 const config     = require("../config");
 const { decrypt } = require("../utils/encrypt");
+const { ProviderNotConfiguredError, IncompleteProviderConfigError, MailboxAlreadyConnectedError } = require("../utils/providerErrors");
+const emailQuote  = require("../utils/emailQuote");
+
+// Dev-only escape hatch for the old "fall back to global .env app" behavior.
+// Never active in production — must be explicitly opted into locally.
+const ALLOW_ENV_FALLBACK = config.isDev && process.env.ALLOW_ENV_EMAIL_FALLBACK === "true";
 
 // ── OAuth2 client factory (accepts optional per-tenant credential override) ───
 function makeOAuth2Client(creds = null) {
@@ -27,10 +33,19 @@ async function getTenantGmailCreds(tenantId) {
     [tenantId]
   );
   if (!rows.length) return null;
+
+  // OAuth2 client construction needs all three, unconditionally, for every
+  // Gmail operation once a tenant row exists — no silent per-field fallback
+  // to a global .env value. (pubsub_topic is required too, but only checked
+  // where it's actually used — see registerWatch — since most Gmail
+  // operations don't need it.)
+  const missing = ["client_id", "client_secret", "redirect_uri"].filter((f) => !rows[0][f]);
+  if (missing.length) throw new IncompleteProviderConfigError("gmail", missing);
+
   return {
     client_id:    rows[0].client_id,
     client_secret: decrypt(rows[0].client_secret),
-    redirect_uri:  rows[0].redirect_uri || null,
+    redirect_uri:  rows[0].redirect_uri,
     extra_config:  rows[0].extra_config || {},
   };
 }
@@ -38,23 +53,17 @@ async function getTenantGmailCreds(tenantId) {
 // ── Pobierz / odśwież token usera (+ konfiguracja tenanta w jednym zapytaniu) ──
 async function getAuthForUser(userId) {
   const { rows } = await pool.query(
-    `SELECT t.access_token, t.refresh_token, t.expires_at,
-            ep.client_id     AS ep_client_id,
-            ep.client_secret AS ep_secret_enc,
-            ep.redirect_uri  AS ep_redirect_uri
+    `SELECT t.access_token, t.refresh_token, t.expires_at, u.tenant_id
      FROM user_gmail_tokens t
      JOIN users u ON u.id = t.user_id
-     LEFT JOIN tenant_email_providers ep
-       ON ep.tenant_id = u.tenant_id AND ep.provider = 'gmail' AND ep.is_enabled = true
      WHERE t.user_id = $1`,
     [userId],
   );
   if (!rows.length) throw new Error("Brak połączonego konta Gmail. Zaloguj się przez OAuth.");
 
   const row   = rows[0];
-  const creds = row.ep_client_id
-    ? { client_id: row.ep_client_id, client_secret: decrypt(row.ep_secret_enc), redirect_uri: row.ep_redirect_uri }
-    : null;
+  const creds = await getTenantGmailCreds(row.tenant_id);
+  if (!creds && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("gmail");
   const oauth2 = makeOAuth2Client(creds);
   oauth2.setCredentials({
     access_token:  row.access_token,
@@ -119,10 +128,11 @@ function parseOAuthState(state) {
 // tenantId opcjonalne: jeśli podane, używa konfiguracji tenanta z DB
 async function getAuthUrl(userId, tenantId = null) {
   const creds  = await getTenantGmailCreds(tenantId);
+  if (!creds && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("gmail");
   const oauth2 = makeOAuth2Client(creds);
   return oauth2.generateAuthUrl({
     access_type: "offline",
-    prompt:      "consent",
+    prompt:      "select_account consent",
     state:       makeOAuthState(userId),
     scope: [
       "https://www.googleapis.com/auth/gmail.send",
@@ -135,19 +145,10 @@ async function getAuthUrl(userId, tenantId = null) {
 
 // ── Wymiana code → tokeny i zapis do DB ───────────────────────────────────────
 async function exchangeCodeAndSave(code, userId) {
-  // Look up tenant Gmail config via the user record (one joined query)
-  const { rows: uRows } = await pool.query(
-    `SELECT u.tenant_id,
-            ep.client_id, ep.client_secret AS ep_secret_enc, ep.redirect_uri
-     FROM users u
-     LEFT JOIN tenant_email_providers ep
-       ON ep.tenant_id = u.tenant_id AND ep.provider = 'gmail' AND ep.is_enabled = true
-     WHERE u.id = $1`,
-    [userId],
-  );
-  const creds = uRows[0]?.client_id
-    ? { client_id: uRows[0].client_id, client_secret: decrypt(uRows[0].ep_secret_enc), redirect_uri: uRows[0].redirect_uri }
-    : null;
+  const { rows: uRows } = await pool.query(`SELECT tenant_id FROM users WHERE id = $1`, [userId]);
+  const tenantId = uRows[0]?.tenant_id ?? null;
+  const creds = await getTenantGmailCreds(tenantId);
+  if (!creds && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("gmail");
   const oauth2 = makeOAuth2Client(creds);
   const { tokens } = await oauth2.getToken(code);
   oauth2.setCredentials(tokens);
@@ -157,23 +158,33 @@ async function exchangeCodeAndSave(code, userId) {
   const profile = await gmail.users.getProfile({ userId: "me" });
   const email   = profile.data.emailAddress;
 
-  await pool.query(
-    `INSERT INTO user_gmail_tokens (user_id, access_token, refresh_token, expires_at, email, updated_at)
-     VALUES ($1, $2, $3, $4, $5, NOW())
-     ON CONFLICT (user_id) DO UPDATE SET
-       access_token  = EXCLUDED.access_token,
-       refresh_token = COALESCE(EXCLUDED.refresh_token, user_gmail_tokens.refresh_token),
-       expires_at    = EXCLUDED.expires_at,
-       email         = EXCLUDED.email,
-       updated_at    = NOW()`,
-    [
-      userId,
-      tokens.access_token,
-      tokens.refresh_token || null,
-      tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
-      email,
-    ],
-  );
+  try {
+    await pool.query(
+      `INSERT INTO user_gmail_tokens (user_id, access_token, refresh_token, expires_at, email, updated_at, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6)
+       ON CONFLICT (user_id) DO UPDATE SET
+         access_token  = EXCLUDED.access_token,
+         refresh_token = COALESCE(EXCLUDED.refresh_token, user_gmail_tokens.refresh_token),
+         expires_at    = EXCLUDED.expires_at,
+         email         = EXCLUDED.email,
+         updated_at    = NOW()`,
+      [
+        userId,
+        tokens.access_token,
+        tokens.refresh_token || null,
+        tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
+        email,
+        tenantId,
+      ],
+    );
+  } catch (err) {
+    // ON CONFLICT (user_id) only covers "same user reconnecting" — this account's
+    // email may already belong to a DIFFERENT user (unique index, migration 0208).
+    if (err.code === "23505" && err.constraint === "user_gmail_tokens_email_unique") {
+      throw new MailboxAlreadyConnectedError("gmail");
+    }
+    throw err;
+  }
 
   return { email };
 }
@@ -241,13 +252,21 @@ async function sendEmail({ userId, to, cc, subject, body, threadId, attachments 
   const oauth2 = await getAuthForUser(userId);
   const gmail  = google.gmail({ version: "v1", auth: oauth2 });
 
-  // Pobierz dane nadawcy do nagłówka From (RFC 2047 dla polskich znaków)
+  // Pobierz dane nadawcy do nagłówka From (RFC 2047 dla polskich znaków).
+  // senderEmail MUSI pochodzić z user_gmail_tokens.email (faktycznie
+  // podłączone i zweryfikowane przez Google konto), nie z users.email (login
+  // CRM) — jeśli te dwa się różnią, Gmail przyjmuje wysyłkę (200, realny
+  // messageId) ale nigdy nie dostarcza wiadomości, bo From nie jest
+  // zweryfikowanym Send As tego konta.
   const { rows: userRows } = await pool.query(
-    "SELECT display_name, email FROM users WHERE id = $1",
+    `SELECT u.display_name, g.email AS gmail_email
+     FROM users u
+     JOIN user_gmail_tokens g ON g.user_id = u.id
+     WHERE u.id = $1`,
     [userId],
   );
   const senderName  = userRows[0]?.display_name || "";
-  const senderEmail = userRows[0]?.email || "";
+  const senderEmail = userRows[0]?.gmail_email  || "";
   const encodedName = encodeRfc2047(senderName);
   const fromHeader  = encodedName
     ? `${encodedName} <${senderEmail}>`
@@ -305,6 +324,24 @@ async function sendEmail({ userId, to, cc, subject, body, threadId, attachments 
   if (threadId) params.requestBody.threadId = threadId;
 
   const response = await gmail.users.messages.send(params);
+
+  // Gmail can return 200 with a real messageId/threadId even when the
+  // message is never actually delivered — e.g. a From header that isn't a
+  // verified Send As identity for this account gets silently dropped, with
+  // no labels at all. A 200 from send() alone is not proof of delivery;
+  // confirm the SENT label is actually present before reporting success.
+  const check = await gmail.users.messages.get({
+    userId: "me",
+    id:     response.data.id,
+    format: "minimal",
+  });
+  if (!check.data.labelIds?.includes("SENT")) {
+    throw new Error(
+      `Gmail nie potwierdził wysyłki wiadomości (brak etykiety SENT, id=${response.data.id}). ` +
+      `Sprawdź, czy adres nadawcy odpowiada zweryfikowanemu kontu Gmail.`
+    );
+  }
+
   return {
     messageId: response.data.id,
     threadId:  response.data.threadId,
@@ -323,6 +360,16 @@ async function getThread(userId, threadId) {
   });
 
   return (thread.data.messages || []).map(parseMessage);
+}
+
+// Splits a message body into { cleanBody, quotedBody } — shared with
+// outlookService/zohoService via src/utils/emailQuote.js so all three
+// providers use the same marker-detection and edge-trimming rules instead of
+// three independently-drifting copies. Gmail needs no provider-specific hook
+// beyond the common blockquote/.gmail_quote/.gmail_attr removal already
+// built into the shared splitter.
+function stripQuotedContent(html) {
+  return emailQuote.split(html);
 }
 
 // ── Parser wiadomości MIME ─────────────────────────────────────────────────────
@@ -360,6 +407,8 @@ function parseMessage(msg) {
   }
   extractParts(msg.payload?.parts);
 
+  const { cleanBody, quotedBody } = stripQuotedContent(body);
+
   return {
     id:               msg.id,
     threadId:         msg.threadId,
@@ -370,6 +419,8 @@ function parseMessage(msg) {
     date:             headers["date"]       ? new Date(headers["date"]).toISOString() : new Date().toISOString(),
     snippet:          msg.snippet           || "",
     body,
+    cleanBody,
+    quotedBody,
     attachments,
     messageIdHeader:  headers["message-id"] || "",
     referencesHeader: headers["references"] || "",
@@ -427,16 +478,18 @@ async function getNewMessages(userId, startHistoryId) {
   } catch (e) {
     // 404 = historyId zbyt stary (historia wyczyszczona przez Google, max ~7 dni)
     if (e.code === 404 || e.status === 404) {
-      console.warn(`[GmailService] history.list 404 — historyId ${startHistoryId} zbyt stary. Brak wiadomości do pobrania.`);
-      return { messageIds: [], historyId: startHistoryId };
+      console.warn(`[GmailService] history.list 404 — historyId ${startHistoryId} wygasł. Wymagany recovery sync.`);
+      return { messageIds: [], historyId: null, needsRecovery: true };
     }
     throw e;
   }
 }
 
 // ── Odnów watch dla wszystkich połączonych userów ─────────────────────────────
+// Uwaga: nie ma tu już globalnej bramki na config.google.pubsubTopic — topic
+// jest teraz wymagany per tenant (patrz registerWatch), więc brak globalnego
+// env nie może blokować odnowienia watchy tenantom, które mają go ustawionego.
 async function renewAllWatches(pool) {
-  if (!config.google.pubsubTopic) return;
   try {
     const { rows } = await pool.query(
       "SELECT user_id FROM user_gmail_tokens WHERE refresh_token IS NOT NULL",
@@ -456,17 +509,16 @@ async function renewAllWatches(pool) {
 
 // ── Rejestracja Pub/Sub watch ─────────────────────────────────────────────────
 async function registerWatch(userId) {
-  // Resolve pubsub topic: tenant's extra_config takes precedence over global config
-  const { rows: tRows } = await pool.query(
-    `SELECT ep.extra_config
-     FROM users u
-     LEFT JOIN tenant_email_providers ep
-       ON ep.tenant_id = u.tenant_id AND ep.provider = 'gmail' AND ep.is_enabled = true
-     WHERE u.id = $1`,
-    [userId],
-  );
-  const pubsubTopic = tRows[0]?.extra_config?.pubsub_topic || config.google.pubsubTopic;
-  if (!pubsubTopic) return null;
+  const { rows: uRows } = await pool.query("SELECT tenant_id FROM users WHERE id = $1", [userId]);
+  if (!uRows.length) return null;
+
+  // pubsub_topic must come from the tenant's own config — no fallback to a
+  // global .env value once the tenant has Gmail configured at all.
+  const creds = await getTenantGmailCreds(uRows[0].tenant_id);
+  if (!creds) return null; // Gmail not configured for this tenant — nothing to watch.
+
+  const pubsubTopic = creds.extra_config?.pubsub_topic;
+  if (!pubsubTopic) throw new IncompleteProviderConfigError("gmail", ["pubsub_topic"]);
 
   const oauth2 = await getAuthForUser(userId);
   const gmail  = google.gmail({ version: "v1", auth: oauth2 });
@@ -492,6 +544,19 @@ async function getCurrentHistoryId(userId) {
   return String(res.data.historyId);
 }
 
+// Returns the IDs of the `maxResults` most recent INBOX messages (newest first).
+// Used by recovery sync when historyId has expired.
+async function listRecentInboxMessages(userId, maxResults = 50) {
+  const oauth2 = await getAuthForUser(userId);
+  const gmail  = google.gmail({ version: "v1", auth: oauth2 });
+  const res    = await gmail.users.messages.list({
+    userId:     "me",
+    labelIds:   ["INBOX"],
+    maxResults,
+  });
+  return (res.data.messages || []).map(m => m.id);
+}
+
 // ── Zwraca świeży access_token dla Drive API ──────────────────────────────────
 async function getFreshAccessToken(userId) {
   const oauth2 = await getAuthForUser(userId);
@@ -512,6 +577,7 @@ module.exports = {
   getAttachmentBuffer,
   getMessage,
   getNewMessages,
+  listRecentInboxMessages,
   renewAllWatches,
   getCurrentHistoryId,
   getFreshAccessToken,
