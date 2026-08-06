@@ -1,7 +1,9 @@
 # CRMtree Backend
 
 ## Projekt
-Node.js/Express REST API — backend CRM dla biur podróży korporacyjnych.
+Node.js/Express REST API — backend generycznego CRM dla przedsiębiorstw różnych branż,
+skupionego na dynamicznej pracy handlowców oraz zarządzaniu lejkiem sprzedażowym,
+upsellem i cross-sellem.
 Katalog: `C:\Users\Adam\Documents\crmtree-backend`
 
 ## Stack

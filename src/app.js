@@ -27,6 +27,11 @@ const adminDataRoutes 	  = require('./routes/admin-data');
 const adminTenantsRoutes  = require('./routes/admin-tenants');
 const profileRoutes       = require('./routes/profile');
 const crmGmail 		  = require('./routes/crm-gmail');
+const crmOutlook      = require('./routes/crm-outlook');
+const crmZoho         = require('./routes/crm-zoho');
+const crmEmail        = require('./routes/crm-email');
+const crmWhatsapp     = require('./routes/crm-whatsapp');
+const publicBlogRoutes    = require('./routes/public-blog');
 
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
@@ -40,6 +45,7 @@ const crmBudgetsRoutes      = require('./routes/crm-budgets');
 const crmChurnRoutes        = require('./routes/crm-churn');
 const crmDocumentsRoutes    = require('./routes/crm-documents');
 const crmConsentsRoutes     = require('./routes/crm-consents');
+const crmSeoRoutes          = require('./routes/crm-seo');
 
 require('./middleware/auth');
 
@@ -91,7 +97,8 @@ app.use('/api/', rateLimit({
   skip: (req) => (
     config.isDev ||
     req.path.startsWith('/auth/') ||
-    req.path === '/signing/webhook'
+    req.path === '/signing/webhook' ||
+    req.path === '/crm/whatsapp/webhook'
   ),
 }));
 
@@ -111,7 +118,18 @@ app.use((req, res, next) => {
   }
 });
 
-app.use(express.json({ limit: '10mb' }));
+// WhatsApp webhook signature verification (X-Hub-Signature-256) needs the
+// exact raw bytes Meta signed, not the re-serialized JSON — capturing it here
+// via express.json()'s own verify hook avoids a second manual body-reader
+// (unlike /signing/webhook above) and doesn't affect any other route's parsing.
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    if (req.path === '/api/crm/whatsapp/webhook') {
+      req.rawBody = buf;
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(compression());
 
@@ -136,6 +154,7 @@ app.get('/health', async (req, res) => {
 });
 
 // ─── API Routes ───────────────────────────────────────────
+app.use('/api/public/blog',     publicBlogRoutes);
 app.use('/api/auth',            authRoutes);
 app.use('/api/documents',       documentRoutes);
 
@@ -150,7 +169,11 @@ app.use('/api/admin/settings',  settingsRoutes);
 app.use('/api/admin/data',     adminDataRoutes);
 app.use('/api/admin/tenants', adminTenantsRoutes);
 app.use('/api/profile',         profileRoutes);
-app.use('/api/crm/gmail', crmGmail);
+app.use('/api/crm/gmail',   crmGmail);
+app.use('/api/crm/outlook', crmOutlook);
+app.use('/api/crm/zoho',    crmZoho);
+app.use('/api/crm/email',   crmEmail);
+app.use('/api/crm/whatsapp', crmWhatsapp);
 
 app.use('/api/groups',          groupRoutes);
 app.use('/api/document-groups', documentGroupRoutes);
@@ -168,6 +191,7 @@ app.use('/api/crm/budgets',      crmBudgetsRoutes);
 app.use('/api/crm/churn',        crmChurnRoutes);
 app.use('/api/crm/documents',    crmDocumentsRoutes);
 app.use('/api/crm/consents',     crmConsentsRoutes);
+app.use('/api/crm/seo',          crmSeoRoutes);
 
 // ─── Workflow global endpoints ─────────────────────────────
 const { requireAuth } = require('./middleware/auth');
@@ -313,11 +337,10 @@ app.use(errorHandler);
 // Uruchamiamy przy starcie serwera, a potem co 6 * 24h.
 if (config.google.pubsubTopic) {
   const gmailService = require('./services/gmailService');
-  const { pool: dbPool } = require('./config/database');
   const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
 
   const scheduleWatchRenewal = () => {
-    gmailService.renewAllWatches(dbPool).catch(() => {});
+    gmailService.renewAllTenantWatches().catch(() => {});
     setTimeout(scheduleWatchRenewal, SIX_DAYS_MS);
   };
   // Pierwsze odnowienie po 60s od startu (serwer musi być gotowy)

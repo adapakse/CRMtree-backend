@@ -113,7 +113,7 @@ router.put(
               : row.value;
       }
 
-      if (keys.includes('crm_training_mode')) clearTrainingModeCache();
+      if (keys.includes('crm_training_mode')) clearTrainingModeCache(req.tenantId);
 
       // Audit log
       if (req.auditLog) {

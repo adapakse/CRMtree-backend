@@ -186,9 +186,15 @@ async function requireAuth(req, res, next) {
     req.tenantId = rows[0].tenant_id ?? null;
     if (req.tenantId) {
       const { rows: tRows } = await db.query(
-        `SELECT dwh_schema_prefix FROM tenants WHERE id = $1`,
+        `SELECT dwh_schema_prefix, deleted_at FROM tenants WHERE id = $1`,
         [req.tenantId]
       );
+      // Re-checked on every request (not cached in the JWT) — a tenant
+      // soft-deleted after this token was issued locks its users out
+      // immediately, on their very next call, with no token revocation needed.
+      if (tRows[0]?.deleted_at) {
+        return res.status(401).json({ error: "User not found or inactive" });
+      }
       req.dwhPrefix = tRows[0]?.dwh_schema_prefix ?? 'crmtree_gold';
     } else {
       req.dwhPrefix = 'crmtree_gold';

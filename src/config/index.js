@@ -96,12 +96,45 @@ module.exports = {
       "GOOGLE_REDIRECT_URI",
       "http://localhost:3000/api/crm/gmail/oauth/callback",
     ),
+    // SEObot — Search Console (reuses the same OAuth client as Gmail above;
+    // this redirect URI must be added to that client's "Authorized redirect
+    // URIs" in Google Cloud Console before the flow works).
+    gscRedirectUri: optional(
+      "GOOGLE_GSC_REDIRECT_URI",
+      "http://localhost:3000/api/crm/seo/gsc/oauth/callback",
+    ),
     // Pub/Sub topic (format: projects/<project>/topics/<topic>)
     // Wymagany do rejestracji Gmail watch (gmail.users.watch).
     pubsubTopic: optional("GOOGLE_PUBSUB_TOPIC"),
     // Pub/Sub subskrypcja pull (format: projects/<project>/subscriptions/<name>)
     // Zastępuje push webhook — aplikacja sama odpytuje kolejkę.
     pubsubSubscription: optional("GOOGLE_PUBSUB_SUBSCRIPTION"),
+  },
+
+  // ─── Microsoft / Outlook (Microsoft Graph API) ────────────────────────────
+  // OAuth2 per-user — each user authorizes their own Outlook/M365 account.
+  // azure_tenant_id in tenant_email_providers.extra_config overrides tenantId.
+  microsoft: {
+    clientId:     optional("MICROSOFT_CLIENT_ID"),
+    clientSecret: optional("MICROSOFT_CLIENT_SECRET"),
+    redirectUri:  optional(
+      "MICROSOFT_REDIRECT_URI",
+      "http://localhost:3000/api/crm/outlook/oauth/callback",
+    ),
+    tenantId:     optional("MICROSOFT_TENANT_ID", "common"),
+  },
+
+  // ─── Zoho Mail API ────────────────────────────────────────────────────────
+  // OAuth2 per-user — each user authorizes their own Zoho Mail account.
+  // accounts_server received in callback is stored per-user (multi-DC support).
+  // Auth URL targets EU DC; other DCs work automatically via accounts_server.
+  zoho: {
+    clientId:    optional("ZOHO_CLIENT_ID"),
+    clientSecret: optional("ZOHO_CLIENT_SECRET"),
+    redirectUri:  optional(
+      "ZOHO_REDIRECT_URI",
+      "http://localhost:3001/api/crm/zoho/oauth/callback",
+    ),
   },
 
   signus: {

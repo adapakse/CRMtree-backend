@@ -11,12 +11,31 @@ const { requireAuth, requireAdmin, signAccessToken, signRefreshToken, saveRefres
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
 
+// Blocks new token issuance (password login, SAML, dev-login) for a
+// soft-deleted tenant — the same live-DB check requireAuth already does on
+// every request for already-issued tokens, applied here at the point a
+// fresh token would otherwise be handed out.
+async function isTenantDeleted(tenantId) {
+  if (!tenantId) return false;
+  const { rows } = await db.query('SELECT deleted_at FROM tenants WHERE id = $1', [tenantId]);
+  return !!rows[0]?.deleted_at;
+}
+
 // ─── SAML routes — aktywne TYLKO na produkcji (NODE_ENV=production) ──────────
 // Lokalnie i na htcd (NODE_ENV=development) używany jest stub poniżej.
 if (process.env.NODE_ENV !== 'development') {
 
+  // SAML strategy is only registered in middleware/auth.js when SAML_IDP_CERT
+  // is set — calling passport.authenticate('saml') without it throws
+  // "Unknown authentication strategy" and crashes the request. Guard both
+  // routes so an unconfigured tenant gets a clean error instead of a 500.
+  const samlNotConfigured = (req, res) => {
+    res.status(503).json({ error: 'Logowanie SSO (SAML) nie jest jeszcze skonfigurowane dla tego tenanta.' });
+  };
+
   // GET /api/auth/saml — redirect do IdP (Google Workspace)
   router.get('/saml', (req, res, next) => {
+    if (!config.saml?.idpCert) return samlNotConfigured(req, res);
     logger.info('[SAML] Inicjowanie logowania → redirect do IdP', {
       entryPoint:  config.saml?.entryPoint,
       issuer:      config.saml?.issuer,
@@ -28,6 +47,7 @@ if (process.env.NODE_ENV !== 'development') {
   // POST /api/auth/saml/callback — Google odsyła SAML assertion tutaj
   router.post(
     '/saml/callback',
+    (req, res, next) => (config.saml?.idpCert ? next() : samlNotConfigured(req, res)),
     injectAuditContext,
     (req, res, next) => {
       // ── DIAGNOSTYKA CERTYFIKATU — usuń po naprawieniu ─────────────────
@@ -68,6 +88,11 @@ if (process.env.NODE_ENV !== 'development') {
       try {
         const user = req.user;
         logger.info('[SAML] Uwierzytelnienie pomyślne', { email: user.email });
+
+        if (await isTenantDeleted(user.tenant_id)) {
+          logger.warn('[SAML] Tenant usunięty — odmowa logowania', { email: user.email, tenantId: user.tenant_id });
+          return res.redirect(`${config.frontendUrl}/login?error=tenant_deleted`);
+        }
 
         const accessToken                   = signAccessToken(user);
         const { token: refreshToken, hash } = signRefreshToken(user);
@@ -168,6 +193,7 @@ router.post('/login', injectAuditContext, async (req, res, next) => {
     const user = rows[0];
 
     if (!user.is_active)      return res.status(401).json({ error: 'Konto jest nieaktywne' });
+    if (await isTenantDeleted(user.tenant_id)) return res.status(401).json({ error: 'Tenant nie jest już dostępny.' });
     if (!user.password_hash)  return res.status(401).json({ error: 'To konto używa logowania SSO — zaloguj się przez Google Workspace' });
 
     const ok = await bcrypt.compare(password, user.password_hash);
@@ -363,7 +389,11 @@ if (process.env.NODE_ENV === 'development') {
       );
       if (!rows.length) return res.status(404).json({ error: 'User not found or inactive' });
 
-      const user                            = rows[0];
+      const user = rows[0];
+      if (await isTenantDeleted(user.tenant_id)) {
+        return res.status(404).json({ error: 'User not found or inactive' });
+      }
+
       const accessToken                     = signAccessToken(user);
       const { token: refreshToken, hash }   = signRefreshToken(user);
       await saveRefreshToken(user.id, user.tenant_id, hash);
