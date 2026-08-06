@@ -31,6 +31,7 @@ const { requireAuth, requireSuperAdmin, signAccessToken } = require('../middlewa
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { EMAIL_PROVIDER_KEYS } = require('../config/email-providers');
 const { clearTrainingModeCache } = require('../utils/trainingMode');
+const { isSlugAllowed } = require('../config/tenantHost');
 
 router.use(requireAuth, requireSuperAdmin, injectAuditContext);
 
@@ -85,7 +86,9 @@ router.post('/',
     body('name').isString().trim().notEmpty().isLength({ max: 255 }),
     body('slug').isString().trim().toLowerCase()
       .matches(/^[a-z0-9][a-z0-9-]*[a-z0-9]$/)
-      .withMessage('slug musi mieć min 2 znaki i zawierać tylko [a-z0-9-]'),
+      .withMessage('slug musi mieć min 2 znaki i zawierać tylko [a-z0-9-]')
+      .custom((slug) => isSlugAllowed(slug))
+      .withMessage('slug jest zarezerwowany (infrastruktura CRMtree) i nie może być użyty'),
     body('email_domain').optional({ nullable: true }).isString().trim(),
     body('dwh_schema_prefix').optional({ nullable: true }).isString().trim()
       .matches(/^[a-z][a-z0-9_]*$/)

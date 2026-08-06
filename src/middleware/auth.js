@@ -7,6 +7,7 @@ const { Strategy: SamlStrategy } = require("passport-saml");
 const config   = require("../config");
 const db       = require("../config/database");
 const logger   = require("../utils/logger");
+const { matchTenantSlug, resolveRequestHost } = require("../config/tenantHost");
 
 // ─── SAML Strategy ─────────────────────────────────────────────────────────
 // Inicjalizowana TYLKO gdy SAML_IDP_CERT jest ustawiony (środowisko produkcyjne).
@@ -199,6 +200,32 @@ async function requireAuth(req, res, next) {
     } else {
       req.dwhPrefix = 'crmtree_gold';
     }
+
+    // ── Tenant-subdomain isolation guard ────────────────────────────────────
+    // When the request lands on a recognized tenant subdomain (acme.crmtree.pl)
+    // and the logged-in user belongs to a DIFFERENT tenant, refuse it — a
+    // session from tenant A must not be usable on tenant B's subdomain.
+    // app.crmtree.pl (and any unrecognized/reserved host) never matches a
+    // slug, so it stays the universal fallback login for every tenant.
+    const requestHost = resolveRequestHost(req);
+    const hostSlug = matchTenantSlug(requestHost);
+    if (hostSlug) {
+      const { rows: hostTenantRows } = await db.query(
+        "SELECT id FROM tenants WHERE slug = $1 AND is_active = true AND deleted_at IS NULL LIMIT 1",
+        [hostSlug]
+      );
+      const hostTenantId = hostTenantRows[0]?.id ?? null;
+      if (hostTenantId && hostTenantId !== req.tenantId) {
+        logger.warn("[auth] tenant host/session mismatch", {
+          host: requestHost, hostTenantId, sessionTenantId: req.tenantId, userId: req.user.id,
+        });
+        return res.status(403).json({
+          error: "To konto nie należy do organizacji pod tym adresem.",
+          code: "TENANT_HOST_MISMATCH",
+        });
+      }
+    }
+
     next();
   } catch (err) {
     if (err.name === "TokenExpiredError") {
