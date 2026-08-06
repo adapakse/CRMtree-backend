@@ -202,9 +202,16 @@ async function requireAuth(req, res, next) {
     }
 
     // ── Tenant-subdomain isolation guard ────────────────────────────────────
-    // When the request lands on a recognized tenant subdomain (acme.crmtree.pl)
-    // and the logged-in user belongs to a DIFFERENT tenant, refuse it — a
-    // session from tenant A must not be usable on tenant B's subdomain.
+    // When the request lands on a recognized tenant-subdomain SHAPE
+    // (acme.crmtree.pl), the session's tenant must match the tenant that
+    // subdomain actually resolves to — refused otherwise. This covers two
+    // cases identically: (a) the subdomain belongs to a DIFFERENT, real
+    // tenant (hostTenantId set, but not this session's), and (b) the
+    // subdomain doesn't match any active tenant at all (hostTenantId is
+    // null — users.tenant_id is NOT NULL for every authenticated user, so
+    // it can never equal a null hostTenantId). Neither should be usable
+    // with a live session; a session from tenant A must not work on tenant
+    // B's subdomain, and no session should work on a nonexistent one.
     // app.crmtree.pl (and any unrecognized/reserved host) never matches a
     // slug, so it stays the universal fallback login for every tenant.
     const requestHost = resolveRequestHost(req);
@@ -215,7 +222,7 @@ async function requireAuth(req, res, next) {
         [hostSlug]
       );
       const hostTenantId = hostTenantRows[0]?.id ?? null;
-      if (hostTenantId && hostTenantId !== req.tenantId) {
+      if (hostTenantId !== req.tenantId) {
         logger.warn("[auth] tenant host/session mismatch", {
           host: requestHost, hostTenantId, sessionTenantId: req.tenantId, userId: req.user.id,
         });

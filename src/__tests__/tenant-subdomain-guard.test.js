@@ -72,12 +72,13 @@ describe("tenant subdomain isolation guard (GET /api/auth/me)", () => {
     expect(res.body.code).toBe("TENANT_HOST_MISMATCH");
   });
 
-  test("200 on an unrecognized subdomain (no matching tenant row)", async () => {
+  test("403 TENANT_HOST_MISMATCH on an unrecognized subdomain (no matching tenant row) — a live session must not be usable there either", async () => {
     const res = await request(app)
       .get("/api/auth/me")
       .set("Host", "no-such-tenant-xyz.crmtree.pl")
       .set("Authorization", `Bearer ${userAToken}`);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("TENANT_HOST_MISMATCH");
   });
 
   // The frontend's own SSR reverse-proxy (server.ts) sits between the browser
