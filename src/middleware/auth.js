@@ -7,6 +7,7 @@ const { Strategy: SamlStrategy } = require("passport-saml");
 const config   = require("../config");
 const db       = require("../config/database");
 const logger   = require("../utils/logger");
+const { matchTenantSlug, resolveRequestHost } = require("../config/tenantHost");
 
 // ─── SAML Strategy ─────────────────────────────────────────────────────────
 // Inicjalizowana TYLKO gdy SAML_IDP_CERT jest ustawiony (środowisko produkcyjne).
@@ -199,6 +200,39 @@ async function requireAuth(req, res, next) {
     } else {
       req.dwhPrefix = 'crmtree_gold';
     }
+
+    // ── Tenant-subdomain isolation guard ────────────────────────────────────
+    // When the request lands on a recognized tenant-subdomain SHAPE
+    // (acme.crmtree.pl), the session's tenant must match the tenant that
+    // subdomain actually resolves to — refused otherwise. This covers two
+    // cases identically: (a) the subdomain belongs to a DIFFERENT, real
+    // tenant (hostTenantId set, but not this session's), and (b) the
+    // subdomain doesn't match any active tenant at all (hostTenantId is
+    // null — users.tenant_id is NOT NULL for every authenticated user, so
+    // it can never equal a null hostTenantId). Neither should be usable
+    // with a live session; a session from tenant A must not work on tenant
+    // B's subdomain, and no session should work on a nonexistent one.
+    // app.crmtree.pl (and any unrecognized/reserved host) never matches a
+    // slug, so it stays the universal fallback login for every tenant.
+    const requestHost = resolveRequestHost(req);
+    const hostSlug = matchTenantSlug(requestHost);
+    if (hostSlug) {
+      const { rows: hostTenantRows } = await db.query(
+        "SELECT id FROM tenants WHERE slug = $1 AND is_active = true AND deleted_at IS NULL LIMIT 1",
+        [hostSlug]
+      );
+      const hostTenantId = hostTenantRows[0]?.id ?? null;
+      if (hostTenantId !== req.tenantId) {
+        logger.warn("[auth] tenant host/session mismatch", {
+          host: requestHost, hostTenantId, sessionTenantId: req.tenantId, userId: req.user.id,
+        });
+        return res.status(403).json({
+          error: "To konto nie należy do organizacji pod tym adresem.",
+          code: "TENANT_HOST_MISMATCH",
+        });
+      }
+    }
+
     next();
   } catch (err) {
     if (err.name === "TokenExpiredError") {
