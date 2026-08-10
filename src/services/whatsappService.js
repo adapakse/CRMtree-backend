@@ -1,12 +1,12 @@
 'use strict';
 // src/services/whatsappService.js
 //
-// WhatsApp Cloud API (Meta) — per-user messaging. Each CRM user connects
-// their own WhatsApp Business number (their own Meta app, own phone_number_id
-// and access_token), configured in My Settings — never a shared tenant
-// channel, never set up by an admin on a user's behalf. tenant_id is kept on
-// every row purely for tenant isolation/oversight (admin-tenants.js,
-// crm-whatsapp.js tenant-directory), not as the unit of configuration.
+// WhatsApp Cloud API (Meta) — per-tenant messaging. One shared company
+// WhatsApp Business number per tenant (one Meta app, one phone_number_id,
+// one access_token), configured by a super admin in Tenant management —
+// never per-user. Business decision 2026-08-03: WhatsApp Business blocks
+// simultaneous personal/business use of the same phone number, so letting
+// each CRM user connect their own number wasn't viable in the field.
 //
 // Outbound send + inbound webhook (messages + delivery/read statuses). No
 // message templates yet — sends outside Meta's 24h customer-service window
@@ -21,7 +21,7 @@ const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
 
 class WhatsappNotConfiguredError extends Error {
   constructor() {
-    super('Nie masz podłączonego numeru WhatsApp. Podłącz go w Moje ustawienia.');
+    super('WhatsApp nie jest skonfigurowany dla tego tenanta. Skontaktuj się z administratorem.');
     this.name   = 'WhatsappNotConfiguredError';
     this.status = 400;
     this.code   = 'WHATSAPP_NOT_CONFIGURED';
@@ -46,25 +46,58 @@ class WhatsappInvalidPhoneError extends Error {
   }
 }
 
+class WhatsappMetaVerificationError extends Error {
+  constructor(metaMessage) {
+    super(`Nie udało się zweryfikować numeru w Meta: ${metaMessage}`);
+    this.name   = 'WhatsappMetaVerificationError';
+    this.status = 400;
+    this.code   = 'WHATSAPP_META_VERIFICATION_FAILED';
+  }
+}
+
+// Ground truth for a phone number lives in Meta, not in whatever an admin
+// types — a phone_number_id can silently point at the wrong resource (e.g.
+// Meta's free Test Number instead of the real business number). Called on
+// every tenant config save; display_phone_number is never accepted as
+// free-text input, only ever this function's return value.
+async function fetchPhoneNumberInfoFromMeta(phoneNumberId, accessToken) {
+  const res = await fetch(
+    `${GRAPH_BASE}/${phoneNumberId}?fields=display_phone_number,verified_name,code_verification_status,quality_rating`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.display_phone_number) {
+    const metaMessage = data?.error?.message || `HTTP ${res.status}`;
+    throw new WhatsappMetaVerificationError(metaMessage);
+  }
+  return {
+    displayPhoneNumber: data.display_phone_number,
+    verifiedName: data.verified_name || null,
+    codeVerificationStatus: data.code_verification_status || null,
+    qualityRating: data.quality_rating || null,
+  };
+}
+
 function generateWebhookVerifyToken() {
   return crypto.randomBytes(24).toString('hex');
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Self-service config (My Settings)
+// Tenant configuration (super admin — Tenant management)
 // ─────────────────────────────────────────────────────────────────
 
-// Full row for the owning user only — includes the decrypted webhook verify
-// token (the user needs to read it back to paste into their own Meta app;
+// Full row including the decrypted webhook verify token — the tenant admin
+// needs to read it back to paste into their own Meta app webhook config;
 // unlike access_token/app_secret, it's a value the CRM itself generated, not
-// a third-party credential, so re-displaying it to its owner is safe).
-async function getMyConfig(userId) {
+// a third-party credential, so re-displaying it is safe.
+async function getTenantConfig(tenantId) {
   const { rows } = await pool.query(
-    `SELECT id, waba_id, phone_number_id, display_phone_number, is_enabled,
+    `SELECT id, waba_id, phone_number_id, display_phone_number, verified_name,
+            code_verification_status, is_enabled,
             access_token, app_secret, webhook_verify_token, created_at, updated_at
-     FROM whatsapp_configs
-     WHERE user_id = $1`,
-    [userId],
+     FROM tenant_whatsapp_config
+     WHERE tenant_id = $1`,
+    [tenantId],
   );
   if (!rows.length) return null;
   const row = rows[0];
@@ -73,6 +106,8 @@ async function getMyConfig(userId) {
     waba_id: row.waba_id,
     phone_number_id: row.phone_number_id,
     display_phone_number: row.display_phone_number,
+    verified_name: row.verified_name,
+    code_verification_status: row.code_verification_status,
     is_enabled: row.is_enabled,
     access_token_configured: Boolean(row.access_token),
     app_secret_configured: Boolean(row.app_secret),
@@ -84,11 +119,11 @@ async function getMyConfig(userId) {
 
 // Narrow status shown in the lead/partner WhatsApp tab — just enough to
 // decide whether the current viewer can compose a message.
-async function getMyStatus(userId) {
-  if (!userId) return { configured: false, enabled: false, display_phone_number: null };
+async function getTenantStatus(tenantId) {
+  if (!tenantId) return { configured: false, enabled: false, display_phone_number: null };
   const { rows } = await pool.query(
-    `SELECT display_phone_number, is_enabled FROM whatsapp_configs WHERE user_id = $1`,
-    [userId],
+    `SELECT display_phone_number, is_enabled FROM tenant_whatsapp_config WHERE tenant_id = $1`,
+    [tenantId],
   );
   if (!rows.length) return { configured: false, enabled: false, display_phone_number: null };
   return {
@@ -102,10 +137,17 @@ async function getMyStatus(userId) {
 // omitted/blank on an update keeps the previously saved encrypted value,
 // required on first save. webhook_verify_token is never accepted from the
 // client — generated here on first connect, kept stable across updates.
-async function upsertMyConfig(userId, tenantId, input) {
+//
+// display_phone_number/verified_name/code_verification_status are never
+// accepted as input — always (re-)fetched from Meta on every save, using
+// whichever access_token this save will end up storing (the new one if
+// provided, otherwise the existing decrypted one). A phone_number_id/token
+// pair Meta can't resolve fails the whole save rather than silently storing
+// a number that doesn't match the number actually wired up.
+async function upsertTenantConfig(tenantId, input) {
   const { rows: existing } = await pool.query(
-    'SELECT access_token, app_secret, webhook_verify_token FROM whatsapp_configs WHERE user_id = $1',
-    [userId],
+    'SELECT access_token, app_secret, webhook_verify_token FROM tenant_whatsapp_config WHERE tenant_id = $1',
+    [tenantId],
   );
   const prev = existing[0] || null;
 
@@ -118,23 +160,28 @@ async function upsertMyConfig(userId, tenantId, input) {
     throw err;
   }
 
+  const accessTokenForValidation = input.access_token || decrypt(prev.access_token);
+  const metaInfo = await fetchPhoneNumberInfoFromMeta(input.phone_number_id, accessTokenForValidation);
+
   const encAppSecret = input.app_secret ? encrypt(input.app_secret) : (prev ? prev.app_secret : null);
   const encVerifyToken = prev ? prev.webhook_verify_token : encrypt(generateWebhookVerifyToken());
 
   const { rows } = await pool.query(
-    `INSERT INTO whatsapp_configs
-       (tenant_id, user_id, waba_id, phone_number_id, display_phone_number, access_token, app_secret, webhook_verify_token, is_enabled)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     ON CONFLICT (user_id) DO UPDATE SET
-       waba_id              = EXCLUDED.waba_id,
-       phone_number_id      = EXCLUDED.phone_number_id,
-       display_phone_number = EXCLUDED.display_phone_number,
-       access_token         = EXCLUDED.access_token,
-       app_secret           = EXCLUDED.app_secret,
-       is_enabled           = EXCLUDED.is_enabled,
-       updated_at           = NOW()
-     RETURNING id, waba_id, phone_number_id, display_phone_number, is_enabled, created_at, updated_at`,
-    [tenantId, userId, input.waba_id, input.phone_number_id, input.display_phone_number || null,
+    `INSERT INTO tenant_whatsapp_config
+       (tenant_id, waba_id, phone_number_id, display_phone_number, verified_name, code_verification_status, access_token, app_secret, webhook_verify_token, is_enabled)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ON CONFLICT (tenant_id) DO UPDATE SET
+       waba_id                  = EXCLUDED.waba_id,
+       phone_number_id          = EXCLUDED.phone_number_id,
+       display_phone_number     = EXCLUDED.display_phone_number,
+       verified_name            = EXCLUDED.verified_name,
+       code_verification_status = EXCLUDED.code_verification_status,
+       access_token             = EXCLUDED.access_token,
+       app_secret               = EXCLUDED.app_secret,
+       is_enabled               = EXCLUDED.is_enabled,
+       updated_at                = NOW()
+     RETURNING id, waba_id, phone_number_id, display_phone_number, verified_name, code_verification_status, is_enabled, created_at, updated_at`,
+    [tenantId, input.waba_id, input.phone_number_id, metaInfo.displayPhoneNumber, metaInfo.verifiedName, metaInfo.codeVerificationStatus,
       encAccessToken, encAppSecret, encVerifyToken, input.is_enabled !== false],
   );
   return {
@@ -145,37 +192,22 @@ async function upsertMyConfig(userId, tenantId, input) {
   };
 }
 
-async function deleteMyConfig(userId) {
-  const { rowCount } = await pool.query('DELETE FROM whatsapp_configs WHERE user_id = $1', [userId]);
+async function deleteTenantConfig(tenantId) {
+  const { rowCount } = await pool.query('DELETE FROM tenant_whatsapp_config WHERE tenant_id = $1', [tenantId]);
   return rowCount > 0;
-}
-
-// Tenant-scoped directory for oversight — admin/settings (tenant admin) and
-// admin/tenants (super admin). Never includes secrets.
-async function getTenantDirectory(tenantId) {
-  const { rows } = await pool.query(
-    `SELECT u.id AS user_id, u.display_name AS user_name, u.email,
-            c.display_phone_number, c.is_enabled, c.updated_at
-     FROM whatsapp_configs c
-     JOIN users u ON u.id = c.user_id
-     WHERE c.tenant_id = $1
-     ORDER BY u.display_name`,
-    [tenantId],
-  );
-  return rows;
 }
 
 // ─────────────────────────────────────────────────────────────────
 // Outbound send
 // ─────────────────────────────────────────────────────────────────
 
-async function getSenderConfig(userId) {
-  if (!userId) return null;
+async function getSenderConfig(tenantId) {
+  if (!tenantId) return null;
   const { rows } = await pool.query(
     `SELECT phone_number_id, display_phone_number, access_token, is_enabled
-     FROM whatsapp_configs
-     WHERE user_id = $1`,
-    [userId],
+     FROM tenant_whatsapp_config
+     WHERE tenant_id = $1`,
+    [tenantId],
   );
   if (!rows.length || !rows[0].is_enabled) return null;
   return {
@@ -197,8 +229,8 @@ function normalizePhone(raw) {
   return trimmed.replace(/\D/g, '');
 }
 
-async function sendTextMessage({ userId, to, body }) {
-  const cfg = await getSenderConfig(userId);
+async function sendTextMessage({ tenantId, to, body }) {
+  const cfg = await getSenderConfig(tenantId);
   if (!cfg) throw new WhatsappNotConfiguredError();
 
   const toPhone = normalizePhone(to);
@@ -235,17 +267,17 @@ async function sendTextMessage({ userId, to, body }) {
 // Webhook helpers (incoming messages + delivery/read status updates)
 // ─────────────────────────────────────────────────────────────────
 
-// GET /webhook handshake: `webhook_verify_token` is encrypted per-user, so
+// GET /webhook handshake: `webhook_verify_token` is encrypted per-tenant, so
 // there's no way to look it up by value — instead, decrypt every enabled
-// user's token and timing-safe-compare each against what Meta sent. User
-// counts here are small (one row per connected number), so a full scan per
-// verification request is cheap and avoids ever storing the token in a
-// directly queryable (plaintext or hashed-for-lookup) form.
+// tenant's token and timing-safe-compare each against what Meta sent. Tenant
+// counts here are small (one row per tenant with WhatsApp configured), so a
+// full scan per verification request is cheap and avoids ever storing the
+// token in a directly queryable (plaintext or hashed-for-lookup) form.
 async function verifyWebhookToken(candidateToken) {
   if (!candidateToken) return false;
   const candidateBuf = Buffer.from(String(candidateToken));
   const { rows } = await pool.query(
-    `SELECT webhook_verify_token FROM whatsapp_configs WHERE is_enabled = true`,
+    `SELECT webhook_verify_token FROM tenant_whatsapp_config WHERE is_enabled = true`,
   );
   for (const row of rows) {
     const decrypted = decrypt(row.webhook_verify_token);
@@ -257,22 +289,21 @@ async function verifyWebhookToken(candidateToken) {
   return false;
 }
 
-// Resolves the user a POST /webhook delivery belongs to, from the
+// Resolves the tenant a POST /webhook delivery belongs to, from the
 // `phone_number_id` Meta always includes in value.metadata. Returns the
 // still-encrypted app_secret — decrypting is the caller's job, since it's
 // only needed once signature verification is actually attempted.
-async function findConfigByPhoneNumberId(phoneNumberId) {
+async function findTenantConfigByPhoneNumberId(phoneNumberId) {
   if (!phoneNumberId) return null;
   const { rows } = await pool.query(
-    `SELECT tenant_id, user_id, phone_number_id, display_phone_number, app_secret
-     FROM whatsapp_configs
+    `SELECT tenant_id, phone_number_id, display_phone_number, app_secret
+     FROM tenant_whatsapp_config
      WHERE phone_number_id = $1 AND is_enabled = true`,
     [phoneNumberId],
   );
   if (!rows.length) return null;
   return {
     tenantId:           rows[0].tenant_id,
-    ownerUserId:         rows[0].user_id,
     phoneNumberId:      rows[0].phone_number_id,
     displayPhoneNumber: rows[0].display_phone_number || rows[0].phone_number_id,
     appSecretEncrypted: rows[0].app_secret,
@@ -308,11 +339,9 @@ function normalizePhoneDigits(raw) {
 }
 
 // Exact digit-for-digit match only — never fuzzy/partial, per the "don't
-// guess" rule. Scoped to the tenant (not the owning user alone): the same
-// lead/partner phone can be looked up regardless of which of the tenant's
-// users' numbers received the message. Returns both ids null if there's
-// zero or more-than-one match in either table, or if the number matches both
-// a lead AND a partner — ambiguous matches are left unassigned rather than guessed.
+// guess" rule. Returns both ids null if there's zero or more-than-one match
+// in either table, or if the number matches both a lead AND a partner —
+// ambiguous matches are left unassigned rather than guessed.
 async function findCrmRecordByPhone(tenantId, digits) {
   if (!digits) return { leadId: null, partnerId: null };
 
@@ -334,41 +363,37 @@ async function findCrmRecordByPhone(tenantId, digits) {
   return { leadId: null, partnerId: null };
 }
 
-// Matches an incoming sender against this specific number's own most recent
-// outgoing message to that same number — i.e. "who did I message that this
-// reply is answering?". Scoped by owner_user_id (not tenant-wide) since two
-// different users' numbers in the same tenant could otherwise both have
-// messaged the same phone about different leads. Checked before
-// findCrmRecordByPhone because a lead's crm_leads.phone can be blank/stale/
-// differently formatted while the actual WhatsApp thread (what was sent to,
-// what they replied from) is still exact. Only conversations already
-// assigned to a lead/partner count as a match, so this can never assign an
-// incoming message based on another unassigned one.
-async function findConversationByPhone(ownerUserId, digits) {
+// Matches an incoming sender against this tenant's own most recent outgoing
+// message to that same number — i.e. "who did we message that this reply is
+// answering?". Checked before findCrmRecordByPhone because a lead's
+// crm_leads.phone can be blank/stale/differently formatted while the actual
+// WhatsApp thread (what we sent to, what they replied from) is still exact.
+// Only conversations already assigned to a lead/partner count as a match, so
+// this can never assign an incoming message based on another unassigned one.
+async function findConversationByPhone(tenantId, digits) {
   if (!digits) return { leadId: null, partnerId: null };
   const { rows } = await pool.query(
     `SELECT lead_id, partner_id
      FROM whatsapp_messages
-     WHERE owner_user_id = $1
+     WHERE tenant_id = $1
        AND direction = 'outgoing'
        AND regexp_replace(to_phone, '\\D', '', 'g') = $2
        AND (lead_id IS NOT NULL OR partner_id IS NOT NULL)
      ORDER BY created_at DESC
      LIMIT 1`,
-    [ownerUserId, digits],
+    [tenantId, digits],
   );
   if (!rows.length) return { leadId: null, partnerId: null };
   return { leadId: rows[0].lead_id, partnerId: rows[0].partner_id };
 }
 
 // Single entry point the webhook uses to decide who an incoming message
-// belongs to. Order of preference: existing conversation on this same number
-// (see findConversationByPhone) first, direct crm_leads/crm_partners phone
-// match second (tenant-wide), unassigned otherwise. Returns match flags
-// alongside the ids purely for safe (no-phone-number) diagnostic logging in
-// the webhook route.
-async function resolveIncomingSender(tenantId, ownerUserId, digits) {
-  const conversationMatch = await findConversationByPhone(ownerUserId, digits);
+// belongs to. Order of preference: existing conversation (see
+// findConversationByPhone) first, direct crm_leads/crm_partners phone match
+// second, unassigned otherwise. Returns match flags alongside the ids purely
+// for safe (no-phone-number) diagnostic logging in the webhook route.
+async function resolveIncomingSender(tenantId, digits) {
+  const conversationMatch = await findConversationByPhone(tenantId, digits);
   const conversationMatchFound = Boolean(conversationMatch.leadId || conversationMatch.partnerId);
   if (conversationMatchFound) {
     return {
@@ -391,43 +416,42 @@ async function resolveIncomingSender(tenantId, ownerUserId, digits) {
   };
 }
 
-// ON CONFLICT targets the partial unique index from migration 0208
-// (owner_user_id, meta_message_id) WHERE meta_message_id IS NOT NULL — DO
-// NOTHING makes a retried Meta webhook delivery a harmless no-op instead of
-// a duplicate row.
-async function saveIncomingMessage({ tenantId, ownerUserId, leadId, partnerId, fromPhone, toPhone, body, metaMessageId, rawPayload }) {
+// ON CONFLICT targets the partial unique index from migration 0231
+// (tenant_id, meta_message_id) WHERE meta_message_id IS NOT NULL — DO NOTHING
+// makes a retried Meta webhook delivery a harmless no-op instead of a duplicate row.
+async function saveIncomingMessage({ tenantId, leadId, partnerId, fromPhone, toPhone, body, metaMessageId, rawPayload }) {
   await pool.query(
     `INSERT INTO whatsapp_messages
-       (tenant_id, owner_user_id, lead_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, raw_payload)
-     VALUES ($1, $2, $3, $4, 'incoming', $5, $6, $7, $8, 'received', $9)
-     ON CONFLICT (owner_user_id, meta_message_id) WHERE meta_message_id IS NOT NULL DO NOTHING`,
-    [tenantId, ownerUserId, leadId, partnerId, fromPhone, toPhone, body, metaMessageId, JSON.stringify(rawPayload)],
+       (tenant_id, lead_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, raw_payload)
+     VALUES ($1, $2, $3, 'incoming', $4, $5, $6, $7, 'received', $8)
+     ON CONFLICT (tenant_id, meta_message_id) WHERE meta_message_id IS NOT NULL DO NOTHING`,
+    [tenantId, leadId, partnerId, fromPhone, toPhone, body, metaMessageId, JSON.stringify(rawPayload)],
   );
 }
 
-// No-op if the message isn't found (e.g. status arrived for a message sent
-// before whatsapp_messages existed, or an id typo from Meta).
-async function updateMessageStatus({ ownerUserId, metaMessageId, status }) {
+// No-op if the message isn't found (e.g. status arrived for a message this
+// tenant sent before whatsapp_messages existed, or an id typo from Meta).
+async function updateMessageStatus({ tenantId, metaMessageId, status }) {
   if (!metaMessageId || !status) return;
   await pool.query(
-    `UPDATE whatsapp_messages SET status = $1 WHERE owner_user_id = $2 AND meta_message_id = $3`,
-    [status, ownerUserId, metaMessageId],
+    `UPDATE whatsapp_messages SET status = $1 WHERE tenant_id = $2 AND meta_message_id = $3`,
+    [status, tenantId, metaMessageId],
   );
 }
 
-// generateWebhookVerifyToken, the three Whatsapp*Error classes, and
-// findCrmRecordByPhone are used only inside this file (by upsertMyConfig,
-// sendTextMessage's throws, and resolveIncomingSender respectively) — not
-// re-exported, since nothing outside this module references them by name.
+// generateWebhookVerifyToken, the four Whatsapp*Error classes,
+// fetchPhoneNumberInfoFromMeta, and findCrmRecordByPhone are used only
+// inside this file (by upsertTenantConfig, sendTextMessage's throws, and
+// resolveIncomingSender respectively) — not re-exported, since nothing
+// outside this module references them by name.
 module.exports = {
-  getMyConfig,
-  getMyStatus,
-  upsertMyConfig,
-  deleteMyConfig,
-  getTenantDirectory,
+  getTenantConfig,
+  getTenantStatus,
+  upsertTenantConfig,
+  deleteTenantConfig,
   sendTextMessage,
   verifyWebhookToken,
-  findConfigByPhoneNumberId,
+  findTenantConfigByPhoneNumberId,
   verifyWebhookSignature,
   normalizePhoneDigits,
   resolveIncomingSender,

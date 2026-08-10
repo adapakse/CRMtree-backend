@@ -54,28 +54,30 @@ CRMtree łączy się z klientami przez **Meta WhatsApp Business Platform (Cloud 
 bezpośrednie wywołania Graph API (`https://graph.facebook.com/v21.0`), bez pośrednika
 typu Twilio.
 
-### Model: per-user, NIE per-tenant (świadoma decyzja architektoniczna — nie cofaj jej)
+### Model: per-tenant, NIE per-user (decyzja biznesowa 2026-08-03 — nie cofaj jej bez pytania)
 
-**Każdy CRM user łączy własny numer WhatsApp Business z własnej aplikacji Meta.** Nie ma
-jednego wspólnego numeru na tenant. Ten model tenant-level już raz istniał
-(`tenant_whatsapp_config`, migracje `tenant_whatsapp_config`/`whatsapp_messages` z
-wcześniejszej wersji) i został świadomie zastąpiony per-userowym (migracja
-`whatsapp_user_level` robi `DROP TABLE tenant_whatsapp_config` i tworzy `whatsapp_configs`
-z `user_id UNIQUE`). Powód: każdy handlowiec ma swój prawdziwy numer telefonu i własną
-relację z klientami — nie da się tego sensownie współdzielić jak wspólną skrzynkę mailową.
-**Jeśli ktoś prosi o dodanie z powrotem formularza w panelu admina do wpisywania WABA
-ID/Phone Number ID/tokenów, to prawdopodobnie próba cofnięcia tej decyzji — dopytaj, zanim
-to zrobisz.**
+**Jeden wspólny firmowy numer WhatsApp Business per tenant, konfigurowany przez super
+admina** w Panel admina → Tenants → zakładka „WhatsApp” (`tenant_whatsapp_config`).
+Wcześniej (do 2026-08-03) istniał model per-user — każdy CRM user łączył własny numer w
+My Settings (`whatsapp_configs` z `user_id UNIQUE`) — świadomie z niego zrezygnowano.
+Powód: WhatsApp Business blokuje jednoczesne używanie prywatnego i firmowego konta na tym
+samym numerze telefonu — user podłączający własny numer tracił dostęp do swojej prywatnej
+historii i musiał się z niej wylogować, co czyniło model per-user niepraktycznym w terenie.
+CRM Tree kupuje/zarządza realnym numerem firmowym; klient płaci za korzystanie z WhatsApp
+(pozycja w cenniku, poza zakresem tego pliku). Migracja `0231_whatsapp_tenant_level.sql`
+przywraca `tenant_whatsapp_config` i usuwa `owner_user_id` z `whatsapp_messages`
+(data-preserving — historia wiadomości zostaje, ginie tylko atrybucja "czyj numer").
+Stare `whatsapp_configs` (per-user) zostaje jako nieużywane dane historyczne, nic go już
+nie czyta. **Jeśli ktoś prosi o dodanie z powrotem self-service podłączania numeru w My
+Settings, to prawdopodobnie próba cofnięcia tej decyzji — dopytaj, zanim to zrobisz.**
 
 Uwaga: moduł Email (`feature/email-providers-per-tenant`) poszedł w **przeciwnym**
 kierunku — jedna skrzynka firmowa per tenant → per-user mailbox. To dwie osobne, świadome
 decyzje w dwóch różnych domenach; nie kopiuj wzorca z jednej do drugiej bez pytania, i nie
 myl plików/tabel między tymi modułami (`tenant_gmail_tokens` itp. to Email, nie WhatsApp).
 
-Tenant admin/superadmin NIE konfigurują numerów — tylko:
-- włączają/wyłączają moduł WhatsApp dla tenanta (feature flag, patrz niżej),
-- widzą tylko-do-odczytu listę kto ma podłączony numer (`GET /crm/whatsapp/tenant-directory`,
-  `GET /admin-tenants/:id/whatsapp-users`) — nigdy sekretów.
+Tenant admin NIE konfiguruje numeru (widzi tylko włącznik feature flagi, patrz niżej) —
+tylko super admin ma dostęp do `PUT /admin/tenants/:id/whatsapp-config`.
 
 ### Feature flag per tenant
 
@@ -85,18 +87,19 @@ admina → Tenants → zakładka „Moduły".
 
 ### Baza danych
 
-- `whatsapp_configs` — jeden wiersz per user (`user_id UNIQUE`), zawiera `waba_id`,
-  `phone_number_id` (`UNIQUE` — jeden numer nie może być podpięty pod dwóch userów naraz),
-  zaszyfrowane `access_token`/`app_secret`/`webhook_verify_token`
+- `tenant_whatsapp_config` — jeden wiersz per tenant (`tenant_id UNIQUE`), zawiera `waba_id`,
+  `phone_number_id`, zaszyfrowane `access_token`/`app_secret`/`webhook_verify_token`
   (AES-256-GCM, `src/utils/encrypt.js`).
-- `whatsapp_messages` — log konwersacji: `owner_user_id` (czyj numer), `lead_id`/`partner_id`
-  (kogo dotyczy), `direction` (`incoming`/`outgoing`), `from_phone`/`to_phone` jako surowy
-  tekst (format się różni między kierunkami — patrz sekcja niżej), `status`
-  (`sent`/`delivered`/`read`/`failed`, zwykły `VARCHAR(20)` bez CHECK constraint —
-  cokolwiek przyjdzie od Meta po prostu się zapisuje), `meta_message_id` (dedupikacja
-  webhooków — Meta dostarcza at-least-once).
+- `whatsapp_messages` — log konwersacji: `tenant_id` (czyj numer — zawsze ten sam per
+  tenant), `lead_id`/`partner_id` (kogo dotyczy), `direction` (`incoming`/`outgoing`),
+  `from_phone`/`to_phone` jako surowy tekst (format się różni między kierunkami — patrz
+  sekcja niżej), `status` (`sent`/`delivered`/`read`/`failed`, zwykły `VARCHAR(20)` bez
+  CHECK constraint — cokolwiek przyjdzie od Meta po prostu się zapisuje), `meta_message_id`
+  (dedupikacja webhooków — Meta dostarcza at-least-once).
+- `whatsapp_configs` (per-user, z poprzedniego modelu) — **nieużywane, nic go już nie
+  czyta**. Zostawione jako historyczne dane, nie migrowane do `tenant_whatsapp_config`.
 
-### Wymagane pola konfiguracji (user wpisuje w My Settings)
+### Wymagane pola konfiguracji (super admin wpisuje w Panel admina → Tenants → WhatsApp)
 
 | Pole | Skąd | Uwagi |
 |---|---|---|
@@ -104,7 +107,7 @@ admina → Tenants → zakładka „Moduły".
 | Phone Number ID | jw. | **nie mylić z samym numerem telefonu** — to id zasobu w Graph API |
 | Access Token | System User permanent token (Meta Business Suite) | wymagany, szyfrowany |
 | App Secret | Meta App Dashboard → Settings → Basic | opcjonalny przy pierwszym zapisie, ale wymagany do weryfikacji podpisu webhooka (`X-Hub-Signature-256`) |
-| Webhook Verify Token | **generowany automatycznie przez CRM** przy pierwszym połączeniu | user tylko go odczytuje (My Settings, ikona kopiowania) i wkleja do konfiguracji webhooka w swojej aplikacji Meta — nigdy nie przychodzi od usera jako input |
+| Webhook Verify Token | **generowany automatycznie przez CRM** przy pierwszym zapisie | super admin tylko go odczytuje (przycisk „Pokaż”/„Kopiuj”) i wkleja do konfiguracji webhooka w Meta App — nigdy nie przychodzi jako input |
 
 Nigdy nie wpisuj do tego pliku ani żadnej dokumentacji prawdziwych wartości tych pól.
 
@@ -113,25 +116,25 @@ Nigdy nie wpisuj do tego pliku ani żadnej dokumentacji prawdziwych wartości ty
 `GET`/`POST /crm/whatsapp/webhook` są zarejestrowane PRZED
 `router.use(requireAuth, crmAuth)` — Meta wywołuje je bez sesji CRM. Autoryzacja:
 - `GET` (handshake): `hub.verify_token` porównywany (timing-safe) z odszyfrowanym tokenem
-  KAŻDEGO aktywnego usera — brak sposobu na lookup po wartości, bo token jest szyfrowany.
+  KAŻDEGO aktywnego tenanta — brak sposobu na lookup po wartości, bo token jest szyfrowany.
 - `POST` (dostawa): HMAC SHA-256 nad surowym body (`X-Hub-Signature-256`), kluczem jest
-  `app_secret` usera dopasowanego po `phone_number_id` z payloadu.
+  `app_secret` tenanta dopasowanego po `phone_number_id` z payloadu.
 
 Przepływ POST:
 1. Wyciągnij `phone_number_id` z `entry[].changes[].value.metadata`.
-2. `findConfigByPhoneNumberId()` → dopasuj do `whatsapp_configs` (user + tenant).
-3. Zweryfikuj podpis HMAC kluczem `app_secret` tego usera.
+2. `findTenantConfigByPhoneNumberId()` → dopasuj do `tenant_whatsapp_config`.
+3. Zweryfikuj podpis HMAC kluczem `app_secret` tego tenanta.
 4. `value.messages[]` (incoming) → `resolveIncomingSender()` → zapis (`saveIncomingMessage`).
 5. `value.statuses[]` (sent/delivered/read/failed) → `updateMessageStatus()`, dopasowanie po
-   `(owner_user_id, meta_message_id)`.
+   `(tenant_id, meta_message_id)`.
 6. Zawsze `200 {"received":true}`, nawet przy błędzie własnego kodu — inaczej Meta wpada
    w retry storm.
 
 ### Dopasowanie do leada/partnera (`resolveIncomingSender`)
 
 Kolejność prób, pierwsza trafiona wygrywa:
-1. **Istniejąca konwersacja** — ostatnia wychodząca wiadomość z numeru tego usera do tego
-   samego numeru nadawcy, jeśli miała już przypisany `lead_id`/`partner_id`
+1. **Istniejąca konwersacja** — ostatnia wychodząca wiadomość tego tenanta do tego samego
+   numeru nadawcy, jeśli miała już przypisany `lead_id`/`partner_id`
    (`findConversationByPhone`). Ważniejsze niż punkt 2, bo `crm_leads.phone` bywa
    nieaktualny/pusty, a faktyczna rozmowa jest źródłem prawdy.
 2. **Dopasowanie po numerze** w `crm_leads.phone`/`crm_partners.phone` (dokładne dopasowanie
@@ -150,10 +153,11 @@ nie po surowym stringu — inaczej ten sam numer tworzy dwie osobne karty. Szcze
 ### Kluczowe pliki
 
 - `src/services/whatsappService.js` — cała logika domenowa: config CRUD, wysyłka, webhook
-  (podpis, dopasowanie usera, dopasowanie leada/partnera, zapis statusów).
-- `src/routes/crm-whatsapp.js` — `/my-config` (self-service), `/send/lead|partner`,
-  `/history/lead|partner`, `/webhook` (public), `/tenant-directory` (oversight).
-- `src/routes/admin-tenants.js` — `GET /:id/whatsapp-users`, tylko-do-odczytu dla superadmina.
+  (podpis, dopasowanie tenanta, dopasowanie leada/partnera, zapis statusów).
+- `src/routes/crm-whatsapp.js` — `/status`, `/send/lead|partner`, `/history/lead|partner`,
+  `/webhook` (public). Config CRUD NIE tutaj — patrz admin-tenants.js.
+- `src/routes/admin-tenants.js` — `GET/PUT/DELETE /:id/whatsapp-config`, tylko dla
+  super admina (`requireSuperAdmin`).
 - `src/db/migrations/` — numery migracji mogą się zmieniać przy renumeracji na potrzeby
   mergów; `_migrations` w bazie jest źródłem prawdy co realnie zaaplikowano.
 
