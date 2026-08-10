@@ -19,11 +19,13 @@ router.get('/',
     try {
       const locale = req.query.locale || 'pl';
       const { rows } = await db.query(
-        `SELECT id, title, slug, meta_description, category, header_image_url, published_at,
-                GREATEST(1, CEIL(array_length(regexp_split_to_array(trim(body), '\\s+'), 1) / 200.0))::int AS reading_minutes
-           FROM seo_content_pieces
-          WHERE tenant_id = $1 AND locale = $2 AND status = 'published'
-          ORDER BY published_at DESC`,
+        `SELECT c.id, c.title, c.slug, c.meta_description, c.category, c.header_image_url, c.published_at,
+                GREATEST(1, CEIL(array_length(regexp_split_to_array(trim(c.body), '\\s+'), 1) / 200.0))::int AS reading_minutes,
+                a.full_name AS author_name, a.job_title AS author_job_title, a.photo_url AS author_photo_url
+           FROM seo_content_pieces c
+           LEFT JOIN seo_authors a ON a.id = c.author_id
+          WHERE c.tenant_id = $1 AND c.locale = $2 AND c.status = 'published'
+          ORDER BY c.published_at DESC`,
         [CRMTREE_TENANT_ID, locale],
       );
       res.json(rows);
@@ -39,10 +41,13 @@ router.get('/:slug',
     try {
       const locale = req.query.locale || 'pl';
       const { rows } = await db.query(
-        `SELECT id, title, slug, body, meta_description, category, header_image_url, published_at,
-                GREATEST(1, CEIL(array_length(regexp_split_to_array(trim(body), '\\s+'), 1) / 200.0))::int AS reading_minutes
-           FROM seo_content_pieces
-          WHERE tenant_id = $1 AND locale = $2 AND slug = $3 AND status = 'published'`,
+        `SELECT c.id, c.title, c.slug, c.body, c.meta_description, c.category, c.header_image_url, c.published_at,
+                GREATEST(1, CEIL(array_length(regexp_split_to_array(trim(c.body), '\\s+'), 1) / 200.0))::int AS reading_minutes,
+                a.full_name AS author_name, a.job_title AS author_job_title, a.bio AS author_bio,
+                a.photo_url AS author_photo_url, a.linkedin_url AS author_linkedin_url
+           FROM seo_content_pieces c
+           LEFT JOIN seo_authors a ON a.id = c.author_id
+          WHERE c.tenant_id = $1 AND c.locale = $2 AND c.slug = $3 AND c.status = 'published'`,
         [CRMTREE_TENANT_ID, locale, req.params.slug],
       );
       if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono wpisu' });

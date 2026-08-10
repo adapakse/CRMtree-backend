@@ -104,7 +104,7 @@ router.get('/content',
         where += ` AND c.status = $${params.length}`;
       }
       const { rows } = await db.query(
-        `SELECT c.id, c.locale, c.title, c.slug, c.status, c.target_keyword, c.category,
+        `SELECT c.id, c.locale, c.title, c.slug, c.status, c.target_keyword, c.category, c.author_id,
                 c.scheduled_at, c.published_at, c.reviewed_by, c.created_at, c.updated_at,
                 COALESCE(m.clicks_28d, 0) AS clicks_28d,
                 COALESCE(m.impressions_28d, 0) AS impressions_28d,
@@ -183,12 +183,20 @@ router.patch('/content/:id',
     body('header_image_url').optional({ nullable: true }).isString().trim(),
     body('scheduled_at').optional({ nullable: true }).isISO8601(),
     body('social_post_linkedin').optional({ nullable: true }).isString().trim(),
+    body('author_id').optional({ nullable: true }).isInt(),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const fields = ['title', 'body', 'meta_description', 'header_image_url', 'scheduled_at', 'social_post_linkedin'].filter((f) => req.body[f] !== undefined);
+      const fields = ['title', 'body', 'meta_description', 'header_image_url', 'scheduled_at', 'social_post_linkedin', 'author_id'].filter((f) => req.body[f] !== undefined);
       if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
+      if (req.body.author_id) {
+        const { rows: authorRows } = await db.query(
+          `SELECT 1 FROM seo_authors WHERE id = $1 AND tenant_id = $2`,
+          [req.body.author_id, req.user.tenant_id],
+        );
+        if (!authorRows.length) return res.status(400).json({ error: 'Nieznany autor.' });
+      }
       const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(', ');
       const { rows } = await db.query(
         `UPDATE seo_content_pieces SET ${setClause}
@@ -284,6 +292,15 @@ router.post('/content/:id/approve',
   validate,
   async (req, res, next) => {
     try {
+      // Author is mandatory before publish (E-E-A-T requirement) — checked here rather
+      // than a NOT NULL column, so drafts can still be written/edited without one.
+      const { rows: existing } = await db.query(
+        `SELECT status, author_id FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (!existing[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      if (!existing[0].author_id) return res.status(409).json({ error: 'Wpis musi mieć przypisanego autora przed zatwierdzeniem.' });
+
       // Approving with a future scheduled_at queues it instead of publishing immediately —
       // the scheduler job (jobs/seo-scheduler.js) flips it to published when the time comes.
       const { rows } = await db.query(
@@ -435,6 +452,100 @@ router.delete('/pillars/:id',
     try {
       const { rowCount } = await db.query(
         `DELETE FROM seo_content_pillars WHERE id = $1 AND tenant_id = $2`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (!rowCount) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.status(204).end();
+    } catch (err) { next(err); }
+  },
+);
+
+// ── Author profiles (E-E-A-T) — per-tenant roster of employees/external
+// experts an editor can attach to an article. Reusable entities, so plain
+// CRUD rather than free-text fields on the article. ────────────────────────
+router.get('/authors', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, full_name, job_title, bio, photo_url, linkedin_url, is_active
+         FROM seo_authors WHERE tenant_id = $1 ORDER BY is_active DESC, full_name`,
+      [req.user.tenant_id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+router.post('/authors',
+  requireSeoEditor,
+  [
+    body('full_name').isString().trim().notEmpty(),
+    body('job_title').optional({ nullable: true }).isString().trim(),
+    body('bio').optional({ nullable: true }).isString().trim(),
+    body('photo_url').optional({ nullable: true }).isString().trim(),
+    body('linkedin_url').optional({ nullable: true }).isString().trim(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO seo_authors (tenant_id, full_name, job_title, bio, photo_url, linkedin_url)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, full_name, job_title, bio, photo_url, linkedin_url, is_active`,
+        [req.user.tenant_id, req.body.full_name, req.body.job_title || null, req.body.bio || null,
+         req.body.photo_url || null, req.body.linkedin_url || null],
+      );
+      res.status(201).json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+router.patch('/authors/:id',
+  requireSeoEditor,
+  [
+    param('id').isInt(),
+    body('full_name').optional().isString().trim().notEmpty(),
+    body('job_title').optional({ nullable: true }).isString().trim(),
+    body('bio').optional({ nullable: true }).isString().trim(),
+    body('photo_url').optional({ nullable: true }).isString().trim(),
+    body('linkedin_url').optional({ nullable: true }).isString().trim(),
+    body('is_active').optional().isBoolean(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const fields = ['full_name', 'job_title', 'bio', 'photo_url', 'linkedin_url', 'is_active'].filter((f) => req.body[f] !== undefined);
+      if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
+      const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(', ');
+      const { rows } = await db.query(
+        `UPDATE seo_authors SET ${setClause}
+          WHERE id = $1 AND tenant_id = $2
+          RETURNING id, full_name, job_title, bio, photo_url, linkedin_url, is_active`,
+        [req.params.id, req.user.tenant_id, ...fields.map((f) => req.body[f])],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// Deleting outright would silently strip the author from already-published
+// articles (FK is ON DELETE SET NULL) and break the E-E-A-T guarantee the
+// approve gate enforces — block it while any article still references this
+// author; deactivate instead (hides from the picker, keeps history intact).
+router.delete('/authors/:id',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows: inUse } = await db.query(
+        `SELECT 1 FROM seo_content_pieces WHERE author_id = $1 AND tenant_id = $2 LIMIT 1`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (inUse.length) {
+        return res.status(409).json({ error: 'Autor ma przypisane artykuły — dezaktywuj go zamiast usuwać.' });
+      }
+      const { rowCount } = await db.query(
+        `DELETE FROM seo_authors WHERE id = $1 AND tenant_id = $2`,
         [req.params.id, req.user.tenant_id],
       );
       if (!rowCount) return res.status(404).json({ error: 'Nie znaleziono.' });
