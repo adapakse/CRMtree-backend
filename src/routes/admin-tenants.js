@@ -11,6 +11,8 @@
 // PATCH  /api/admin/tenants/:id       — update tenant metadata
 // DELETE /api/admin/tenants/:id       — soft-delete tenant (sets deleted_at/deleted_by)
 // PUT    /api/admin/tenants/:id/features — bulk-set feature flags
+// PUT    /api/admin/tenants/:id/subscription/cancel — end subscription (rezygnacja)
+// DELETE /api/admin/tenants/:id/subscription/cancel — undo an accidental cancellation
 // POST   /api/admin/tenants/:id/impersonate — get JWT as tenant admin
 //
 // Every :id-scoped endpoint below refuses to operate on a soft-deleted
@@ -30,6 +32,7 @@ const { encrypt, decrypt } = require('../utils/encrypt');
 const { requireAuth, requireSuperAdmin, signAccessToken } = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { EMAIL_PROVIDER_KEYS } = require('../config/email-providers');
+const { getMissingRequiredFields } = require('../config/emailProviderRequiredFields');
 const { clearTrainingModeCache } = require('../utils/trainingMode');
 const { isSlugAllowed } = require('../config/tenantHost');
 const whatsappService = require('../services/whatsappService');
@@ -49,7 +52,7 @@ router.use(requireAuth, requireSuperAdmin, injectAuditContext);
 
 const ALL_FEATURES = [
   'documents', 'leads', 'sales_reports', 'onboarding',
-  'partner_registry', 'dwh_integration', 'performance', 'whatsapp',
+  'partner_registry', 'dwh_integration', 'performance', 'whatsapp', 'seo_bot',
 ];
 
 // Returns the tenant row (id + any extraColumns) only if it exists and has
@@ -211,10 +214,28 @@ router.get('/:id',
         `SELECT value = 'true' AS enabled FROM app_settings WHERE tenant_id = $1 AND key = 'crm_training_mode'`,
         [req.params.id]
       );
+      const { rows: subscriptionRows } = await db.query(
+        `SELECT ts.plan_id, ts.billing_cycle, ts.started_at, ts.custom_price_eur, ts.cancelled_at,
+                bp.code AS plan_code, bp.name AS plan_name,
+                (SELECT h.effective_from FROM tenant_subscription_history h
+                 WHERE h.tenant_id = ts.tenant_id AND h.effective_to IS NULL
+                 ORDER BY h.effective_from DESC LIMIT 1) AS plan_started_at
+         FROM tenant_subscriptions ts
+         JOIN billing_plans bp ON bp.id = ts.plan_id
+         WHERE ts.tenant_id = $1`,
+        [req.params.id]
+      );
+      const { rows: billingDetailsRows } = await db.query(
+        `SELECT company_name, nip, street, postal_code, city, country, invoice_email
+         FROM tenant_billing_details WHERE tenant_id = $1`,
+        [req.params.id]
+      );
 
       res.json({
         ...rows[0], features, auth_configs: authConfigs,
         crm_training_mode: trainingRows[0]?.enabled ?? false,
+        subscription: subscriptionRows[0] || null,
+        billing_details: billingDetailsRows[0] || null,
       });
     } catch (err) { next(err); }
   }
@@ -326,6 +347,243 @@ router.put('/:id/features',
       );
       logger.info('Super admin updated features', { tenantId: req.params.id, by: req.user.email });
       res.json(rows);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /:id/subscription — assign/update billing plan + cycle ────
+router.put('/:id/subscription',
+  [
+    param('id').isUUID(),
+    body('planId').isUUID(),
+    body('billingCycle').isIn(['monthly', 'annual']),
+    body('customPriceEur').optional({ nullable: true }).isFloat({ gt: 0 }),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const tenant = await findAliveTenant(req.params.id);
+      if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+      const { rows: planRows } = await db.query(
+        `SELECT id, is_custom_pricing FROM billing_plans WHERE id = $1 AND is_active = true`,
+        [req.body.planId]
+      );
+      if (!planRows.length) return res.status(400).json({ error: 'Unknown or inactive billing plan' });
+
+      const plan = planRows[0];
+      // Custom-pricing plans (Professional) require an explicit quote — for
+      // every other plan the quote is meaningless, so force it to NULL
+      // rather than trust the client not to send a stale value from a
+      // previous Professional assignment.
+      let customPriceEur = null;
+      if (plan.is_custom_pricing) {
+        if (req.body.customPriceEur == null) {
+          return res.status(400).json({ error: 'Plan Professional wymaga podania indywidualnej kwoty (EUR).' });
+        }
+        customPriceEur = req.body.customPriceEur;
+      }
+
+      const { before, after } = await db.transaction(async (client) => {
+        const { rows: beforeRows } = await client.query(
+          `SELECT plan_id, billing_cycle, custom_price_eur, cancelled_at FROM tenant_subscriptions WHERE tenant_id = $1`,
+          [req.params.id]
+        );
+
+        // Assigning/updating a plan also reactivates a cancelled subscription
+        // (cancelled_at = NULL) — a superadmin picking a plan for a tenant is
+        // an unambiguous signal that billing should resume, and requiring a
+        // separate "undo cancellation" click first would be an easy trap.
+        const { rows } = await client.query(
+          `INSERT INTO tenant_subscriptions (tenant_id, plan_id, billing_cycle, custom_price_eur, updated_by)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (tenant_id) DO UPDATE SET
+             plan_id = $2, billing_cycle = $3, custom_price_eur = $4, updated_by = $5, updated_at = NOW(), cancelled_at = NULL
+           RETURNING plan_id, billing_cycle, custom_price_eur, started_at, cancelled_at`,
+          [req.params.id, req.body.planId, req.body.billingCycle, customPriceEur, req.user.id]
+        );
+
+        // Close the currently-open history row (if any) and open a new one —
+        // billing-run resolves "which plan/price applied to period X" from
+        // this log instead of the current tenant_subscriptions row, so a
+        // plan change here must not silently re-price already-closed periods.
+        await client.query(
+          `UPDATE tenant_subscription_history
+           SET effective_to = NOW()
+           WHERE tenant_id = $1 AND effective_to IS NULL`,
+          [req.params.id]
+        );
+        const { rows: historyRows } = await client.query(
+          `INSERT INTO tenant_subscription_history (tenant_id, plan_id, billing_cycle, custom_price_eur, changed_by)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING effective_from`,
+          [req.params.id, req.body.planId, req.body.billingCycle, customPriceEur, req.user.id]
+        );
+
+        return { before: beforeRows[0] || null, after: { ...rows[0], plan_started_at: historyRows[0].effective_from } };
+      });
+
+      await audit.log({
+        user:        req.user,
+        action:      'tenant_subscription_updated',
+        beforeState: before,
+        afterState:  after,
+        metadata:    { tenant_id: req.params.id },
+        ipAddress:   req.auditContext?.ipAddress,
+      });
+
+      logger.info('Super admin updated tenant subscription', { tenantId: req.params.id, by: req.user.email });
+      res.json(after);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /:id/subscription/cancel — end a subscription (rezygnacja) ────
+// Sets tenant_subscriptions.cancelled_at — billing's OWN, unambiguous record
+// of "this subscription ended". Deliberately separate from tenants.is_active,
+// which superadmins also toggle for reasons unrelated to billing (e.g.
+// suspension) and which must never be read as a cancellation signal (see
+// billing-run.js fetchBillableTenants). Per the 2026-08 Lite/Standard rule,
+// billing-run still bills the full calendar period cancelled_at falls into
+// (no proration) and generates nothing after it.
+router.put('/:id/subscription/cancel',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      const tenant = await findAliveTenant(req.params.id);
+      if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+      const { rows } = await db.query(
+        `UPDATE tenant_subscriptions SET cancelled_at = NOW()
+         WHERE tenant_id = $1 AND cancelled_at IS NULL
+         RETURNING cancelled_at`,
+        [req.params.id]
+      );
+
+      if (!rows.length) {
+        const { rows: existing } = await db.query(
+          `SELECT cancelled_at FROM tenant_subscriptions WHERE tenant_id = $1`,
+          [req.params.id]
+        );
+        if (!existing.length) return res.status(404).json({ error: 'Tenant has no subscription' });
+        return res.json(existing[0]); // already cancelled — idempotent, no new audit entry
+      }
+
+      await audit.log({
+        user:        req.user,
+        action:      'tenant_subscription_cancelled',
+        beforeState: { cancelled_at: null },
+        afterState:  { cancelled_at: rows[0].cancelled_at },
+        metadata:    { tenant_id: req.params.id },
+        ipAddress:   req.auditContext?.ipAddress,
+      });
+
+      logger.info('Super admin cancelled tenant subscription', { tenantId: req.params.id, by: req.user.email });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── DELETE /:id/subscription/cancel — undo an accidental cancellation ──
+// Also achievable by reassigning a plan via PUT /:id/subscription (which
+// clears cancelled_at too) — this route exists for reactivating with the
+// exact same plan/cycle, with no unrelated field to resubmit.
+router.delete('/:id/subscription/cancel',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      const tenant = await findAliveTenant(req.params.id);
+      if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+      const { rows } = await db.query(
+        `UPDATE tenant_subscriptions SET cancelled_at = NULL
+         WHERE tenant_id = $1 AND cancelled_at IS NOT NULL
+         RETURNING tenant_id`,
+        [req.params.id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Subscription is not cancelled' });
+
+      await audit.log({
+        user:        req.user,
+        action:      'tenant_subscription_cancelled',
+        beforeState: { cancelled_at: 'set' },
+        afterState:  { cancelled_at: null },
+        metadata:    { tenant_id: req.params.id },
+        ipAddress:   req.auditContext?.ipAddress,
+      });
+
+      logger.info('Super admin reactivated (uncancelled) tenant subscription', { tenantId: req.params.id, by: req.user.email });
+      res.status(204).end();
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /:id/billing-details — legal buyer data for invoices ──────
+// Separate from tenants.name (the CRM display name) — this is the legal
+// company name/NIP/structured address/invoice email that must appear on
+// this tenant's invoice PDFs.
+router.put('/:id/billing-details',
+  [
+    param('id').isUUID(),
+    body('company_name').optional({ nullable: true }).isString().trim().isLength({ max: 255 }),
+    body('nip').optional({ nullable: true }).isString().trim().isLength({ max: 20 }),
+    body('street').optional({ nullable: true }).isString().trim().isLength({ max: 255 }),
+    body('postal_code').optional({ nullable: true }).isString().trim().isLength({ max: 20 }),
+    body('city').optional({ nullable: true }).isString().trim().isLength({ max: 255 }),
+    body('country').optional({ nullable: true }).isString().trim().isLength({ max: 100 }),
+    body('invoice_email').optional({ nullable: true, checkFalsy: true }).isString().trim().isEmail().isLength({ max: 255 })
+      .withMessage('invoice_email musi być poprawnym adresem e-mail'),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const tenant = await findAliveTenant(req.params.id);
+      if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+      const { rows } = await db.query(
+        `INSERT INTO tenant_billing_details
+           (tenant_id, company_name, nip, street, postal_code, city, country, invoice_email, updated_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           company_name = $2, nip = $3, street = $4, postal_code = $5, city = $6, country = $7,
+           invoice_email = $8, updated_by = $9, updated_at = NOW()
+         RETURNING company_name, nip, street, postal_code, city, country, invoice_email`,
+        [req.params.id, req.body.company_name || null, req.body.nip || null,
+         req.body.street || null, req.body.postal_code || null, req.body.city || null,
+         req.body.country || null, req.body.invoice_email || null, req.user.id]
+      );
+
+      logger.info('Super admin updated tenant billing details', { tenantId: req.params.id, by: req.user.email });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── DELETE /:id/billing-details — clear a tenant's legal buyer data ─
+// Removes only the current tenant_billing_details row — never touches
+// already-issued invoices, which keep their own frozen buyer_* snapshot
+// from the moment they were generated (see jobs/billing-run.js).
+router.delete('/:id/billing-details',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      const tenant = await findAliveTenant(req.params.id);
+      if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+      const { rows } = await db.query(
+        `DELETE FROM tenant_billing_details WHERE tenant_id = $1 RETURNING company_name`,
+        [req.params.id]
+      );
+
+      await audit.log({
+        user:        req.user,
+        action:      'settings_updated',
+        beforeState: rows[0] ? { billing_details: rows[0].company_name } : null,
+        afterState:  { billing_details: null },
+        metadata:    { tenant_id: req.params.id, kind: 'tenant_billing_details_deleted' },
+        ipAddress:   req.auditContext?.ipAddress,
+      });
+
+      logger.info('Super admin deleted tenant billing details', { tenantId: req.params.id, by: req.user.email });
+      res.status(204).send();
     } catch (err) { next(err); }
   }
 );
@@ -559,6 +817,19 @@ router.put('/:id/email-providers/:provider',
         encSecret = existing[0].client_secret;
       } else {
         return res.status(400).json({ error: 'client_secret jest wymagany dla nowej konfiguracji' });
+      }
+
+      // All fields listed as required for this provider must be present —
+      // no partial config is saved that would later silently fall back to
+      // a global .env value at read time.
+      const missingFields = getMissingRequiredFields(req.params.provider, {
+        client_id, client_secret: encSecret, redirect_uri, extra_config,
+      });
+      if (missingFields.length) {
+        return res.status(400).json({
+          error: `Brakuje wymaganych pól konfiguracji (${req.params.provider}): ${missingFields.join(', ')}`,
+          missingFields,
+        });
       }
 
       const { rows } = await db.query(

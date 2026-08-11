@@ -14,6 +14,7 @@
 const gmailService   = require('../services/gmailService');
 const outlookService = require('../services/outlookService');
 const zohoService    = require('../services/zohoService');
+const { REQUIRED_CONFIG_FIELDS } = require('./emailProviderRequiredFields');
 
 const EMAIL_PROVIDERS = {
   gmail: {
@@ -23,20 +24,26 @@ const EMAIL_PROVIDERS = {
     supportsAttachments: true,
     // Fields the tenant admin panel collects/saves for this provider.
     configFields: ['client_id', 'client_secret', 'redirect_uri', 'pubsub_topic', 'pubsub_subscription'],
+    // Subset of configFields that must be filled in per tenant — see
+    // emailProviderRequiredFields.js for the single source of truth and why
+    // pubsub_subscription is excluded.
+    requiredConfigFields: REQUIRED_CONFIG_FIELDS.gmail,
   },
   outlook: {
     key: 'outlook',
     label: 'Outlook / Microsoft 365',
     service: outlookService,
-    supportsAttachments: false,
+    supportsAttachments: true,
     configFields: ['client_id', 'client_secret', 'redirect_uri', 'azure_tenant_id'],
+    requiredConfigFields: REQUIRED_CONFIG_FIELDS.outlook,
   },
   zoho: {
     key: 'zoho',
     label: 'Zoho Mail',
     service: zohoService,
-    supportsAttachments: false,
+    supportsAttachments: true,
     configFields: ['client_id', 'client_secret', 'redirect_uri'],
+    requiredConfigFields: REQUIRED_CONFIG_FIELDS.zoho,
   },
 };
 

@@ -1,4 +1,4 @@
--- 0204_tenant_soft_delete.sql
+-- 0222_tenant_soft_delete.sql
 -- Soft delete for tenants — superadmin "Usuń tenant" from Tenant management.
 --
 -- Deliberately NOT is_active: that flag already means something else (a

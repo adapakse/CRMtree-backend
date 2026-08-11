@@ -1,4 +1,4 @@
--- 0202_tenant_active_email_provider.sql
+-- 0220_tenant_active_email_provider.sql
 -- Single source of truth for which email provider a tenant currently uses.
 -- NULL = no active provider (tenant sees "not configured", cannot connect/send).
 -- Value must reference a provider with an enabled row in tenant_email_providers —

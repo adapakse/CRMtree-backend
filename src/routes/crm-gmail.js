@@ -4,7 +4,7 @@
 const express         = require("express");
 const router          = express.Router();
 const { pool }        = require("../config/database");
-const { requireAuth, requireSuperAdmin } = require("../middleware/auth");
+const { requireAuth }  = require("../middleware/auth");
 const { crmAuth }     = require("../middleware/crm-rbac");
 const gmailService    = require("../services/gmailService");
 const storageService  = require("../services/storageService");
@@ -16,6 +16,7 @@ const {
   storeAttachment,
 } = require("../services/gmailProcessor");
 const { isTrainingMode } = require("../utils/trainingMode");
+const { isTrainingThreadId, buildTrainingThreadResponse } = require("../utils/trainingThread");
 const { requireActiveEmailProvider, resolveProviderGate } = require("../middleware/email-provider");
 
 // Guards connect/send/sync actions — blocks them unless this tenant's active
@@ -112,17 +113,17 @@ try {
  * Zapisuje metadane załączników do crm_email_attachments bez pobierania treści (blob_path = NULL).
  * Wywołana przy pobieraniu wątku — umożliwia późniejsze pobranie.
  */
-async function registerAttachmentRefs({ leadId, partnerId, messageId, attachments, tenantId }) {
+async function registerAttachmentRefs({ leadId, partnerId, messageId, attachments, tenantId, mailboxUserId }) {
   const idCol = leadId ? "lead_id" : "partner_id";
   const idVal = leadId || partnerId;
   for (const att of attachments || []) {
     try {
       await pool.query(
         `INSERT INTO crm_email_attachments
-           (${idCol}, gmail_message_id, gmail_attachment_id, filename, mime_type, direction, tenant_id)
-         VALUES ($1, $2, $3, $4, $5, 'received', $6)
+           (${idCol}, gmail_message_id, gmail_attachment_id, filename, mime_type, direction, tenant_id, mailbox_user_id)
+         VALUES ($1, $2, $3, $4, $5, 'received', $6, $7)
          ON CONFLICT DO NOTHING`,
-        [idVal, messageId, att.attachmentId, att.filename, att.mimeType || "application/octet-stream", tenantId],
+        [idVal, messageId, att.attachmentId, att.filename, att.mimeType || "application/octet-stream", tenantId, mailboxUserId || null],
       );
     } catch (_) {}
   }
@@ -132,17 +133,13 @@ async function registerAttachmentRefs({ leadId, partnerId, messageId, attachment
 // OAUTH2
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Company mailbox connect/status/disconnect are super-admin-only actions,
-// performed from Tenant → Email in the admin panel — never from a lead or
-// partner view. tenantId is an explicit query param because the calling
-// super admin manages an arbitrary tenant, not necessarily their own — so
-// the gate check below is done inline against THAT tenant, not req.tenantId
-// (which is the calling admin's own tenant and is irrelevant here).
-router.get("/oauth/url", requireAuth, requireSuperAdmin, async (req, res, next) => {
+// Each CRM user connects their own Gmail account — triggered inline from
+// "Nowy e-mail" (see crm-email.js dispatcher), not from a superadmin panel.
+// The tenant only chooses/configures WHICH provider is active; the mailbox
+// itself always belongs to req.user, never to the tenant as a whole.
+async function oauthUrlHandler(req, res, next) {
   try {
-    const { tenantId } = req.query;
-    if (!tenantId) return res.status(400).json({ error: "tenantId jest wymagany" });
-    const gate = await resolveProviderGate(tenantId, "gmail");
+    const gate = await resolveProviderGate(req.tenantId, "gmail");
     if (!gate.ok) {
       return res.status(gate.active ? 403 : 400).json({
         error: gate.active
@@ -151,13 +148,14 @@ router.get("/oauth/url", requireAuth, requireSuperAdmin, async (req, res, next) 
         code: "PROVIDER_NOT_ACTIVE",
       });
     }
-    const url = await gmailService.getTenantAuthUrl(tenantId, req.user.id);
+    const url = await gmailService.getAuthUrl(req.user.id, req.tenantId);
     res.json({ url });
   } catch (err) { next(err); }
-});
+}
+router.get("/oauth/url", requireAuth, crmAuth, oauthUrlHandler);
 
 // Brak requireAuth — Google redirectuje przeglądarkę bez headera Authorization.
-// tenantId jest bezpiecznie zakodowany w parametrze `state` wygenerowanym przez /oauth/url.
+// userId jest bezpiecznie zakodowany w parametrze `state` wygenerowanym przez /oauth/url.
 router.get("/oauth/callback", async (req, res) => {
   try {
     const { code, error, state } = req.query;
@@ -165,43 +163,51 @@ router.get("/oauth/callback", async (req, res) => {
     if (!code)  return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=no_code`);
     if (!state) return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=missing_state`);
 
-    const parsed = gmailService.parseTenantOAuthState(state);
-    if (!parsed) {
+    const userId = gmailService.parseOAuthState(state);
+    if (!userId) {
       console.error("[Gmail] OAuth callback: invalid_state, raw state=", state);
       return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=invalid_state`);
     }
-    const { tenantId, initiatingUserId } = parsed;
 
+    const { rows: uRows } = await pool.query("SELECT tenant_id FROM users WHERE id = $1", [userId]);
+    const tenantId = uRows[0]?.tenant_id ?? null;
     const gate = await resolveProviderGate(tenantId, "gmail");
     if (!gate.ok) {
       return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=provider_not_active`);
     }
 
-    console.log("[Gmail] OAuth callback: state OK, tenantId=", tenantId);
-    await gmailService.exchangeTenantCodeAndSave(code, tenantId, initiatingUserId);
-    console.log("[Gmail] OAuth callback: tokens saved for tenantId=", tenantId);
+    console.log("[Gmail] OAuth callback: state OK, userId=", userId);
+    await gmailService.exchangeCodeAndSave(code, userId);
+    console.log("[Gmail] OAuth callback: tokens saved for userId=", userId);
 
-    // Zarejestruj Pub/Sub watch (ignoruj błąd jeśli brak konfiguracji)
-    try { await gmailService.registerTenantWatch(tenantId); } catch (_) {}
+    // Zarejestruj Pub/Sub watch — połączenie skrzynki ma się udać nawet jeśli
+    // to się nie powiedzie (np. niekompletna konfiguracja pubsub_topic dla
+    // tenanta), ale błąd musi być widoczny w logach, nie połykany po cichu.
+    try {
+      await gmailService.registerWatch(userId);
+    } catch (err) {
+      console.warn("[Gmail] registerWatch po OAuth callback nie powiódł się:", err.message);
+    }
 
     res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=connected`);
   } catch (err) {
     console.error("[Gmail] OAuth callback error:", err.message, err.stack);
+    if (err.code === "MAILBOX_ALREADY_CONNECTED") {
+      return res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=email_already_connected`);
+    }
     res.redirect(`${config.frontendUrl}/crm/gmail/callback?status=error&reason=callback_failed`);
   }
 });
 
 async function statusHandler(req, res) {
   try {
-    const { tenantId } = req.query;
-    if (!tenantId) return res.status(400).json({ error: "tenantId jest wymagany" });
-    const status = await gmailService.getTenantMailboxStatus(tenantId);
+    const status = await gmailService.getStatus(req.user.id);
     res.json(status);
   } catch (err) {
     res.status(500).json({ error: "Błąd serwera" });
   }
 }
-router.get("/status", requireAuth, requireSuperAdmin, statusHandler);
+router.get("/status", requireAuth, crmAuth, statusHandler);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GOOGLE DRIVE PICKER
@@ -221,7 +227,7 @@ router.get("/drive-config", requireAuth, (req, res) => {
 // GET /api/crm/gmail/drive-token — zwraca świeży access_token; wykrywa brak scope drive.readonly
 router.get("/drive-token", requireAuth, async (req, res) => {
   try {
-    const oauth2 = await gmailService.getAuthForTenant(req.tenantId);
+    const oauth2 = await gmailService.getAuthForUser(req.user.id);
     const { token } = await oauth2.getAccessToken();
 
     // Sprawdź scope przez tokeninfo — nie wymaga włączonego Drive API
@@ -250,7 +256,7 @@ const GAPPS_EXPORT = {
 router.get("/drive/file/:fileId", requireAuth, async (req, res) => {
   try {
     const { google: googleapis } = require("googleapis");
-    const oauth2 = await gmailService.getAuthForTenant(req.tenantId);
+    const oauth2 = await gmailService.getAuthForUser(req.user.id);
     const drive  = googleapis.drive({ version: "v3", auth: oauth2 });
 
     // Pobierz metadane
@@ -299,15 +305,13 @@ router.get("/drive/file/:fileId", requireAuth, async (req, res) => {
 
 async function disconnectHandler(req, res) {
   try {
-    const { tenantId } = req.query;
-    if (!tenantId) return res.status(400).json({ error: "tenantId jest wymagany" });
-    await gmailService.disconnectTenantMailbox(tenantId);
+    await gmailService.disconnect(req.user.id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Błąd serwera" });
   }
 }
-router.delete("/oauth/disconnect", requireAuth, requireSuperAdmin, disconnectHandler);
+router.delete("/oauth/disconnect", requireAuth, crmAuth, disconnectHandler);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WYSYŁKA — LEAD
@@ -328,6 +332,23 @@ async function sendLeadHandler(req, res) {
     );
     if (!leadQ.rows.length) return res.status(404).json({ error: "Lead nie znaleziony" });
 
+    // A reply within an existing thread must go out from the mailbox that
+    // owns it — Gmail threads are scoped to one Google account and cannot be
+    // continued from another user's connected mailbox.
+    if (threadId) {
+      const ownerQ = await pool.query(
+        "SELECT mailbox_user_id FROM crm_lead_activities WHERE lead_id = $1 AND gmail_thread_id = $2 AND tenant_id = $3 LIMIT 1",
+        [leadId, threadId, req.tenantId],
+      );
+      const ownerId = ownerQ.rows[0]?.mailbox_user_id;
+      if (ownerId && ownerId !== req.user.id) {
+        return res.status(403).json({
+          error: "Ten wątek należy do innego użytkownika — nie możesz w nim odpowiadać. Wyślij nowego maila ze swojego konta.",
+          code:  "THREAD_NOT_OWNED",
+        });
+      }
+    }
+
     const training = await isTrainingMode(req.tenantId);
 
     let messageId, sentThreadId;
@@ -343,8 +364,7 @@ async function sendLeadHandler(req, res) {
         _buffer:  f.buffer,
       }));
 
-      const sent = await gmailService.sendTenantEmail({
-        tenantId:    req.tenantId,
+      const sent = await gmailService.sendEmail({
         userId:      req.user.id,
         to, cc: cc || null, subject,
         body:        body || "",
@@ -354,7 +374,13 @@ async function sendLeadHandler(req, res) {
         attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
       messageId    = sent.messageId;
-      sentThreadId = sent.threadId;
+      // A reply to an existing CRM thread always stays in that thread — the
+      // provider's own returned threadId is only the anchor for a genuinely
+      // NEW message (no incoming threadId). Gmail always honors the explicit
+      // threadId we pass in, so this is a no-op for Gmail in practice, but
+      // keeping the same rule across all three providers is what makes the
+      // behavior consistent — see crm-outlook.js / crm-zoho.js.
+      sentThreadId = threadId || sent.threadId;
 
       for (const att of attachments) {
         storeAttachment({
@@ -365,15 +391,17 @@ async function sendLeadHandler(req, res) {
           mimeType:     att.mimeType,
           buffer:       att._buffer,
           direction:    "sent",
+          mailboxUserId: req.user.id,
         }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
       }
     }
 
-    // Zapisz aktywność
+    // Zapisz aktywność (mailbox_user_id = created_by: nadawca jest zawsze
+    // właścicielem skrzynki dla wiadomości wychodzącej)
     const actR = await pool.query(
       `INSERT INTO crm_lead_activities
-         (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, is_read, tenant_id)
-       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, true, $7)
+         (lead_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, mailbox_user_id, is_read, tenant_id)
+       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, $6, true, $7)
        RETURNING id`,
       [leadId, subject, body || null, sentThreadId, messageId, req.user.id, req.tenantId],
     );
@@ -381,7 +409,7 @@ async function sendLeadHandler(req, res) {
     // Auto-zapis TYLKO odbiorców To (nie CC) do kontaktów leada
     // CC celowo pomijane — może zawierać wewnętrznych pracowników lub osoby trzecie
     const toRecipients = String(to).split(",").map((s) => s.trim()).filter(Boolean);
-    await autoSaveLeadContacts(leadId, toRecipients);
+    await autoSaveLeadContacts(leadId, toRecipients, req.tenantId);
 
     if (training) {
       scheduleTrainingReplyLead(leadId, subject, sentThreadId, req.user.id, req.tenantId);
@@ -390,8 +418,8 @@ async function sendLeadHandler(req, res) {
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
     console.error("[Gmail] send/lead error:", err.message);
-    if (err.code === "PROVIDER_NOT_CONFIGURED") {
-      return res.status(err.status || 400).json({ error: err.message, code: err.code });
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
     }
     if (err.message?.includes("Brak połączonego konta")) {
       return res.status(401).json({ error: err.message });
@@ -420,11 +448,28 @@ async function sendPartnerHandler(req, res) {
 
     const partner = await resolvePartner(req.params.partnerId, req.tenantId, req.dwhPrefix);
     if (!partner) return res.status(404).json({ error: "Partner nie znaleziony" });
+    const crmPartnerId = partner.id;
+
+    // A reply within an existing thread must go out from the mailbox that
+    // owns it — Gmail threads are scoped to one Google account and cannot be
+    // continued from another user's connected mailbox.
+    if (threadId) {
+      const ownerQ = await pool.query(
+        "SELECT mailbox_user_id FROM crm_partner_activities WHERE partner_id = $1 AND gmail_thread_id = $2 AND tenant_id = $3 LIMIT 1",
+        [crmPartnerId, threadId, req.tenantId],
+      );
+      const ownerId = ownerQ.rows[0]?.mailbox_user_id;
+      if (ownerId && ownerId !== req.user.id) {
+        return res.status(403).json({
+          error: "Ten wątek należy do innego użytkownika — nie możesz w nim odpowiadać. Wyślij nowego maila ze swojego konta.",
+          code:  "THREAD_NOT_OWNED",
+        });
+      }
+    }
 
     const training = await isTrainingMode(req.tenantId);
 
     let messageId, sentThreadId;
-    const crmPartnerId = partner.id;
 
     if (training) {
       messageId    = `training_sent_${uuidv4().replace(/-/g, '')}`;
@@ -437,8 +482,7 @@ async function sendPartnerHandler(req, res) {
         _buffer:  f.buffer,
       }));
 
-      const sent = await gmailService.sendTenantEmail({
-        tenantId:    req.tenantId,
+      const sent = await gmailService.sendEmail({
         userId:      req.user.id,
         to, cc: cc || null, subject,
         body:        body || "",
@@ -448,7 +492,13 @@ async function sendPartnerHandler(req, res) {
         attachments: attachments.map(({ filename, mimeType, data }) => ({ filename, mimeType, data })),
       });
       messageId    = sent.messageId;
-      sentThreadId = sent.threadId;
+      // A reply to an existing CRM thread always stays in that thread — the
+      // provider's own returned threadId is only the anchor for a genuinely
+      // NEW message (no incoming threadId). Gmail always honors the explicit
+      // threadId we pass in, so this is a no-op for Gmail in practice, but
+      // keeping the same rule across all three providers is what makes the
+      // behavior consistent — see crm-outlook.js / crm-zoho.js.
+      sentThreadId = threadId || sent.threadId;
 
       for (const att of attachments) {
         storeAttachment({
@@ -459,21 +509,22 @@ async function sendPartnerHandler(req, res) {
           mimeType:     att.mimeType,
           buffer:       att._buffer,
           direction:    "sent",
+          mailboxUserId: req.user.id,
         }).catch((e) => console.warn("[Gmail] Sent attachment blob save failed:", e.message));
       }
     }
 
     const actR = await pool.query(
       `INSERT INTO crm_partner_activities
-         (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, is_read, tenant_id)
-       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, true, $7)
+         (partner_id, type, title, body, activity_at, gmail_thread_id, gmail_message_id, created_by, mailbox_user_id, is_read, tenant_id)
+       VALUES ($1, 'email', $2, $3, NOW(), $4, $5, $6, $6, true, $7)
        RETURNING id`,
       [crmPartnerId, subject, body || null, sentThreadId, messageId, req.user.id, req.tenantId],
     );
 
     // Auto-zapis TYLKO odbiorców To (nie CC) do kontaktów partnera
     const toRecipients = String(to).split(",").map((s) => s.trim()).filter(Boolean);
-    await autoSavePartnerContacts(crmPartnerId, toRecipients);
+    await autoSavePartnerContacts(crmPartnerId, toRecipients, req.tenantId);
 
     if (training) {
       scheduleTrainingReplyPartner(crmPartnerId, subject, sentThreadId, req.tenantId);
@@ -482,8 +533,8 @@ async function sendPartnerHandler(req, res) {
     res.json({ messageId, threadId: sentThreadId, activityId: actR.rows[0].id });
   } catch (err) {
     console.error("[Gmail] send/partner error:", err.message);
-    if (err.code === "PROVIDER_NOT_CONFIGURED") {
-      return res.status(err.status || 400).json({ error: err.message, code: err.code });
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
     }
     if (err.message?.includes("Brak połączonego konta")) {
       return res.status(401).json({ error: err.message });
@@ -504,12 +555,42 @@ if (upload) {
 
 async function threadLeadHandler(req, res) {
   try {
-    const leadId  = parseInt(req.params.leadId);
-    const messages = await gmailService.getTenantThread(req.tenantId, req.params.threadId);
+    const leadId = parseInt(req.params.leadId);
+
+    if (isTrainingThreadId(req.params.threadId)) {
+      const result = await buildTrainingThreadResponse({
+        table: 'crm_lead_activities', idCol: 'lead_id', idVal: leadId,
+        threadId: req.params.threadId, tenantId: req.tenantId, currentUserId: req.user.id,
+      });
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.json(result);
+    }
+
+    // Gmail threads live in one Google account — read with the token of
+    // whichever user's mailbox owns this thread, not the current viewer's.
+    const ownerQ = await pool.query(
+      `SELECT a.mailbox_user_id, u.email AS owner_email
+       FROM crm_lead_activities a
+       LEFT JOIN users u ON u.id = a.mailbox_user_id
+       WHERE a.lead_id = $1 AND a.gmail_thread_id = $2 AND a.tenant_id = $3
+       LIMIT 1`,
+      [leadId, req.params.threadId, req.tenantId],
+    );
+    const ownerId    = ownerQ.rows[0]?.mailbox_user_id || null;
+    const ownerEmail = ownerQ.rows[0]?.owner_email || null;
+    if (!ownerId) {
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.json({
+        messages: [], canReply: false, ownerEmail: null, unavailable: true,
+        reason: "Ten wątek nie ma przypisanego właściciela skrzynki — treść niedostępna.",
+      });
+    }
+
+    const messages = await gmailService.getThread(ownerId, req.params.threadId);
 
     for (const msg of messages) {
       if (msg.attachments?.length) {
-        registerAttachmentRefs({ leadId, messageId: msg.id, attachments: msg.attachments, tenantId: req.tenantId }).catch(() => {});
+        registerAttachmentRefs({ leadId, messageId: msg.id, attachments: msg.attachments, tenantId: req.tenantId, mailboxUserId: ownerId }).catch(() => {});
       }
     }
 
@@ -578,9 +659,15 @@ async function threadLeadHandler(req, res) {
     }
 
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.json(messages);
+    res.json({ messages, canReply: ownerId === req.user.id, ownerEmail });
   } catch (err) {
     console.error("[Gmail] getThread/lead error:", err.message);
+    if (err.message?.includes("Brak połączonego konta")) {
+      return res.status(404).json({
+        error: "Ten wątek należy do konta, które zostało rozłączone — pełna treść jest niedostępna.",
+        code:  "MAILBOX_DISCONNECTED",
+      });
+    }
     res.status(500).json({ error: "Błąd pobierania wątku: " + err.message });
   }
 }
@@ -590,11 +677,41 @@ async function threadPartnerHandler(req, res) {
   try {
     const resolved  = await resolvePartner(req.params.partnerId, req.tenantId, req.dwhPrefix);
     const partnerId = resolved?.id ?? req.params.partnerId;
-    const messages  = await gmailService.getTenantThread(req.tenantId, req.params.threadId);
+
+    if (isTrainingThreadId(req.params.threadId)) {
+      const result = await buildTrainingThreadResponse({
+        table: 'crm_partner_activities', idCol: 'partner_id', idVal: partnerId,
+        threadId: req.params.threadId, tenantId: req.tenantId, currentUserId: req.user.id,
+      });
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.json(result);
+    }
+
+    // Gmail threads live in one Google account — read with the token of
+    // whichever user's mailbox owns this thread, not the current viewer's.
+    const ownerQ = await pool.query(
+      `SELECT a.mailbox_user_id, u.email AS owner_email
+       FROM crm_partner_activities a
+       LEFT JOIN users u ON u.id = a.mailbox_user_id
+       WHERE a.partner_id = $1 AND a.gmail_thread_id = $2 AND a.tenant_id = $3
+       LIMIT 1`,
+      [partnerId, req.params.threadId, req.tenantId],
+    );
+    const ownerId    = ownerQ.rows[0]?.mailbox_user_id || null;
+    const ownerEmail = ownerQ.rows[0]?.owner_email || null;
+    if (!ownerId) {
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.json({
+        messages: [], canReply: false, ownerEmail: null, unavailable: true,
+        reason: "Ten wątek nie ma przypisanego właściciela skrzynki — treść niedostępna.",
+      });
+    }
+
+    const messages = await gmailService.getThread(ownerId, req.params.threadId);
 
     for (const msg of messages) {
       if (msg.attachments?.length) {
-        registerAttachmentRefs({ partnerId, messageId: msg.id, attachments: msg.attachments, tenantId: req.tenantId }).catch(() => {});
+        registerAttachmentRefs({ partnerId, messageId: msg.id, attachments: msg.attachments, tenantId: req.tenantId, mailboxUserId: ownerId }).catch(() => {});
       }
     }
 
@@ -654,9 +771,15 @@ async function threadPartnerHandler(req, res) {
     }
 
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.json(messages);
+    res.json({ messages, canReply: ownerId === req.user.id, ownerEmail });
   } catch (err) {
     console.error("[Gmail] getThread/partner error:", err.message);
+    if (err.message?.includes("Brak połączonego konta")) {
+      return res.status(404).json({
+        error: "Ten wątek należy do konta, które zostało rozłączone — pełna treść jest niedostępna.",
+        code:  "MAILBOX_DISCONNECTED",
+      });
+    }
     res.status(500).json({ error: "Błąd pobierania wątku: " + err.message });
   }
 }
@@ -719,7 +842,7 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
   try {
     // 1. Sprawdź czy mamy blobPath w DB
     const { rows } = await pool.query(
-      `SELECT blob_path, filename, mime_type
+      `SELECT blob_path, filename, mime_type, mailbox_user_id
        FROM crm_email_attachments
        WHERE gmail_message_id = $1 AND gmail_attachment_id = $2 AND tenant_id = $3
        LIMIT 1`,
@@ -732,8 +855,12 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
       return res.redirect(302, sasUrl);
     }
 
-    // 2. Nie ma w Blob — pobierz z Gmail API używając tokenu bieżącego usera
-    const buffer = await gmailService.getTenantAttachmentBuffer(req.tenantId, messageId, attachmentId);
+    // 2. Nie ma w Blob — pobierz z Gmail API tokenem właściciela skrzynki,
+    // do której należy ta wiadomość (nie bieżącego widza).
+    if (!rows.length || !rows[0].mailbox_user_id) {
+      return res.status(404).json({ error: "Załącznik niedostępny — nieznany właściciel skrzynki." });
+    }
+    const buffer = await gmailService.getAttachmentBuffer(rows[0].mailbox_user_id, messageId, attachmentId);
 
     // 3. Zapisz do Blob asynchronicznie, żeby następne pobranie było z Blob
     const safeFilename = filename.replace(/\s+/g, "_");
@@ -757,7 +884,7 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
     console.error("[Gmail] getAttachment error:", err.message);
     if (err.message?.includes("Brak połączonego konta")) {
       return res.status(404).json({
-        error: "Załącznik niedostępny — konto Gmail niepołączone. Skontaktuj się z administratorem.",
+        error: "Załącznik niedostępny — konto właściciela skrzynki zostało rozłączone.",
       });
     }
     res.status(500).json({ error: "Błąd pobierania załącznika: " + err.message });
@@ -771,13 +898,12 @@ router.get("/attachment/:messageId/:attachmentId", requireAuth, crmAuth, async (
 
 router.post("/webhook/register", requireAuth, gmailGate, async (req, res) => {
   try {
-    const result = await gmailService.registerTenantWatch(req.tenantId);
+    const result = await gmailService.registerWatch(req.user.id);
     if (!result) return res.status(503).json({ error: "GOOGLE_PUBSUB_TOPIC nie jest skonfigurowany" });
     res.json({ ok: true, historyId: result.historyId, expiration: result.expiration });
   } catch (err) {
     console.error("[Gmail] registerWatch error:", err.message);
-    const status = err.code === "PROVIDER_NOT_CONFIGURED" ? (err.status || 400) : 500;
-    res.status(status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    res.status(err.status || 500).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
   }
 });
 
@@ -791,21 +917,21 @@ async function debugProcessHandler(req, res) {
   try {
     const { processNotification } = require("../services/gmailProcessor");
 
-    // Pobierz token skrzynki firmowej tenanta
+    // Pobierz token skrzynki bieżącego usera
     const { rows } = await pool.query(
-      "SELECT email, history_id FROM tenant_gmail_tokens WHERE tenant_id = $1",
-      [req.tenantId],
+      "SELECT email, history_id FROM user_gmail_tokens WHERE user_id = $1",
+      [req.user.id],
     );
-    if (!rows.length) return res.status(404).json({ error: "Brak podłączonej skrzynki firmowej Gmail" });
+    if (!rows.length) return res.status(404).json({ error: "Brak podłączonego konta Gmail" });
 
     let { email, history_id } = rows[0];
 
     // Jeśli history_id nie ustawiony — pobierz bieżący historyId z Gmail API i zapisz
     if (!history_id) {
-      history_id = await gmailService.getTenantCurrentHistoryId(req.tenantId);
+      history_id = await gmailService.getCurrentHistoryId(req.user.id);
       await pool.query(
-        "UPDATE tenant_gmail_tokens SET history_id = $1 WHERE tenant_id = $2",
-        [history_id, req.tenantId],
+        "UPDATE user_gmail_tokens SET history_id = $1 WHERE user_id = $2",
+        [history_id, req.user.id],
       );
       const { rows: readRows } = await pool.query("SELECT * FROM crm_email_message_reads ORDER BY updated_at DESC LIMIT 10");
       return res.json({
@@ -824,8 +950,8 @@ async function debugProcessHandler(req, res) {
 
     // Stan po przetworzeniu
     const { rows: after } = await pool.query(
-      "SELECT history_id FROM tenant_gmail_tokens WHERE tenant_id = $1",
-      [req.tenantId],
+      "SELECT history_id FROM user_gmail_tokens WHERE user_id = $1",
+      [req.user.id],
     );
     const { rows: readRows } = await pool.query(
       "SELECT * FROM crm_email_message_reads ORDER BY updated_at DESC LIMIT 10",
@@ -843,18 +969,19 @@ async function debugProcessHandler(req, res) {
     });
   } catch (err) {
     console.error("[Gmail] debug/process error:", err.message);
-    const status = err.code === "PROVIDER_NOT_CONFIGURED" ? (err.status || 400) : 500;
-    res.status(status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    res.status(err.status || 500).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
   }
 }
 router.post("/debug/process", requireAuth, crmAuth, gmailGate, debugProcessHandler);
 
 // Handlers reused by the unified /api/crm/email dispatcher (crm-email.js) so
 // dispatching to "whichever provider is active" never duplicates this logic.
-// status/disconnect/connect are super-admin-only tenant-mailbox actions now
-// (see /status, /oauth/url, /oauth/disconnect above) and are not part of the
-// regular-user dispatcher surface, so they are not exposed here.
+// oauthUrl/status/disconnect act on req.user's own mailbox — same auth as
+// every other handler here, no superadmin requirement.
 router.handlers = {
+  oauthUrl:      oauthUrlHandler,
+  status:        statusHandler,
+  disconnect:    disconnectHandler,
   sendLead:      sendLeadHandler,
   sendPartner:   sendPartnerHandler,
   threadLead:    threadLeadHandler,

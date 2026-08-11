@@ -7,7 +7,7 @@ const { load: cheerioLoad } = require("cheerio");
 const { pool } = require("../config/database");
 const config   = require("../config");
 const { decrypt } = require("../utils/encrypt");
-const { ProviderNotConfiguredError } = require("../utils/providerErrors");
+const { ProviderNotConfiguredError, IncompleteProviderConfigError, MailboxAlreadyConnectedError } = require("../utils/providerErrors");
 const emailQuote = require("../utils/emailQuote");
 
 // Dev-only escape hatch for the old "fall back to global .env app" behavior.
@@ -167,10 +167,16 @@ async function getTenantZohoCreds(tenantId) {
     [tenantId],
   );
   if (!rows.length) return null;
+
+  // OAuth2 needs all three, unconditionally, for every Zoho operation once a
+  // tenant row exists — no silent per-field fallback to a global .env value.
+  const missing = ["client_id", "client_secret", "redirect_uri"].filter((f) => !rows[0][f]);
+  if (missing.length) throw new IncompleteProviderConfigError("zoho", missing);
+
   return {
     client_id:     rows[0].client_id,
     client_secret: decrypt(rows[0].client_secret),
-    redirect_uri:  rows[0].redirect_uri || null,
+    redirect_uri:  rows[0].redirect_uri,
   };
 }
 
@@ -186,7 +192,7 @@ async function getEffectiveCreds(userId) {
     tenantId:     row.tenant_id,
     clientId:     db ? db.client_id     : config.zoho.clientId,
     clientSecret: db ? db.client_secret : config.zoho.clientSecret,
-    redirectUri:  db ? (db.redirect_uri || config.zoho.redirectUri) : config.zoho.redirectUri,
+    redirectUri:  db ? db.redirect_uri  : config.zoho.redirectUri,
   };
 }
 
@@ -290,24 +296,33 @@ async function exchangeCodeAndSave(code, userId, accountsServer) {
     ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
     : null;
 
-  await pool.query(
-    `INSERT INTO user_zoho_tokens
-       (user_id, tenant_id, access_token, refresh_token, expires_at, email,
-        api_domain, accounts_server, zoho_account_id, last_fetched_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
-     ON CONFLICT (user_id) DO UPDATE SET
-       access_token    = EXCLUDED.access_token,
-       refresh_token   = COALESCE(EXCLUDED.refresh_token, user_zoho_tokens.refresh_token),
-       expires_at      = EXCLUDED.expires_at,
-       email           = EXCLUDED.email,
-       api_domain      = EXCLUDED.api_domain,
-       accounts_server = EXCLUDED.accounts_server,
-       zoho_account_id = EXCLUDED.zoho_account_id,
-       last_fetched_at = NOW(),
-       updated_at      = NOW()`,
-    [userId, creds.tenantId, tokens.access_token, tokens.refresh_token || null,
-     expiresAt, email, apiDomain, normalizedAccountsServer, zohoAccountId],
-  );
+  try {
+    await pool.query(
+      `INSERT INTO user_zoho_tokens
+         (user_id, tenant_id, access_token, refresh_token, expires_at, email,
+          api_domain, accounts_server, zoho_account_id, last_fetched_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+       ON CONFLICT (user_id) DO UPDATE SET
+         access_token    = EXCLUDED.access_token,
+         refresh_token   = COALESCE(EXCLUDED.refresh_token, user_zoho_tokens.refresh_token),
+         expires_at      = EXCLUDED.expires_at,
+         email           = EXCLUDED.email,
+         api_domain      = EXCLUDED.api_domain,
+         accounts_server = EXCLUDED.accounts_server,
+         zoho_account_id = EXCLUDED.zoho_account_id,
+         last_fetched_at = NOW(),
+         updated_at      = NOW()`,
+      [userId, creds.tenantId, tokens.access_token, tokens.refresh_token || null,
+       expiresAt, email, apiDomain, normalizedAccountsServer, zohoAccountId],
+    );
+  } catch (err) {
+    // ON CONFLICT (user_id) only covers "same user reconnecting" — this account's
+    // email may already belong to a DIFFERENT user (unique index, migration 0210).
+    if (err.code === "23505" && err.constraint === "user_zoho_tokens_email_unique") {
+      throw new MailboxAlreadyConnectedError("zoho");
+    }
+    throw err;
+  }
 
   return { email };
 }
@@ -417,11 +432,34 @@ async function buildSignatureHtml(userId) {
   return html;
 }
 
-// ── Send email (new message or reply) ────────────────────────────────────────
+// ── Upload one attachment ahead of send ───────────────────────────────────────
+// Zoho Mail requires attachments to be uploaded separately first — the send/
+// reply endpoints don't take raw file bytes, only a reference to an already-
+// uploaded file (storeName/attachmentName/attachmentPath). Same reference
+// shape works for both new messages and replies (confirmed against the live
+// API — unlike Outlook, Zoho's reply endpoint accepts attachments directly,
+// no separate post-creation step needed).
+async function uploadAttachment(accessToken, mailBase, accountId, filename, buffer) {
+  const res = await fetch(
+    `${mailBase}/accounts/${accountId}/messages/attachments?fileName=${encodeURIComponent(filename)}&isInline=false`,
+    {
+      method:  "POST",
+      headers: { Authorization: `Zoho-oauthtoken ${accessToken}`, "Content-Type": "application/octet-stream" },
+      body:    buffer,
+    },
+  );
+  const data = await res.json();
+  if (!res.ok || (data.status?.code && data.status.code !== 200)) {
+    throw new Error(`Zoho attachment upload failed: ${data.data?.errorMessage || data.status?.description || res.status}`);
+  }
+  return data.data; // { storeName, attachmentName, attachmentPath }
+}
+
+// ── Send email (new message or reply, with optional attachments) ────────────
 // inReplyTo: Zoho numeric messageId of the message being replied to.
 //   When present → POST .../messages/{messageId} with action=Reply.
 //   When absent  → POST .../messages (new thread).
-async function sendEmail({ userId, to, cc, subject, body, inReplyTo = null }) {
+async function sendEmail({ userId, to, cc, subject, body, inReplyTo = null, attachments = [] }) {
   const signatureHtml = await buildSignatureHtml(userId);
   const fullBody = (body || "") + (signatureHtml || "");
 
@@ -429,6 +467,11 @@ async function sendEmail({ userId, to, cc, subject, body, inReplyTo = null }) {
   const mailBase = getMailBase(row.accounts_server);
   const accountId = row.zoho_account_id;
   const fromAddress = row.email;
+
+  const uploadedAttachments = [];
+  for (const att of attachments) {
+    uploadedAttachments.push(await uploadAttachment(accessToken, mailBase, accountId, att.filename, Buffer.from(att.data, "base64")));
+  }
 
   let url, reqBody;
 
@@ -454,6 +497,7 @@ async function sendEmail({ userId, to, cc, subject, body, inReplyTo = null }) {
   }
 
   if (cc?.trim()) reqBody.ccAddress = cc;
+  if (uploadedAttachments.length) reqBody.attachments = uploadedAttachments;
 
   const res = await fetch(url, {
     method:  "POST",
@@ -488,6 +532,95 @@ async function sendEmail({ userId, to, cc, subject, body, inReplyTo = null }) {
   return { messageId, threadId };
 }
 
+// ── List non-inline attachment metadata for a single message ─────────────────
+// Zoho's attachmentinfo response has no MIME type field — default applied,
+// same fallback other providers use when a type can't be determined.
+async function listMessageAttachments(accessToken, mailBase, accountId, folderId, messageId) {
+  const res = await fetch(
+    `${mailBase}/accounts/${accountId}/folders/${folderId}/messages/${messageId}/attachmentinfo`,
+    { headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
+  );
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => ({}));
+  return (data.data?.attachments || []).map(a => ({
+    filename:     a.attachmentName,
+    mimeType:     "application/octet-stream",
+    attachmentId: a.attachmentId,
+    size:         a.attachmentSize,
+  }));
+}
+
+// ── Download attachment content ───────────────────────────────────────────────
+// Unlike Gmail/Outlook, Zoho's download URL is scoped by folder — folderId is
+// not tracked in crm_email_attachments (generic across all three providers),
+// so it defaults to Inbox when not supplied, same fallback getThread already
+// uses per-message. Received attachments (the only ones ever fetched through
+// this path — sent ones are served from our own blob storage) are always
+// there in practice.
+async function getAttachmentBuffer(userId, messageId, attachmentId, folderId = null) {
+  const { accessToken, row } = await getTokenRow(userId);
+  const mailBase  = getMailBase(row.accounts_server);
+  const accountId = row.zoho_account_id;
+  const resolvedFolderId = folderId || await getInboxFolderId(mailBase, accountId, accessToken);
+
+  const res = await fetch(
+    `${mailBase}/accounts/${accountId}/folders/${resolvedFolderId}/messages/${messageId}/attachments/${attachmentId}`,
+    { headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
+  );
+  if (!res.ok) throw new Error(`Pobieranie załącznika Zoho failed: ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+// ── Fetch a single message (parsed) ───────────────────────────────────────────
+// Used by zohoProcessor.js — messages/view (used by getNewMessages) only
+// returns summaries, so full content/attachments need this separate fetch.
+async function getMessage(userId, messageId, folderId = null) {
+  const { accessToken, row } = await getTokenRow(userId);
+  const mailBase  = getMailBase(row.accounts_server);
+  const accountId = row.zoho_account_id;
+  const resolvedFolderId = folderId || await getInboxFolderId(mailBase, accountId, accessToken);
+
+  const detailsRes = await fetch(
+    `${mailBase}/accounts/${accountId}/folders/${resolvedFolderId}/messages/${messageId}/details`,
+    { headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
+  );
+  if (!detailsRes.ok) {
+    const err = await detailsRes.json().catch(() => ({}));
+    throw new Error(`Pobieranie wiadomości Zoho failed: ${err.data?.errorMessage || detailsRes.status}`);
+  }
+  const details = (await detailsRes.json()).data || {};
+
+  const contentRes = await fetch(
+    `${mailBase}/accounts/${accountId}/folders/${resolvedFolderId}/messages/${messageId}/content`,
+    { headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
+  );
+  const contentJson  = await contentRes.json().catch(() => ({}));
+  const fullContent  = contentJson.data?.content || details.summary || "";
+  const { cleanBody, quotedBody } = stripZohoQuotedContent(fullContent);
+
+  const userEmail    = normalizeEmailAddr(row.email || '');
+  const attachments  = (details.hasAttachment === "1" || details.hasAttachment === 1)
+    ? await listMessageAttachments(accessToken, mailBase, accountId, resolvedFolderId, messageId)
+    : [];
+
+  return {
+    id:              String(details.messageId || messageId),
+    threadId:        String(details.threadId || messageId),
+    subject:         details.subject || "",
+    from:            details.fromAddress || "",
+    to:              details.toAddress || "",
+    cc:              details.ccAddress && details.ccAddress !== "Not Provided" ? details.ccAddress : "",
+    date:            new Date(parseInt(details.receivedTime, 10) || Date.now()).toISOString(),
+    snippet:         details.summary || "",
+    body:            fullContent,
+    cleanBody,
+    quotedBody,
+    isOutgoing:      userEmail !== '' && normalizeEmailAddr(details.fromAddress) === userEmail,
+    messageIdHeader: String(details.messageId || messageId),
+    attachments,
+  };
+}
+
 // ── Fetch thread messages ─────────────────────────────────────────────────────
 // Uses messages/view with threadId + includesent=true so sent messages appear too.
 // Content is fetched per-message using the message's own folderId.
@@ -512,19 +645,26 @@ async function getThread(userId, threadId) {
   const threadData = await threadRes.json();
   const messages   = threadData.data || [];
 
-  // Fetch full content per message using its own folderId; fall back to summary on error.
+  // Fetch full content (and attachment metadata, if any) per message using
+  // its own folderId; fall back to summary on error.
   const withContent = await Promise.all(messages.map(async (msg) => {
+    const msgFolderId = msg.folderId || inboxFolderId;
+    let fullContent = msg.summary || "";
     try {
-      const msgFolderId = msg.folderId || inboxFolderId;
       const contentRes = await fetch(
         `${mailBase}/accounts/${accountId}/folders/${encodeURIComponent(msgFolderId)}/messages/${encodeURIComponent(msg.messageId)}/content`,
         { headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
       );
       const contentData = await contentRes.json();
-      return { ...msg, fullContent: contentData.data?.content || msg.summary || "" };
-    } catch (_) {
-      return { ...msg, fullContent: msg.summary || "" };
+      fullContent = contentData.data?.content || fullContent;
+    } catch (_) { /* fall back to summary already set above */ }
+
+    let attachmentList = [];
+    if (msg.hasAttachment === "1" || msg.hasAttachment === 1) {
+      attachmentList = await listMessageAttachments(accessToken, mailBase, accountId, msgFolderId, msg.messageId).catch(() => []);
     }
+
+    return { ...msg, fullContent, attachmentList };
   }));
 
   const userEmail = normalizeEmailAddr(row.email || '');
@@ -551,7 +691,7 @@ async function getThread(userId, threadId) {
         isOutgoing:      userEmail !== '' && normalizeEmailAddr(m.fromAddress) === userEmail,
         // Zoho numeric messageId stored here so the frontend can pass it as inReplyTo
         messageIdHeader: String(m.messageId),
-        attachments:     [],
+        attachments:     m.attachmentList || [],
       };
     });
 }
@@ -637,437 +777,7 @@ async function getNewMessages(userId) {
   return { newMessages };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// TENANT-OWNED COMPANY MAILBOX — current model: one shared Zoho Mail mailbox
-// per tenant (tenant_zoho_tokens), used by every CRM user of that tenant.
-// Mirrors the per-user functions above exactly, resolving credentials by
-// tenant_id instead of user_id. The per-user functions above are left
-// completely untouched and are no longer called by any route — kept only so
-// existing user_zoho_tokens rows remain readable for rollback.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-async function getEffectiveCredsForTenant(tenantId) {
-  const db = await getTenantZohoCreds(tenantId);
-  if (!db && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("zoho");
-  return {
-    tenantId,
-    clientId:     db ? db.client_id     : config.zoho.clientId,
-    clientSecret: db ? db.client_secret : config.zoho.clientSecret,
-    redirectUri:  db ? (db.redirect_uri || config.zoho.redirectUri) : config.zoho.redirectUri,
-  };
-}
-
-// ── State OAuth2 dla flow tenantowego: tenantId + opcjonalny initiatingUserId
-// (tylko do audytu w logu — nigdy nie determinuje właściciela tokenu) ─────────
-function makeTenantOAuthState(tenantId, initiatingUserId = null) {
-  const tid = String(tenantId);
-  const uid = initiatingUserId ? String(initiatingUserId) : "-";
-  const ts  = Date.now();
-  const sig = crypto
-    .createHmac("sha256", config.jwt.secret || "fallback-secret")
-    .update(`tenant:${tid}:${uid}:${ts}`)
-    .digest("hex")
-    .slice(0, 16);
-  return `${tid}.${uid}.${ts}.${sig}`;
-}
-
-function parseTenantOAuthState(state) {
-  if (!state || typeof state !== "string") return null;
-  const parts = state.split(".");
-  if (parts.length !== 4) return null;
-  const [tenantId, uid, tsStr, sig] = parts;
-  if (!tenantId || !tsStr || !sig) return null;
-  const ts = parseInt(tsStr, 10);
-  if (!ts || isNaN(ts)) return null;
-  if (Date.now() - ts > 30 * 60 * 1000) return null;
-  const expected = crypto
-    .createHmac("sha256", config.jwt.secret || "fallback-secret")
-    .update(`tenant:${tenantId}:${uid}:${ts}`)
-    .digest("hex")
-    .slice(0, 16);
-  if (sig !== expected) return null;
-  return { tenantId, initiatingUserId: uid === "-" ? null : uid };
-}
-
-// ── OAuth2 authorization URL for the tenant's shared mailbox ──────────────────
-// Targets EU DC by default; accounts_server in callback confirms actual DC.
-async function getTenantAuthUrl(tenantId, initiatingUserId = null) {
-  const creds = await getEffectiveCredsForTenant(tenantId);
-  const state = makeTenantOAuthState(tenantId, initiatingUserId);
-  const params = new URLSearchParams({
-    client_id:     creds.clientId,
-    response_type: "code",
-    redirect_uri:  creds.redirectUri,
-    scope:         OAUTH_SCOPES,
-    access_type:   "offline",
-    state,
-    prompt:        "consent",
-  });
-  return `https://accounts.zoho.eu/oauth/v2/auth?${params.toString()}`;
-}
-
-// ── Exchange authorization code for tokens and save to DB ────────────────────
-// accountsServer: raw value of accounts-server param from Zoho callback.
-async function exchangeTenantCodeAndSave(code, tenantId, accountsServer, initiatingUserId = null) {
-  const normalizedAccountsServer = new URL(accountsServer).origin;
-
-  const creds = await getEffectiveCredsForTenant(tenantId);
-
-  const body = new URLSearchParams({
-    grant_type:    "authorization_code",
-    code,
-    redirect_uri:  creds.redirectUri,
-    client_id:     creds.clientId,
-    client_secret: creds.clientSecret,
-  });
-
-  const tokenRes = await fetch(`${normalizedAccountsServer}/oauth/v2/token`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body:    body.toString(),
-  });
-  const tokens = await tokenRes.json();
-  if (!tokenRes.ok || tokens.error) {
-    throw new Error(`Token exchange failed: ${tokens.error || JSON.stringify(tokens)}`);
-  }
-
-  const apiDomain = tokens.api_domain;
-  if (!apiDomain) throw new Error("Zoho token response missing api_domain");
-
-  const mailBase = getMailBase(normalizedAccountsServer);
-
-  const accountsRes = await fetch(`${mailBase}/accounts`, {
-    headers: { Authorization: `Zoho-oauthtoken ${tokens.access_token}` },
-  });
-  const accountsData = await accountsRes.json();
-  if (!accountsRes.ok || !accountsData.data?.length) {
-    throw new Error("Failed to fetch Zoho account info: " + JSON.stringify(accountsData));
-  }
-
-  const zohoAccountId = String(accountsData.data[0].accountId);
-  const email         = accountsData.data[0].emailAddress?.[0]?.mailId || null;
-
-  const expiresAt = tokens.expires_in
-    ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
-    : null;
-
-  await pool.query(
-    `INSERT INTO tenant_zoho_tokens
-       (tenant_id, access_token, refresh_token, expires_at, email,
-        api_domain, accounts_server, zoho_account_id, connected_by_user_id, last_fetched_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
-     ON CONFLICT (tenant_id) DO UPDATE SET
-       access_token         = EXCLUDED.access_token,
-       refresh_token        = COALESCE(EXCLUDED.refresh_token, tenant_zoho_tokens.refresh_token),
-       expires_at           = EXCLUDED.expires_at,
-       email                = EXCLUDED.email,
-       api_domain           = EXCLUDED.api_domain,
-       accounts_server      = EXCLUDED.accounts_server,
-       zoho_account_id      = EXCLUDED.zoho_account_id,
-       connected_by_user_id = EXCLUDED.connected_by_user_id,
-       last_fetched_at      = NOW(),
-       updated_at           = NOW()`,
-    [tenantId, tokens.access_token, tokens.refresh_token || null,
-     expiresAt, email, apiDomain, normalizedAccountsServer, zohoAccountId, initiatingUserId],
-  );
-
-  return { email };
-}
-
-async function refreshTenantTokenIfNeeded(tenantId, row, creds) {
-  if (!row.expires_at) return row.access_token;
-  const expiresAtMs = new Date(row.expires_at).getTime();
-  if (Date.now() < expiresAtMs - 60_000) return row.access_token;
-
-  if (!row.refresh_token) throw new Error("Brak refresh_token — połącz skrzynkę Zoho ponownie w panelu tenanta.");
-
-  const body = new URLSearchParams({
-    grant_type:    "refresh_token",
-    refresh_token: row.refresh_token,
-    client_id:     creds.clientId,
-    client_secret: creds.clientSecret,
-  });
-
-  const res = await fetch(`${row.accounts_server}/oauth/v2/token`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body:    body.toString(),
-  });
-  const tokens = await res.json();
-  if (!res.ok || tokens.error) {
-    throw new Error(`Token refresh failed: ${tokens.error || JSON.stringify(tokens)}`);
-  }
-
-  const refreshedExpiresAt = tokens.expires_in
-    ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
-    : null;
-
-  await pool.query(
-    `UPDATE tenant_zoho_tokens SET
-       access_token  = $1,
-       refresh_token = COALESCE($2, refresh_token),
-       expires_at    = $3,
-       updated_at    = NOW()
-     WHERE tenant_id = $4`,
-    [tokens.access_token, tokens.refresh_token || null, refreshedExpiresAt, tenantId],
-  );
-
-  return tokens.access_token;
-}
-
-async function getTenantTokenRow(tenantId) {
-  const { rows } = await pool.query(
-    `SELECT access_token, refresh_token, expires_at, accounts_server,
-            zoho_account_id, email
-     FROM tenant_zoho_tokens WHERE tenant_id = $1`,
-    [tenantId],
-  );
-  if (!rows.length) throw new Error("Brak podłączonej skrzynki firmowej Zoho. Poproś administratora o połączenie w panelu tenanta.");
-  const creds = await getEffectiveCredsForTenant(tenantId);
-  const accessToken = await refreshTenantTokenIfNeeded(tenantId, rows[0], creds);
-  return { accessToken, row: rows[0] };
-}
-
-async function getTenantMailboxStatus(tenantId) {
-  const { rows } = await pool.query(
-    "SELECT email FROM tenant_zoho_tokens WHERE tenant_id = $1",
-    [tenantId],
-  );
-  if (!rows.length) return { connected: false };
-  return { connected: true, email: rows[0].email };
-}
-
-// ── Disconnect — best-effort remote revoke, always delete local token ─────────
-async function disconnectTenantMailbox(tenantId) {
-  const { rows } = await pool.query(
-    "SELECT refresh_token, accounts_server FROM tenant_zoho_tokens WHERE tenant_id = $1",
-    [tenantId],
-  );
-  if (rows.length && rows[0].refresh_token) {
-    try {
-      await fetch(
-        `${rows[0].accounts_server}/oauth/v2/token/revoke?token=${encodeURIComponent(rows[0].refresh_token)}`,
-        { method: "POST" },
-      );
-    } catch (_) {}
-  }
-  await pool.query("DELETE FROM tenant_zoho_tokens WHERE tenant_id = $1", [tenantId]);
-}
-
-// ── Send email from the tenant's shared mailbox (new message or reply) ───────
-async function sendTenantEmail({ tenantId, userId = null, to, cc, subject, body, inReplyTo = null }) {
-  const signatureHtml = userId ? await buildSignatureHtml(userId) : "";
-  const fullBody = (body || "") + (signatureHtml || "");
-
-  const { accessToken, row } = await getTenantTokenRow(tenantId);
-  const mailBase = getMailBase(row.accounts_server);
-  const accountId = row.zoho_account_id;
-  const fromAddress = row.email;
-
-  let url, reqBody;
-
-  if (inReplyTo) {
-    url = `${mailBase}/accounts/${accountId}/messages/${inReplyTo}`;
-    reqBody = {
-      action:     "reply",
-      fromAddress,
-      toAddress:  to,
-      subject,
-      content:    fullBody,
-      mailFormat: "html",
-    };
-  } else {
-    url = `${mailBase}/accounts/${accountId}/messages`;
-    reqBody = {
-      fromAddress,
-      toAddress:  to,
-      subject,
-      content:    fullBody,
-      mailFormat: "html",
-    };
-  }
-
-  if (cc?.trim()) reqBody.ccAddress = cc;
-
-  const res = await fetch(url, {
-    method:  "POST",
-    headers: {
-      Authorization:  `Zoho-oauthtoken ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(reqBody),
-  });
-
-  const data = await res.json();
-  if (!res.ok || (data.status?.code && data.status.code !== 200)) {
-    const parts = [
-      `HTTP ${res.status}`,
-      data.status?.code        != null ? `code=${data.status.code}`               : null,
-      data.status?.description          ? `desc="${data.status.description}"`      : null,
-      data.data?.errorCode              ? `errorCode=${data.data.errorCode}`       : null,
-      data.data?.errorMessage           ? `msg="${data.data.errorMessage}"`        : null,
-      data.data?.moreInfo               ? `moreInfo="${data.data.moreInfo}"`       : null,
-    ].filter(Boolean).join(" | ");
-    throw new Error(`Zoho send failed: ${parts}`);
-  }
-
-  const messageId = String(data.data?.messageId || data.data?.msgId || "");
-  const threadId = data.data?.threadId
-    ? String(data.data.threadId)
-    : inReplyTo ? null : messageId;
-
-  return { messageId, threadId };
-}
-
-// ── Fetch thread messages from the tenant's shared mailbox ───────────────────
-async function getTenantThread(tenantId, threadId) {
-  const { accessToken, row } = await getTenantTokenRow(tenantId);
-  const mailBase  = getMailBase(row.accounts_server);
-  const accountId = row.zoho_account_id;
-
-  const inboxFolderId = await getInboxFolderId(mailBase, accountId, accessToken);
-
-  const threadRes = await fetch(
-    `${mailBase}/accounts/${accountId}/messages/view?threadId=${encodeURIComponent(threadId)}&folderId=${encodeURIComponent(inboxFolderId)}&includesent=true&limit=50`,
-    { headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
-  );
-
-  if (!threadRes.ok) {
-    const err = await threadRes.json().catch(() => ({}));
-    throw new Error(`Pobieranie wątku Zoho failed: ${err.data?.errorMessage || threadRes.status}`);
-  }
-
-  const threadData = await threadRes.json();
-  const messages   = threadData.data || [];
-
-  const withContent = await Promise.all(messages.map(async (msg) => {
-    try {
-      const msgFolderId = msg.folderId || inboxFolderId;
-      const contentRes = await fetch(
-        `${mailBase}/accounts/${accountId}/folders/${encodeURIComponent(msgFolderId)}/messages/${encodeURIComponent(msg.messageId)}/content`,
-        { headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
-      );
-      const contentData = await contentRes.json();
-      return { ...msg, fullContent: contentData.data?.content || msg.summary || "" };
-    } catch (_) {
-      return { ...msg, fullContent: msg.summary || "" };
-    }
-  }));
-
-  const mailboxEmail = normalizeEmailAddr(row.email || '');
-
-  return withContent
-    .sort((a, b) => parseInt(a.receivedTime, 10) - parseInt(b.receivedTime, 10))
-    .map(m => {
-      const fullContent = m.fullContent || '';
-      const { cleanBody, quotedBody } = stripZohoQuotedContent(fullContent);
-
-      return {
-        id:              String(m.messageId),
-        threadId:        String(m.threadId || threadId),
-        subject:         m.subject || "",
-        from:            m.fromAddress || "",
-        to:              m.toAddress || "",
-        cc:              m.ccAddress || "",
-        date:            new Date(parseInt(m.receivedTime, 10)).toISOString(),
-        snippet:         m.summary || "",
-        body:            fullContent,
-        cleanBody,
-        quotedBody,
-        isOutgoing:      mailboxEmail !== '' && normalizeEmailAddr(m.fromAddress) === mailboxEmail,
-        messageIdHeader: String(m.messageId),
-        attachments:     [],
-      };
-    });
-}
-
-// ── Manual sync — fetch new messages since last_fetched_at for the tenant ────
-async function getTenantNewMessages(tenantId) {
-  const { rows } = await pool.query(
-    `SELECT access_token, refresh_token, expires_at, accounts_server,
-            zoho_account_id, last_fetched_at
-     FROM tenant_zoho_tokens WHERE tenant_id = $1`,
-    [tenantId],
-  );
-  if (!rows.length) throw new Error("Brak podłączonej skrzynki firmowej Zoho.");
-
-  const row = rows[0];
-  const creds = await getEffectiveCredsForTenant(tenantId);
-  const accessToken = await refreshTenantTokenIfNeeded(tenantId, row, creds);
-  const mailBase  = getMailBase(row.accounts_server);
-  const accountId = row.zoho_account_id;
-
-  const lastFetchedAtMs = row.last_fetched_at
-    ? new Date(row.last_fetched_at).getTime()
-    : null;
-
-  if (!lastFetchedAtMs) {
-    await pool.query(
-      "UPDATE tenant_zoho_tokens SET last_fetched_at = NOW(), updated_at = NOW() WHERE tenant_id = $1",
-      [tenantId],
-    );
-    return { newMessages: [] };
-  }
-
-  const inboxFolderId = await getInboxFolderId(mailBase, accountId, accessToken);
-
-  const pollStart  = Date.now();
-  const newMessages = [];
-  let start = 1;
-  let done  = false;
-
-  while (!done) {
-    const res = await fetch(
-      `${mailBase}/accounts/${accountId}/messages/view?folderId=${encodeURIComponent(inboxFolderId)}&sortBy=date&sortorder=false&limit=200&start=${start}`,
-      { headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
-    );
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(`Zoho messages/view failed: ${err.data?.errorMessage || res.status}`);
-    }
-
-    const data  = await res.json();
-    const page  = data.data || [];
-
-    if (!page.length) break;
-
-    for (const msg of page) {
-      const msgTimeMs = parseInt(msg.receivedTime, 10);
-      if (msgTimeMs <= lastFetchedAtMs) {
-        done = true;
-        break;
-      }
-      newMessages.push(msg);
-    }
-
-    if (!done && page.length === 200) {
-      start += 200;
-    } else {
-      done = true;
-    }
-  }
-
-  await pool.query(
-    "UPDATE tenant_zoho_tokens SET last_fetched_at = $1, updated_at = NOW() WHERE tenant_id = $2",
-    [new Date(pollStart), tenantId],
-  );
-
-  return { newMessages };
-}
-
 module.exports = {
-  // Tenant-owned company mailbox — current model, used by all routes.
-  parseTenantOAuthState,
-  getTenantAuthUrl,
-  exchangeTenantCodeAndSave,
-  getTenantMailboxStatus,
-  disconnectTenantMailbox,
-  sendTenantEmail,
-  getTenantThread,
-  getTenantNewMessages,
-
-  // Legacy per-user (kept for rollback only — no route calls these anymore).
   makeOAuthState,
   parseOAuthState,
   getAuthUrl,
@@ -1076,5 +786,7 @@ module.exports = {
   disconnect,
   sendEmail,
   getThread,
+  getMessage,
+  getAttachmentBuffer,
   getNewMessages,
 };

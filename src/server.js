@@ -4,9 +4,15 @@ const app          = require("./app");
 const config       = require("./config");
 const logger       = require("./utils/logger");
 const db           = require("./config/database");
-const pubsubPoller = require("./services/pubsubPoller");
+const pubsubPoller  = require("./services/pubsubPoller");
+const outlookPoller = require("./services/outlookPoller");
+const zohoPoller    = require("./services/zohoPoller");
 const { migrate }  = require("./db/migrate");
 const { startDailyScoresJob } = require("./jobs/daily-scores");
+const { startGscMetricsSyncJob } = require("./jobs/gsc-metrics-sync");
+const { startSeoSchedulerJob } = require("./jobs/seo-scheduler");
+const { startSeoContentRefreshJob } = require("./jobs/seo-content-refresh");
+const { startBillingRunJob } = require("./jobs/billing-run");
 
 async function start() {
   // ─── Startup security checks ──────────────────────────────
@@ -33,13 +39,21 @@ async function start() {
       appUrl: config.appUrl,
     });
     pubsubPoller.start();
+    outlookPoller.start();
+    zohoPoller.start();
     startDailyScoresJob();
+    startGscMetricsSyncJob();
+    startSeoSchedulerJob();
+    startSeoContentRefreshJob();
+    startBillingRunJob();
   });
 
   // ─── Graceful shutdown ────────────────────────────────────
   async function shutdown(signal) {
     logger.info(`Received ${signal}, shutting down gracefully…`);
     pubsubPoller.stop();
+    outlookPoller.stop();
+    zohoPoller.stop();
     server.close(async () => {
       try {
         await db.pool.end();

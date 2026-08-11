@@ -13,11 +13,16 @@
 const { load: cheerioLoad } = require("cheerio");
 
 // Removes empty leaf nodes (whitespace-only text, bare <br>, or empty blocks
-// like <div><br></div>) from the very start and end of $el's children only —
+// like <div><br></div>) from the very start and end of $el's children —
 // stops at the first node with real content on each side, so intentional
-// blank lines left in the middle of a message are never touched. Cleans up
-// the dangling <br>/empty <div> any provider can leave behind once its own
-// quote wrapper has been removed.
+// blank lines left in the middle of a message are never touched. Recurses
+// into that stopping node when it's itself a container, so a trailing/leading
+// empty node nested a level deeper isn't left stranded just because it isn't
+// a direct child of $el — e.g. Gmail's own compose always wraps typed text as
+// <div dir="ltr">TEXT<div><br></div></div>, leaving a blank line behind that a
+// non-recursive, direct-children-only pass would miss entirely. Cleans up the
+// dangling <br>/empty <div> any provider can leave behind once its own quote
+// wrapper has been removed.
 function trimEdgeEmptyNodes($, $el) {
   const isEmptyNode = (node) => {
     if (node.type === "text") return !(node.data || "").trim();
@@ -28,17 +33,18 @@ function trimEdgeEmptyNodes($, $el) {
     return !hasMedia && !$node.text().trim();
   };
 
-  const trimFrom = (fromStart) => {
-    let nodes = $el.contents().toArray();
+  const trimFrom = ($node, fromStart) => {
+    let nodes = $node.contents().toArray();
     if (!fromStart) nodes = nodes.reverse();
     for (const node of nodes) {
-      if (!isEmptyNode(node)) break;
-      $(node).remove();
+      if (isEmptyNode(node)) { $(node).remove(); continue; }
+      if (node.type === "tag") trimFrom($(node), fromStart);
+      break;
     }
   };
 
-  trimFrom(true);
-  trimFrom(false);
+  trimFrom($el, true);
+  trimFrom($el, false);
 }
 
 // Converts HTML to the visible text a user would read, replacing block-level
