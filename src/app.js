@@ -10,6 +10,7 @@ const passport      = require('passport');
 const config        = require('./config');
 const logger        = require('./utils/logger');
 const { errorHandler, notFound, injectAuditContext } = require('./middleware/errorHandler');
+const { isAllowedOrigin } = require('./utils/corsOrigin');
 
 // Routes
 const authRoutes          = require('./routes/auth');
@@ -33,6 +34,7 @@ const crmZoho         = require('./routes/crm-zoho');
 const crmEmail        = require('./routes/crm-email');
 const crmWhatsapp     = require('./routes/crm-whatsapp');
 const publicBlogRoutes    = require('./routes/public-blog');
+const publicTenantsRoutes = require('./routes/public-tenants');
 
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
@@ -77,8 +79,14 @@ app.use(helmet({
 }));
 
 // ─── CORS ──────────────────────────────────────────────────
+// origin is a function (not a static list) so any tenant subdomain
+// (https://{slug}.crmtree.pl) is accepted alongside the app/API base URLs —
+// see utils/corsOrigin.js for the allow-list logic.
 app.use(cors({
-  origin:      [config.frontendUrl, config.appUrl].filter(Boolean),
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
   methods:     ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   // ★ dodano X-CRM-API-Key do allowedHeaders
@@ -156,6 +164,7 @@ app.get('/health', async (req, res) => {
 
 // ─── API Routes ───────────────────────────────────────────
 app.use('/api/public/blog',     publicBlogRoutes);
+app.use('/api/public/tenants',  publicTenantsRoutes);
 app.use('/api/auth',            authRoutes);
 app.use('/api/documents',       documentRoutes);
 
