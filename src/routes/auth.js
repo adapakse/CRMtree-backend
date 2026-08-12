@@ -10,6 +10,22 @@ const bcrypt   = require('bcryptjs');
 const { requireAuth, requireAdmin, signAccessToken, signRefreshToken, saveRefreshToken } = require('../middleware/auth');
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
+const { matchTenantSlug, resolveRequestHost } = require('../config/tenantHost');
+
+// Resolves the active tenant id for a recognized tenant-subdomain request host,
+// or undefined when the host isn't a tenant-subdomain shape (universal app.*
+// login, which must still allow any tenant's email — ambiguity there is a
+// separate, unresolved problem). Mirrors the guard in middleware/auth.js so
+// the same hostname always means the same tenant at login time and after.
+async function resolveHostTenantId(req) {
+  const hostSlug = matchTenantSlug(resolveRequestHost(req));
+  if (!hostSlug) return undefined;
+  const { rows } = await db.query(
+    'SELECT id FROM tenants WHERE slug = $1 AND is_active = true AND deleted_at IS NULL LIMIT 1',
+    [hostSlug]
+  );
+  return rows[0]?.id ?? null;
+}
 
 // Blocks new token issuance (password login, SAML, dev-login) for a
 // soft-deleted tenant — the same live-DB check requireAuth already does on
@@ -179,12 +195,29 @@ router.post('/login', injectAuditContext, async (req, res, next) => {
       return res.status(400).json({ error: 'email i password są wymagane' });
     }
 
+    // When logging in on a recognized tenant subdomain, scope the lookup to
+    // that tenant — otherwise the same email registered on multiple tenants
+    // resolves nondeterministically (whichever row LIMIT 1 happens to return)
+    // and the session gets rejected right after by the TENANT_HOST_MISMATCH
+    // guard in middleware/auth.js. The universal app.* host has no slug to
+    // scope by and keeps the old (still ambiguous) behavior.
+    const hostTenantId = await resolveHostTenantId(req);
+    if (hostTenantId === null) {
+      return res.status(401).json({ error: 'Nieprawidłowy email lub hasło' });
+    }
+    const params = [email.trim()];
+    let tenantFilter = '';
+    if (hostTenantId !== undefined) {
+      tenantFilter = 'AND tenant_id = $2';
+      params.push(hostTenantId);
+    }
+
     const { rows } = await db.query(
       `SELECT id, email, first_name, last_name, display_name,
               is_admin, is_active, crm_role, tenant_id, is_super_admin,
               password_hash, must_change_password
-       FROM users WHERE lower(email) = lower($1) LIMIT 1`,
-      [email.trim()]
+       FROM users WHERE lower(email) = lower($1) ${tenantFilter} LIMIT 1`,
+      params
     );
 
     if (!rows.length) {
