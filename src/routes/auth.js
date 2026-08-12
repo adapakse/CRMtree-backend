@@ -323,8 +323,16 @@ if (process.env.NODE_ENV === 'development') {
 
   // GET /api/auth/saml — dev HTML stub zamiast redirectu do Google
   router.get('/saml', async (req, res) => {
+    // Scope the picker to the current tenant subdomain when there is one —
+    // otherwise the same email on two tenants shows up as two indistinguishable
+    // options, and picking either still only logs into the tenant the host
+    // resolves to (see the dev-login handler below).
+    const hostTenantId = await resolveHostTenantId(req);
     const { rows } = await db.query(
-      `SELECT email, display_name FROM users WHERE is_active = true ORDER BY display_name`
+      hostTenantId
+        ? `SELECT email, display_name FROM users WHERE is_active = true AND tenant_id = $1 ORDER BY display_name`
+        : `SELECT email, display_name FROM users WHERE is_active = true ORDER BY display_name`,
+      hostTenantId ? [hostTenantId] : []
     );
     const options = rows.map(u =>
       `<option value="${u.email}">${u.display_name} (${u.email})</option>`
@@ -415,10 +423,25 @@ if (process.env.NODE_ENV === 'development') {
       const email = (req.body.email || '').trim().toLowerCase();
       if (!email) return res.status(400).json({ error: 'email required' });
 
+      // Same tenant-subdomain scoping as POST /login — otherwise dev-login
+      // on a {slug}.crmtree.pl host can hand out a token for a different
+      // tenant's account with the same email, which the TENANT_HOST_MISMATCH
+      // guard then rejects on the very next authenticated request.
+      const hostTenantId = await resolveHostTenantId(req);
+      if (hostTenantId === null) {
+        return res.status(404).json({ error: 'User not found or inactive' });
+      }
+      const params = [email];
+      let tenantFilter = '';
+      if (hostTenantId !== undefined) {
+        tenantFilter = 'AND tenant_id = $2';
+        params.push(hostTenantId);
+      }
+
       const { rows } = await db.query(
         `SELECT id, email, display_name, is_admin, is_active, crm_role, tenant_id
-         FROM users WHERE lower(email) = $1 AND is_active = true LIMIT 1`,
-        [email]
+         FROM users WHERE lower(email) = $1 ${tenantFilter} AND is_active = true LIMIT 1`,
+        params
       );
       if (!rows.length) return res.status(404).json({ error: 'User not found or inactive' });
 
