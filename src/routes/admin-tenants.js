@@ -371,16 +371,12 @@ router.put('/:id/subscription',
       if (!planRows.length) return res.status(400).json({ error: 'Unknown or inactive billing plan' });
 
       const plan = planRows[0];
-      // Custom-pricing plans (Professional) require an explicit quote — for
-      // every other plan the quote is meaningless, so force it to NULL
-      // rather than trust the client not to send a stale value from a
-      // previous Professional assignment.
-      let customPriceEur = null;
-      if (plan.is_custom_pricing) {
-        if (req.body.customPriceEur == null) {
-          return res.status(400).json({ error: 'Plan Professional wymaga podania indywidualnej kwoty (EUR).' });
-        }
-        customPriceEur = req.body.customPriceEur;
+      // Custom-pricing plans (Professional) require an explicit quote. Every
+      // other plan (Lite/Standard) treats it as an optional per-tenant
+      // override — null falls back to the catalog's per-user price.
+      const customPriceEur = req.body.customPriceEur ?? null;
+      if (plan.is_custom_pricing && customPriceEur == null) {
+        return res.status(400).json({ error: 'Plan Professional wymaga podania indywidualnej kwoty (EUR).' });
       }
 
       const { before, after } = await db.transaction(async (client) => {

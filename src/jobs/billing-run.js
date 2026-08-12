@@ -122,7 +122,12 @@ async function generateInvoice(tenant, billingCycle, period) {
   try {
     const pdfBuffer = await generateInvoicePdfBuffer({
       invoice,
-      plan: { name: plan.name, is_custom_pricing: plan.is_custom_pricing },
+      // is_custom_pricing here means "this invoice billed as a flat quote",
+      // not just "the plan catalog is Professional" — a Lite/Standard tenant
+      // with a per-tenant custom_price_eur override also billed flat, and
+      // the PDF must render it as one line (qty=1) the same way, or the
+      // Ilość × Cena jedn. shown would visibly disagree with Wartość netto.
+      plan: { name: plan.name, is_custom_pricing: plan.is_custom_pricing || plan.custom_price_eur != null },
     });
     const blobPath = `invoices/${tenant.tenant_id}/${invoice.invoice_number}.pdf`;
     await storage.uploadBuffer(blobPath, pdfBuffer, 'application/pdf');
