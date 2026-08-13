@@ -178,6 +178,14 @@ router.post('/',
       res.status(201).json(tenant);
     } catch (err) {
       await client.query('ROLLBACK');
+      if (err.code === '23505') {
+        const field = err.constraint === 'tenants_slug_key' ? 'slug' : 'name';
+        return res.status(409).json({
+          error: field === 'slug'
+            ? 'Tenant z tym slugiem już istnieje'
+            : 'Tenant z tą nazwą już istnieje',
+        });
+      }
       next(err);
     } finally {
       client.release();
