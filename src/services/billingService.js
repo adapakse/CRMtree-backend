@@ -170,8 +170,11 @@ async function getPlanForPeriod(tenantId, periodStart) {
 const VAT_RATE_PERCENT = 23;
 
 // Custom-pricing plans (Professional) bill a flat per-tenant quote, set once
-// on the subscription — NOT multiplied by active_user_count, unlike Lite/
-// Standard's per-user pricing.
+// on the subscription — NOT multiplied by active_user_count. Lite/Standard's
+// custom_price_eur means something different: a per-tenant NEGOTIATED
+// per-user rate (e.g. 29 -> 26 EUR/user) overriding the catalog price — it
+// IS still multiplied by active_user_count, same as the catalog price it
+// replaces.
 function calculateInvoiceAmount(plan, billingCycle, activeUserCount) {
   let unitPriceEur, totalAmountEur;
   if (plan.is_custom_pricing) {
@@ -179,7 +182,9 @@ function calculateInvoiceAmount(plan, billingCycle, activeUserCount) {
     unitPriceEur = Number(plan.custom_price_eur);
     totalAmountEur = unitPriceEur;
   } else {
-    const unitPrice = billingCycle === 'annual' ? plan.price_annual_eur : plan.price_monthly_eur;
+    const unitPrice = plan.custom_price_eur != null
+      ? plan.custom_price_eur
+      : (billingCycle === 'annual' ? plan.price_annual_eur : plan.price_monthly_eur);
     if (unitPrice == null) return null;
     unitPriceEur = Number(unitPrice);
     totalAmountEur = Math.round(unitPriceEur * activeUserCount * 100) / 100;
