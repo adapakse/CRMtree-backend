@@ -35,19 +35,22 @@ async function getTenantOutlookCreds(tenantId) {
   );
   if (!rows.length) return null;
 
-  // OAuth2 needs all four, unconditionally, for every Outlook operation once
-  // a tenant row exists — no silent per-field fallback to a global .env
-  // value or to Microsoft's "common" multi-tenant endpoint.
-  const azureTenantId = rows[0].extra_config?.azure_tenant_id;
+  // OAuth2 needs these three, unconditionally, for every Outlook operation
+  // once a tenant row exists — no silent per-field fallback to a global .env
+  // value. azure_tenant_id is NOT required here: the app is registered as
+  // multitenant ("Accounts in any organizational directory and personal
+  // Microsoft accounts"), so the OAuth authority is always the fixed
+  // "common" endpoint (see LOGIN_BASE usage below) — a specific Azure AD
+  // tenant GUID must never be used as the authority, or Microsoft silently
+  // restricts sign-in to only identities native to that one directory,
+  // rejecting every other organization's and every personal account.
   const missing = ["client_id", "client_secret", "redirect_uri"].filter((f) => !rows[0][f]);
-  if (!azureTenantId) missing.push("azure_tenant_id");
   if (missing.length) throw new IncompleteProviderConfigError("outlook", missing);
 
   return {
     client_id:    rows[0].client_id,
     client_secret: decrypt(rows[0].client_secret),
     redirect_uri:  rows[0].redirect_uri,
-    azure_tenant:  azureTenantId,
   };
 }
 
@@ -65,7 +68,6 @@ async function getEffectiveCreds(userId) {
     clientId:      db ? db.client_id     : config.microsoft.clientId,
     clientSecret:  db ? db.client_secret : config.microsoft.clientSecret,
     redirectUri:   db ? db.redirect_uri  : config.microsoft.redirectUri,
-    azureTenant:   db ? db.azure_tenant  : (config.microsoft.tenantId || "common"),
   };
 }
 
@@ -111,8 +113,8 @@ async function getAuthUrl(userId, dbTenantId = null) {
   if (!db && !ALLOW_ENV_FALLBACK) throw new ProviderNotConfiguredError("outlook");
 
   const creds = db
-    ? { clientId: db.client_id, redirectUri: db.redirect_uri, azureTenant: db.azure_tenant }
-    : { clientId: config.microsoft.clientId, redirectUri: config.microsoft.redirectUri, azureTenant: config.microsoft.tenantId || "common" };
+    ? { clientId: db.client_id, redirectUri: db.redirect_uri }
+    : { clientId: config.microsoft.clientId, redirectUri: config.microsoft.redirectUri };
 
   const state    = makeOAuthState(userId);
   const params   = new URLSearchParams({
@@ -125,7 +127,12 @@ async function getAuthUrl(userId, dbTenantId = null) {
     prompt:        "select_account",
   });
 
-  return `${LOGIN_BASE}/${creds.azureTenant}/oauth2/v2.0/authorize?${params.toString()}`;
+  // "common" — required for a multitenant app registration ("Accounts in any
+  // organizational directory and personal Microsoft accounts"): it accepts
+  // sign-in from any organization's work/school accounts AND personal
+  // Microsoft accounts. A specific tenant GUID here would silently restrict
+  // sign-in to only that one organization, contradicting the app registration.
+  return `${LOGIN_BASE}/common/oauth2/v2.0/authorize?${params.toString()}`;
 }
 
 // ── Exchange authorization code for tokens and save to DB ────────────────────
@@ -141,7 +148,7 @@ async function exchangeCodeAndSave(code, userId) {
     scope:         OAUTH_SCOPES,
   });
 
-  const tokenRes = await fetch(`${LOGIN_BASE}/${creds.azureTenant}/oauth2/v2.0/token`, {
+  const tokenRes = await fetch(`${LOGIN_BASE}/common/oauth2/v2.0/token`, {
     method:  "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body:    body.toString(),
@@ -207,7 +214,7 @@ async function refreshIfNeeded(userId, row, creds) {
     scope:         OAUTH_SCOPES,
   });
 
-  const res = await fetch(`${LOGIN_BASE}/${creds.azureTenant}/oauth2/v2.0/token`, {
+  const res = await fetch(`${LOGIN_BASE}/common/oauth2/v2.0/token`, {
     method:  "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body:    body.toString(),
