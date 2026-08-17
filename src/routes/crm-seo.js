@@ -5,9 +5,11 @@
 // ─────────────────────────────────────────────────────────────────
 
 const router = require('express').Router();
+const multer = require('multer');
 const { body, param, query } = require('express-validator');
 const db = require('../config/database');
 const config = require('../config');
+const storageService = require('../services/storageService');
 const { requireAuth, requireSuperAdmin } = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, requireFeature } = require('../middleware/crm-rbac');
@@ -74,6 +76,37 @@ router.get('/social/facebook/oauth/callback', async (req, res) => {
     res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=callback_failed`);
   }
 });
+
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  fileFilter: (req, file, cb) => {
+    cb(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype));
+  },
+});
+
+// ── GET /authors/:id/photo-img — public, no auth. Author photos are shown
+// on published blog articles (public-blog.js), which have no CRM session —
+// registered before the auth gate below, same reasoning as the OAuth
+// callbacks above. seo_authors.id is a global serial, so no tenant scoping
+// is needed to look it up (mirrors how public-blog.js itself works). ──────
+router.get('/authors/:id/photo-img',
+  [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query('SELECT photo_url FROM seo_authors WHERE id = $1', [req.params.id]);
+      if (!rows.length || !rows[0].photo_url) return res.status(404).end();
+      // Back-compat: authors created before upload existed may still have a real
+      // external URL saved (manually pasted) — redirect those instead of trying
+      // to treat them as an Azure blob path.
+      if (/^https?:\/\//i.test(rows[0].photo_url)) return res.redirect(rows[0].photo_url);
+      const { buffer, contentType } = await storageService.downloadDocument(rows[0].photo_url);
+      res.setHeader('Content-Type', contentType || 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.send(buffer);
+    } catch (err) { next(err); }
+  },
+);
 
 router.use(requireAuth, injectAuditContext, crmAuth, requireFeature('seo_bot'));
 
@@ -522,6 +555,29 @@ router.patch('/authors/:id',
           WHERE id = $1 AND tenant_id = $2
           RETURNING id, full_name, job_title, bio, photo_url, linkedin_url, is_active`,
         [req.params.id, req.user.tenant_id, ...fields.map((f) => req.body[f])],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+router.post('/authors/:id/photo',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  photoUpload.single('file'),
+  async (req, res, next) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'Brak pliku (dozwolone: JPEG, PNG, WebP, max 5 MB).' });
+      const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[req.file.mimetype] || 'jpg';
+      const blobPath = `seo-authors/${req.params.id}-${Date.now()}.${ext}`;
+      await storageService.uploadBuffer(blobPath, req.file.buffer, req.file.mimetype);
+      const { rows } = await db.query(
+        `UPDATE seo_authors SET photo_url = $3
+          WHERE id = $1 AND tenant_id = $2
+          RETURNING id, full_name, job_title, bio, photo_url, linkedin_url, is_active`,
+        [req.params.id, req.user.tenant_id, blobPath],
       );
       if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
       res.json(rows[0]);

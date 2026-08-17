@@ -14,6 +14,16 @@ const { validate } = require('../middleware/errorHandler');
 // is single-tenant by design (see file header) and always points at this one.
 const CRMTREE_TENANT_ID = '1e610ab7-1f34-427f-bd05-b4094b8077c7';
 
+// author.photo_url may be a real external URL (pasted before upload existed)
+// or an Azure blob path (uploaded via crm-seo.js /authors/:id/photo) — either
+// way the public blog frontend needs one clickable URL, so route blob paths
+// through the streaming endpoint and pass real URLs through unchanged.
+function resolveAuthorPhotoUrl(row) {
+  if (!row.author_photo_url) return null;
+  if (/^https?:\/\//i.test(row.author_photo_url)) return row.author_photo_url;
+  return `/api/crm/seo/authors/${row.author_id}/photo-img`;
+}
+
 // ── GET /api/public/blog ──────────────────────────────────────────
 router.get('/',
   [query('locale').optional().isIn(['pl', 'en'])],
@@ -24,14 +34,14 @@ router.get('/',
       const { rows } = await db.query(
         `SELECT c.id, c.title, c.slug, c.meta_description, c.category, c.header_image_url, c.published_at,
                 GREATEST(1, CEIL(array_length(regexp_split_to_array(trim(c.body), '\\s+'), 1) / 200.0))::int AS reading_minutes,
-                a.full_name AS author_name, a.job_title AS author_job_title, a.photo_url AS author_photo_url
+                a.id AS author_id, a.full_name AS author_name, a.job_title AS author_job_title, a.photo_url AS author_photo_url
            FROM seo_content_pieces c
            LEFT JOIN seo_authors a ON a.id = c.author_id
           WHERE c.tenant_id = $1 AND c.locale = $2 AND c.status = 'published'
           ORDER BY c.published_at DESC`,
         [CRMTREE_TENANT_ID, locale],
       );
-      res.json(rows);
+      res.json(rows.map((r) => ({ ...r, author_photo_url: resolveAuthorPhotoUrl(r) })));
     } catch (err) { next(err); }
   },
 );
@@ -46,7 +56,7 @@ router.get('/:slug',
       const { rows } = await db.query(
         `SELECT c.id, c.title, c.slug, c.body, c.meta_description, c.category, c.header_image_url, c.published_at,
                 GREATEST(1, CEIL(array_length(regexp_split_to_array(trim(c.body), '\\s+'), 1) / 200.0))::int AS reading_minutes,
-                a.full_name AS author_name, a.job_title AS author_job_title, a.bio AS author_bio,
+                a.id AS author_id, a.full_name AS author_name, a.job_title AS author_job_title, a.bio AS author_bio,
                 a.photo_url AS author_photo_url, a.linkedin_url AS author_linkedin_url
            FROM seo_content_pieces c
            LEFT JOIN seo_authors a ON a.id = c.author_id
@@ -54,7 +64,7 @@ router.get('/:slug',
         [CRMTREE_TENANT_ID, locale, req.params.slug],
       );
       if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono wpisu' });
-      res.json(rows[0]);
+      res.json({ ...rows[0], author_photo_url: resolveAuthorPhotoUrl(rows[0]) });
     } catch (err) { next(err); }
   },
 );
