@@ -39,8 +39,17 @@ router.get('/gsc/oauth/callback', async (req, res) => {
     const parsed = gscService.parseOAuthState(state);
     if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=invalid_state`);
 
-    const { rows } = await db.query('SELECT slug FROM tenants WHERE id = $1', [parsed.tenantId]);
-    const siteUrl = `https://${rows[0]?.slug}.crmtree.pl/`;
+    // Prefer the tenant's real domain (via a connected WordPress site) over the
+    // crmtree.pl placeholder — GSC properties must match the actual live domain
+    // the client's articles get published to, not our internal subdomain.
+    const { rows } = await db.query(
+      `SELECT t.slug, w.site_url AS wordpress_site_url
+         FROM tenants t
+         LEFT JOIN tenant_wordpress_connections w ON w.tenant_id = t.id
+        WHERE t.id = $1`,
+      [parsed.tenantId],
+    );
+    const siteUrl = rows[0]?.wordpress_site_url || `https://${rows[0]?.slug}.crmtree.pl/`;
     await gscService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId, siteUrl);
     res.redirect(`${config.frontendUrl}/crm/seo?gsc=connected`);
   } catch (err) {
