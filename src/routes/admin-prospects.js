@@ -933,18 +933,22 @@ router.post('/:id/to-lead',
         userTag || null,
       ].filter(Boolean);
 
+      // crm_leads w CRMtree nie ma kolumn facebook_url/linkedin_url (inaczej niż
+      // w worktrips-doc) — dopisujemy je do notatek, żeby nie zgubić danych z enrichmentu.
       const notes = [
         p.ai_summary || '',
         signals.length ? `Sygnały: ${signals.join('; ')}` : '',
         p.travel_potential_score != null ? `Travel Potential Score: ${p.travel_potential_score}/100` : '',
+        p.facebook_url ? `Facebook: ${p.facebook_url}` : '',
+        p.linkedin_url ? `LinkedIn: ${p.linkedin_url}` : '',
       ].filter(Boolean).join('\n\n');
 
       const nipForLead = p.nip ? `PL${p.nip}` : null;
 
       const { rows: leadRows } = await db.query(
         `INSERT INTO crm_leads
-           (tenant_id, company, nip, notes, tags, stage, probability, source, website, facebook_url, linkedin_url, assigned_to, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, 'new', $6, 'Prospekt', $7, $8, $9, $10, NOW(), NOW())
+           (tenant_id, company, nip, notes, tags, stage, probability, source, website, assigned_to, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'new', $6, 'Prospekt', $7, $8, NOW(), NOW())
          RETURNING id`,
         [
           req.user.tenant_id,
@@ -954,8 +958,6 @@ router.post('/:id/to-lead',
           tags,
           p.travel_potential_score != null ? p.travel_potential_score : null,
           p.website_url || null,
-          p.facebook_url || null,
-          p.linkedin_url || null,
           assignedTo,
         ]
       );
