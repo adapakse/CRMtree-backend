@@ -37,10 +37,8 @@ router.get('/gsc/oauth/callback', async (req, res) => {
     const parsed = gscService.parseOAuthState(state);
     if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=invalid_state`);
 
-    const { rows } = await db.query('SELECT slug, seo_gsc_site_url FROM tenants WHERE id = $1', [parsed.tenantId]);
-    // Prefer the property the tenant configured in SEO settings — only fall back to the
-    // crmtree.pl placeholder when nobody has set a real one yet (e.g. our own dogfooding tenant).
-    const siteUrl = rows[0]?.seo_gsc_site_url || `https://${rows[0]?.slug}.crmtree.pl/`;
+    const { rows } = await db.query('SELECT slug FROM tenants WHERE id = $1', [parsed.tenantId]);
+    const siteUrl = `https://${rows[0]?.slug}.crmtree.pl/`;
     await gscService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId, siteUrl);
     res.redirect(`${config.frontendUrl}/crm/seo?gsc=connected`);
   } catch (err) {
@@ -778,7 +776,7 @@ router.post('/social/wordpress/connect',
 router.get('/tenant-settings', async (req, res, next) => {
   try {
     const { rows } = await db.query(
-      `SELECT t.business_description, t.industry_vertical, t.seo_gsc_site_url,
+      `SELECT t.business_description, t.industry_vertical,
               w.site_url AS wordpress_site_url
          FROM tenants t
          LEFT JOIN tenant_wordpress_connections w ON w.tenant_id = t.id
@@ -789,31 +787,21 @@ router.get('/tenant-settings', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GSC accepts either a URL-prefix property (https://client.pl/) or a domain
-// property (sc-domain:client.pl) — anything else is almost certainly a typo,
-// not a real Search Console property, so it's rejected rather than saved.
-const GSC_SITE_URL_PATTERN = /^(https?:\/\/[^\s/]+\.[^\s]+|sc-domain:[^\s]+\.[^\s]+)$/i;
-
 router.patch('/tenant-settings',
   requireSeoEditor,
   [
     body('business_description').optional({ nullable: true }).isString().trim(),
     body('industry_vertical').optional({ nullable: true }).isString().trim(),
-    body('seo_gsc_site_url').optional({ nullable: true }).isString().trim()
-      .custom((value) => !value || GSC_SITE_URL_PATTERN.test(value))
-      .withMessage('Adres property Search Console musi być pełnym URL-em (https://...) lub domain property (sc-domain:...).'),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const fields = ['business_description', 'industry_vertical', 'seo_gsc_site_url'].filter((f) => req.body[f] !== undefined);
+      const fields = ['business_description', 'industry_vertical'].filter((f) => req.body[f] !== undefined);
       if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
-      // Empty string clears the setting back to "unset" (falls back to the crmtree.pl
-      // placeholder at connect time) rather than saving a blank string.
-      const values = fields.map((f) => (f === 'seo_gsc_site_url' && !req.body[f] ? null : req.body[f]));
+      const values = fields.map((f) => req.body[f]);
       const setClause = fields.map((f, i) => `${f} = $${i + 2}`).join(', ');
       const { rows } = await db.query(
-        `UPDATE tenants SET ${setClause} WHERE id = $1 RETURNING business_description, industry_vertical, seo_gsc_site_url`,
+        `UPDATE tenants SET ${setClause} WHERE id = $1 RETURNING business_description, industry_vertical`,
         [req.user.tenant_id, ...values],
       );
       res.json(rows[0]);
