@@ -18,7 +18,13 @@
 
 const REQUIRED_CONFIG_FIELDS = {
   gmail:   ['client_id', 'client_secret', 'redirect_uri', 'pubsub_topic'],
-  outlook: ['client_id', 'client_secret', 'redirect_uri', 'azure_tenant_id'],
+  // No azure_tenant_id — the app is registered as multitenant ("Accounts in
+  // any organizational directory and personal Microsoft accounts") and the
+  // OAuth authority is always the fixed "common" endpoint (see
+  // outlookService.js). Requiring a specific tenant GUID here would push
+  // admins toward exactly the misconfiguration that broke sign-in for every
+  // account outside one organization.
+  outlook: ['client_id', 'client_secret', 'redirect_uri'],
   zoho:    ['client_id', 'client_secret', 'redirect_uri'],
 };
 
