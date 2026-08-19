@@ -1827,4 +1827,9 @@ function getBatchProgress(tenantId) {
   };
 }
 
-module.exports = { enrichOne, reEnrichOne, runBatch, getBatchProgress, buildPromptText };
+module.exports = {
+  enrichOne, reEnrichOne, runBatch, getBatchProgress, buildPromptText,
+  // Eksport dodatkowy na potrzeby menuAuditTool.js — diagnostyczne narzędzie
+  // audytu menu nawigacyjnego, reużywa scrapingu zamiast duplikować go.
+  fetchKRS, findWebsiteUrl, scrapeWebsite, normalizeName, fetchPage, extractText, extractInternalLinks, scoreLinkRelevance,
+};
