@@ -50,6 +50,12 @@ const LINK_SCORES = [
   { pattern: /znajdz|wyszukaj/i, score: 7 },
   // Kariera — ogłoszenia o pracę
   { pattern: /kariera|praca|jobs|careers|rekrutacja|dolacz|join/i, score: 6 },
+  // Dodane po audycie menu na 100 firmach (19.08) — "partnerzy" to bezpośredni
+  // dowód sygnału ICP "Sieć partnerów / dealerów", dziś w ogóle nierozpoznawany.
+  { pattern: /partner[zy]|dealer|dystrybutor|distributor/i, score: 8 },
+  // "realizacje"/"referencje" — dowody projektowe, wspierają sygnały przetargów
+  // i złożonej sprzedaży (case studies, referencje od klientów/instytucji).
+  { pattern: /realizacj|referencj|case.stud/i, score: 6 },
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────
