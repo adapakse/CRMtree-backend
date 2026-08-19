@@ -140,7 +140,7 @@ router.get('/leads-by-salesperson',
       }
 
       const minScore = await getMinScore(req.user.tenant_id);
-      const bucket = scoreBucketExpr('p.travel_potential_score', minScore);
+      const bucket = scoreBucketExpr('p.icp_score', minScore);
 
       const params = [from, to, req.user.tenant_id];
       let scopeClause = '';
@@ -188,7 +188,7 @@ router.get('/prospects-by-score',
   async (req, res, next) => {
     try {
       const minScore = await getMinScore(req.user.tenant_id);
-      const bucket = scoreBucketExpr('travel_potential_score', minScore);
+      const bucket = scoreBucketExpr('icp_score', minScore);
 
       const params = [req.user.tenant_id];
       const where = ['tenant_id = $1'];
@@ -309,7 +309,7 @@ router.get('/enriched-by-database',
   async (req, res, next) => {
     try {
       const minScore = await getMinScore(req.user.tenant_id);
-      const bucket   = scoreBucketExpr('travel_potential_score', minScore);
+      const bucket   = scoreBucketExpr('icp_score', minScore);
 
       const params = [req.user.tenant_id];
       let groupWhere = '';

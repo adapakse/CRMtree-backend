@@ -121,11 +121,11 @@ function buildFilters(q, tenantId) {
   }
   if (q.score_min !== undefined && q.score_min !== '') {
     params.push(parseInt(q.score_min));
-    where.push(`travel_potential_score >= $${params.length}`);
+    where.push(`icp_score >= $${params.length}`);
   }
   if (q.score_max !== undefined && q.score_max !== '') {
     params.push(parseInt(q.score_max));
-    where.push(`travel_potential_score <= $${params.length}`);
+    where.push(`icp_score <= $${params.length}`);
   }
   if (q.search) {
     params.push(`%${q.search}%`);
@@ -466,7 +466,7 @@ router.get('/',
     query('score_min').optional().isInt({ min: 0, max: 100 }),
     query('score_max').optional().isInt({ min: 0, max: 100 }),
     query('search').optional().isString().isLength({ max: 100 }),
-    query('sort').optional().isIn(['imported_at', 'enriched_at', 'travel_potential_score', 'company_name']),
+    query('sort').optional().isIn(['imported_at', 'enriched_at', 'icp_score', 'company_name']),
     query('dir').optional().isIn(['asc', 'desc']),
   ],
   validate,
@@ -500,11 +500,11 @@ router.get('/',
              decision_maker_phone, decision_maker_email,
              city, voivodeship, pkd_id, pkd_description,
              source_database, facebook_url,
-             linkedin_url, linkedin_status, decision_maker_linkedin, decision_maker_facebook,
+             linkedin_url, linkedin_status, pracuj_url, pracuj_status, decision_maker_linkedin, decision_maker_facebook,
              fb_about, fb_category, fb_fan_count,
              website_status,
-             travel_potential_score, travel_signals, travel_scope,
-             field_teams_likely, ai_summary, key_contacts,
+             icp_score, icp_signals, icp_gates, icp_gate_status,
+             icp_bonus_signals, icp_downgrade_flags, ai_summary, key_contacts,
              enriched_at, enrichment_status, enrichment_error, enrichment_log,
              note, note_author, note_updated_at,
              crm_lead_id,
@@ -553,11 +553,11 @@ router.get('/export', async (req, res, next) => {
          krs_number, legal_form, registered_address, registration_date,
          branches_count, branches_scope, website_url,
          employment_range,
-         travel_potential_score, travel_scope, field_teams_likely, ai_summary,
+         icp_score, icp_gate_status, ai_summary,
          enriched_at, enrichment_status, crm_lead_id
        FROM prospect_companies
        ${whereSQL}
-       ORDER BY travel_potential_score DESC NULLS LAST, company_name ASC`,
+       ORDER BY icp_score DESC NULLS LAST, company_name ASC`,
       params
     );
 
@@ -567,7 +567,7 @@ router.get('/export', async (req, res, next) => {
       'Liczba oddziałów', 'Zasięg oddziałów', 'Strona WWW', 'Facebook URL',
       'FB Kategoria', 'FB Obserwujący', 'FB Opis',
       'Zatrudnienie',
-      'Score (0-100)', 'Zasięg podróży', 'Zespoły terenowe', 'Podsumowanie AI',
+      'Score ICP (0-100)', 'Kwalifikacja', 'Podsumowanie AI',
       'Data enrichmentu', 'Status', 'Lead CRM',
     ];
 
@@ -587,8 +587,7 @@ router.get('/export', async (req, res, next) => {
         esc(r.branches_count), esc(r.branches_scope), esc(r.website_url),
         esc(r.facebook_url), esc(r.fb_category), esc(r.fb_fan_count), esc(r.fb_about),
         esc(r.employment_range),
-        esc(r.travel_potential_score), esc(r.travel_scope),
-        esc(r.field_teams_likely === true ? 'tak' : r.field_teams_likely === false ? 'nie' : ''),
+        esc(r.icp_score), esc(r.icp_gate_status),
         esc(r.ai_summary),
         esc(r.enriched_at?.toISOString().split('T')[0]),
         esc(r.enrichment_status), esc(r.crm_lead_id || ''),
@@ -663,38 +662,50 @@ router.post('/:id/re-process',
       const manualLinkedin = normalizeLinkedinUrl(
         typeof req.body?.linkedin_url === 'string' ? req.body.linkedin_url : null
       );
+      // Pracuj.pl: bez dedykowanego normalizera (jak LinkedIn) — walidacja
+      // ogranicza się do "wygląda jak https URL na domenie pracuj.pl", bo to
+      // ręcznie wklejony link do listy ofert konkretnej firmy, nie coś parsowane
+      // na segmenty jak profil LinkedIn.
+      const rawPracuj = typeof req.body?.pracuj_url === 'string' ? req.body.pracuj_url.trim() : '';
+      const manualPracuj = /^https:\/\/([a-z0-9-]+\.)?pracuj\.pl\//i.test(rawPracuj) ? rawPracuj : null;
       // NIP: tylko cyfry, dokładnie 10 znaków
       const rawNip = typeof req.body?.nip === 'string' ? req.body.nip.replace(/\D/g, '') : '';
       const manualNip = rawNip.length === 10 ? rawNip : null;
 
       const processLinkedin = req.body?.process_linkedin === true;
+      const processPracuj   = req.body?.process_pracuj === true;
 
       // Odczytaj aktualny stan przed UPDATE — do wyznaczenia co faktycznie się zmieniło
       const { rows: currRows } = await db.query(
-        `SELECT website_url, website_status, linkedin_url, linkedin_status FROM prospect_companies WHERE id = $1`,
+        `SELECT website_url, website_status, linkedin_url, linkedin_status, pracuj_url, pracuj_status FROM prospect_companies WHERE id = $1`,
         [req.params.id]
       );
       const curr = currRows[0] || {};
 
       const websiteChanged  = !!manualUrl      && manualUrl      !== curr.website_url;
       const linkedinChanged = !!manualLinkedin && manualLinkedin !== curr.linkedin_url;
+      const pracujChanged   = !!manualPracuj   && manualPracuj   !== curr.pracuj_url;
 
       // Pomiń re-scraping gdy URL się nie zmienił i poprzednie przetwarzanie zakończyło się sukcesem
       const skipWebsite  = !websiteChanged  && curr.website_status  === 'ok';
       const skipLinkedin = !linkedinChanged && curr.linkedin_status === 'ok';
+      const skipPracuj   = !pracujChanged   && curr.pracuj_status   === 'ok';
       const effectiveProcessLinkedin = processLinkedin && !skipLinkedin;
+      const effectiveProcessPracuj   = processPracuj && !skipPracuj;
 
-      const reprocessParams = [req.params.id, manualUrl, manualNip, manualLinkedin];
+      const reprocessParams = [req.params.id, manualUrl, manualNip, manualLinkedin, manualPracuj];
       const accessClause = singleRecordAccessSQL(reprocessParams, req.user.id, req.user.is_admin, req.user.tenant_id);
       const { rows } = await db.query(
         `UPDATE prospect_companies SET
            enrichment_status      = 'pending',
            enrichment_error       = NULL,
            enriched_at            = NULL,
-           travel_potential_score = NULL,
-           travel_signals         = NULL,
-           travel_scope           = NULL,
-           field_teams_likely     = NULL,
+           icp_score               = NULL,
+           icp_signals             = NULL,
+           icp_gates               = NULL,
+           icp_gate_status         = NULL,
+           icp_bonus_signals       = NULL,
+           icp_downgrade_flags     = NULL,
            ai_summary             = NULL,
            key_contacts           = NULL,
            legal_form             = NULL,
@@ -706,6 +717,7 @@ router.post('/:id/re-process',
            website_url            = COALESCE($2, website_url),
            nip                    = COALESCE($3::VARCHAR, nip),
            linkedin_url           = COALESCE($4, linkedin_url),
+           pracuj_url              = COALESCE($5, pracuj_url),
            updated_at             = NOW()
          WHERE id = $1 ${accessClause}
          RETURNING id`,
@@ -714,7 +726,9 @@ router.post('/:id/re-process',
       if (!rows.length) return res.status(404).json({ error: 'Prospekt nie znaleziony' });
 
       // Uruchom enrichment jednej firmy w tle (ustawia batchProgress dla pollingu frontendu)
-      enrichSvc.reEnrichOne(req.user.tenant_id, req.params.id, { processLinkedin: effectiveProcessLinkedin, skipWebsite });
+      enrichSvc.reEnrichOne(req.user.tenant_id, req.params.id, {
+        processLinkedin: effectiveProcessLinkedin, skipWebsite, processPracuj: effectiveProcessPracuj,
+      });
 
       res.json({ queued: true, id: req.params.id });
     } catch (err) {
@@ -921,14 +935,13 @@ router.post('/:id/to-lead',
         }
       }
 
-      // Zbuduj tagi z sygnałów
-      const signals = Array.isArray(p.travel_signals) ? p.travel_signals : [];
+      // Zbuduj tagi z sygnałów ICP
+      const signals = Array.isArray(p.icp_signals) ? p.icp_signals.filter(s => s.hit) : [];
       const userTag = typeof req.body.tag === 'string' ? req.body.tag.trim() : null;
       const tags = [
         p.source_database ? p.source_database : null,
-        p.travel_scope ? `zasięg:${p.travel_scope}` : null,
-        p.field_teams_likely ? 'zespoły-terenowe' : null,
-        p.travel_potential_score >= 70 ? 'high-travel-potential' : null,
+        p.icp_gate_status ? `bramki:${p.icp_gate_status}` : null,
+        p.icp_score >= 70 ? 'wysokie-dopasowanie-icp' : null,
         'prospekt',
         userTag || null,
       ].filter(Boolean);
@@ -937,8 +950,8 @@ router.post('/:id/to-lead',
       // w worktrips-doc) — dopisujemy je do notatek, żeby nie zgubić danych z enrichmentu.
       const notes = [
         p.ai_summary || '',
-        signals.length ? `Sygnały: ${signals.join('; ')}` : '',
-        p.travel_potential_score != null ? `Travel Potential Score: ${p.travel_potential_score}/100` : '',
+        signals.length ? `Sygnały: ${signals.map(s => s.label).join('; ')}` : '',
+        p.icp_score != null ? `Score dopasowania ICP: ${p.icp_score}/100` : '',
         p.facebook_url ? `Facebook: ${p.facebook_url}` : '',
         p.linkedin_url ? `LinkedIn: ${p.linkedin_url}` : '',
       ].filter(Boolean).join('\n\n');
@@ -956,7 +969,7 @@ router.post('/:id/to-lead',
           nipForLead,
           notes || null,
           tags,
-          p.travel_potential_score != null ? p.travel_potential_score : null,
+          p.icp_score != null ? p.icp_score : null,
           p.website_url || null,
           assignedTo,
         ]

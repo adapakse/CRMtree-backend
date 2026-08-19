@@ -70,74 +70,91 @@ function parseKrsDate(dateStr) {
   return `${m[3]}-${m[2]}-${m[1]}`;
 }
 
-// PKD → bonus — branże bezwzględnie o wysokim wskaźniku podróży
-const GUS_PKD_ALWAYS = [
-  { prefix: '79', bonus: 15 },  // biura podróży, organizatorzy wycieczek
-  { prefix: '49', bonus: 10 },  // transport lądowy
-  { prefix: '28', bonus: 8  },  // produkcja maszyn — serwis terenowy
-  { prefix: '33', bonus: 8  },  // naprawa i instalacja maszyn
+// ── Sygnały ICP jako dane (decyzja 19.08.2026, artefakt "Sygnały Prospektów") ─
+// Wagi: wysoka 10 pkt, średnia 5 pkt. Rozszerzone o 8 z 11 sygnałów artefaktu —
+// sygnały 9-11 (rekrutacja/raportowanie/call center) wymagają portali z ofertami
+// pracy (Pracuj.pl), nie są jeszcze podpięte, patrz pamięć projektu.
+const ICP_SIGNALS = [
+  { id: 'dzial_handlowy',        label: 'Dział handlowy',                                    tier: 'wysoka', points: 10, promptKey: 'field_sales_team' },
+  { id: 'zlozony_proces_sprzedazy', label: 'Złożony proces sprzedaży / indywidualna wycena',  tier: 'wysoka', points: 10, promptKey: 'custom_quote_process' },
+  { id: 'konsultacja_demo',      label: 'Konsultacja, demo lub analiza potrzeb',              tier: 'wysoka', points: 10, promptKey: 'consultation_demo_needs_analysis' },
+  { id: 'opieka_nad_klientem',   label: 'Dedykowana opieka nad klientem B2B',                 tier: 'wysoka', points: 10, promptKey: 'dedicated_customer_care_b2b' },
+  { id: 'przetargi',             label: 'Przetargi / dział ofertowania',                      tier: 'wysoka', points: 10, promptKey: 'tender_bidding_department' },
+  { id: 'rozproszona_struktura', label: 'Rozproszona struktura sprzedaży / wiele oddziałów',  tier: 'srednia', points: 5,  promptKey: 'distributed_sales_structure' },
+  { id: 'siec_partnerow',        label: 'Sieć partnerów / dealerów',                          tier: 'srednia', points: 5,  promptKey: 'partner_dealer_network' },
+  {
+    id: 'ecommerce_b2b', label: 'Sprzedaż e-commerce (B2B)', tier: 'srednia', points: 5, promptKey: 'ecommerce_b2b',
+    // Liczy się TYLKO razem z "Dział handlowy" albo "Opieka nad klientem B2B" —
+    // czysty samoobsługowy sklep bez ludzi po stronie sprzedaży sam w sobie
+    // nie świadczy o potrzebie CRM.
+    requiresAnyOf: ['dzial_handlowy', 'opieka_nad_klientem'],
+  },
+];
+const ICP_MAX_RAW_SCORE = ICP_SIGNALS.reduce((sum, s) => sum + s.points, 0); // 65
+
+// Bonusowe punkty (decyzja 19.08, potwierdzone na spotkaniu: 5 pkt za każdy) —
+// wykrywane regexem po SUROWYM HTML strony głównej (script tagi), nie po
+// oczyszczonym tekście — extractText() celowo usuwa <script>. Nie woła AI.
+const ICP_BONUS_SIGNALS = [
+  { id: 'whatsapp_business', label: 'WhatsApp Business (widget/link)', points: 5, pattern: /wa\.me\/|api\.whatsapp\.com|whatsapp[-_]?widget|wpwhatsapp|joinchat/i },
+  { id: 'crm_sales_tool', label: 'CRM / narzędzie sprzedażowe wykryte na stronie', points: 5, pattern: /hs-scripts\.com|hs-analytics|hubspot|pipedrive|zoho(?:public|crm)?\.com|salesforce|widget\.intercom\.io|cdn\.livechatinc\.com|code\.tidio\.co|freshchat|js\.driftt\.com/i },
 ];
 
-// PKD → bonus — tylko gdy firma ma > 1 oddział (sieci spółek tech/usługowych)
-const GUS_PKD_WITH_BRANCHES = [
-  { prefix: '62', bonus: 6 },  // spółki technologiczne (IT, programowanie)
-  { prefix: '63', bonus: 5 },  // usługi informacyjne / tech
-  { prefix: '70', bonus: 5 },  // doradztwo zarządcze — inne usługi
-  { prefix: '71', bonus: 5 },  // architektura i inżynieria — inne usługi
-  { prefix: '72', bonus: 4 },  // badania naukowe — inne usługi
-  { prefix: '73', bonus: 4 },  // reklama i badania rynku — inne usługi
-  { prefix: '74', bonus: 4 },  // inne usługi zawodowe
-];
-
-function calcGusBonus(pkdCodes, branchesCount) {
-  if (!Array.isArray(pkdCodes) || !pkdCodes.length) return 0;
-  let maxBonus = 0;
-  for (const entry of pkdCodes) {
-    const raw = typeof entry === 'string' ? entry : (entry.kod || '');
-    const prefix = raw.replace(/\./g, '').slice(0, 2);
-    const hit = GUS_PKD_ALWAYS.find(p => p.prefix === prefix);
-    if (hit && hit.bonus > maxBonus) maxBonus = hit.bonus;
-    if (branchesCount != null && branchesCount > 1) {
-      const hit2 = GUS_PKD_WITH_BRANCHES.find(p => p.prefix === prefix);
-      if (hit2 && hit2.bonus > maxBonus) maxBonus = hit2.bonus;
-    }
+function calcIcpBonus(html) {
+  const breakdown = [];
+  let bonus = 0;
+  for (const sig of ICP_BONUS_SIGNALS) {
+    const hit = !!html && sig.pattern.test(html);
+    if (hit) bonus += sig.points;
+    breakdown.push({ id: sig.id, label: sig.label, points: sig.points, hit });
   }
-  return maxBonus;
+  return { bonus, breakdown };
 }
 
-// Kalkuluje travel_potential_score wg deterministycznej formuły z promptu.
-// Nie ufamy score'owi zwróconemu przez AI — liczymy sami na podstawie sygnałów.
-function calcTravelScore(signals, branchesCount, travelScope, hasWebsite, hasKrs, gusData) {
-  const SIGNAL_KEYS = ['field_sales','branches','international','implementations','field_service','b2b_sales','travel_manager'];
-  const activeCount = SIGNAL_KEYS.filter(k => signals?.[k] === true).length;
+// Bramki (decyzja 19.08): "pass" na obu wymagany do kwalifikacji. "unknown"
+// NIE dyskwalifikuje — trafia do ręcznego przeglądu, nie jest cicho wyrzucane.
+function icpGateStatus(gates) {
+  if (!gates) return 'needs_review';
+  if (gates.b2b === 'fail' || gates.company_size === 'fail') return 'disqualified';
+  if (gates.b2b === 'pass' && gates.company_size === 'pass') return 'qualified';
+  return 'needs_review';
+}
 
-  const BASE = [15, 30, 40, 50, 60, 70, 80, 90];
-  let score = BASE[activeCount] ?? 15;
+// Kalkuluje icp_score deterministycznie z sygnałów zwróconych przez AI —
+// nie ufamy score'owi liczonemu przez sam model, tak jak poprzednio.
+function calcIcpScore(signals) {
+  const rawHits = {};
+  for (const sig of ICP_SIGNALS) rawHits[sig.id] = !!signals?.[sig.promptKey];
 
-  // Korekta za skalę oddziałów
-  if (signals?.branches === true && branchesCount != null) {
-    if (branchesCount >= 50)      score += 25;
-    else if (branchesCount >= 10) score += 15;
-    else if (branchesCount >= 2)  score += 8;
-  }
-
-  // Korekta za zasięg
-  if (travelScope === 'global')   score += 10;
-  else if (travelScope === 'eu')  score += 7;
-  else if (travelScope === 'national') score += 5;
-
-  // Korekta za branżę (GUS PKD) — tylko gdy AI znalazło < 3 sygnałów
-  if (gusData?.pkdCodes) {
-    const pkdBonus = calcGusBonus(gusData.pkdCodes, branchesCount);
-    if (pkdBonus > 0 && activeCount < 3) {
-      score += pkdBonus;
+  let raw = 0;
+  const breakdown = [];
+  for (const sig of ICP_SIGNALS) {
+    let hit = rawHits[sig.id];
+    let suppressed = false;
+    if (hit && sig.requiresAnyOf && !sig.requiresAnyOf.some(depId => rawHits[depId])) {
+      hit = false;
+      suppressed = true;
     }
+    if (hit) raw += sig.points;
+    breakdown.push({ id: sig.id, label: sig.label, tier: sig.tier, points: sig.points, hit, suppressed });
   }
+  return { raw, capped: Math.min(100, raw), maxPossible: ICP_MAX_RAW_SCORE, breakdown };
+}
 
-  // Korekta ujemna — brak danych
-  if (!hasWebsite && !hasKrs) score -= 10;
-
-  return Math.min(100, Math.max(5, score));
+// Miękkie obniżenia priorytetu (decyzja 19.08) — NIE dyskwalifikują firmy.
+// Tylko dwa z czterech ustalonych na spotkaniu (brak https, martwa strona) —
+// tanie, wynikają z danych które i tak już mamy. Podmiot publiczny i świeże
+// duże wdrożenie wymagałyby nowego sygnału ocenianego przez AI — pominięte
+// świadomie na tym etapie.
+function calcIcpDowngradeFlags(websiteUrl, websiteStatus) {
+  const flags = [];
+  if (websiteUrl && !/^https:\/\//i.test(websiteUrl)) {
+    flags.push({ id: 'brak_https', label: 'Strona bez https' });
+  }
+  if (!websiteUrl || websiteStatus === 'blocked' || websiteStatus === 'failed' || websiteStatus === 'not_found') {
+    flags.push({ id: 'martwa_strona', label: 'Nie znaleziono/nie udało się wczytać strony' });
+  }
+  return flags;
 }
 
 // ── 1. KRS API ─────────────────────────────────────────────────────
@@ -1063,270 +1080,123 @@ async function scrapeWebsite(baseUrl) {
 
 // Statyczne instrukcje systemowe — DeepSeek cache'uje prefix kontekstu automatycznie.
 // Dane firmy trafiają wyłącznie do wiadomości user (buildUserMessage), nie tutaj.
-const SYSTEM_PROMPT = `Jesteś ekspertem od analizy potencjału podróżowego firm B2B. Analizujesz firmę jako potencjalnego klienta systemu zarządzania podróżami służbowymi.
+const SYSTEM_PROMPT = `Jesteś analitykiem oceniającym, czy firma B2B pasuje do profilu klienta systemu CRM
+(CRMtree) — firmy z formalnym działem handlowym i złożonym, relacyjnym procesem sprzedaży,
+nie sklepu samoobsługowego czy zakupu impulsowego.
 
 ═══════════════════════════════════════
-ZASADA GŁÓWNA: wnioskuj z modelu biznesowego, nie szukaj słów kluczowych.
-Firma serwisująca klimatyzacje "w całej Polsce" → intensywne podróże krajowe.
-Firma z "47 oddziałami w 15 województwach" → koordynacja między biurami.
-"Wdrożenia ERP u klientów" → konsultanci na delegacjach tygodniowych.
-"Przedstawiciele obsługują rynek DACH i Benelux" → regularne podróże zagraniczne.
+ZASADA GŁÓWNA: każdy sygnał potrzebuje KONKRETNEGO DOWODU z treści poniżej — nie zgaduj
+na podstawie samej branży czy wielkości firmy. Przy każdym sygnale rozróżniamy:
+  • GŁÓWNY DOWÓD — wystarcza sam, żeby ustawić true.
+  • DRUGORZĘDNE WSPARCIE — NIE wystarcza samo, potrzebuje głównego dowodu obok siebie,
+    inaczej sygnał to false (np. sam brak cennika bez frazy CTA to za mało).
+Jeśli dowodu brak: bramki → "unknown", sygnały → false. Nie zgaduj w żadną stronę.
 ═══════════════════════════════════════
 
-═══════════════════════════════════════
-ZASADA DOPASOWANIA ROZMYTEGO (dotyczy WSZYSTKICH słów kluczowych w całym prompcie):
-Nie wymagaj dokładnego brzmienia — akceptuj dopasowanie na poziomie ≥80% podobieństwa.
-Oznacza to że rozpoznajesz:
-  • Warianty pisowni i literówki: "Procurement" ≈ "Procurment", "eTravel" ≈ "e-Travel" ≈ "E Travel"
-  • Skróty i formy skrócone: "KAM" ≈ "Key Account Manager", "TM" ≈ "Travel Manager"
-  • Różnice wielkości liter: "travel manager" ≈ "Travel Manager" ≈ "TRAVEL MANAGER"
-  • Formy fleksyjne (PL): "handlowców" ≈ "handlowcy", "oddziałów" ≈ "oddziały", "wdrożenia" ≈ "wdrożeń"
-  • Nazwy własne z domeną: "whynot" ≈ "WhyNot Travel" ≈ "whynot.travel" ≈ "Why Not"
-  • Synonimy branżowe: "Purchasing" ≈ "Procurement" ≈ "Zakupy korporacyjne" ≈ "Zaopatrzenie"
-  • Częściowe dopasowanie w zdaniu: "odpowiada za travel" → sugeruje Travel Manager
-  • Kontekst semantyczny: nawet jeśli słowo kluczowe nie pada dosłownie, ale zdanie jednoznacznie
-    opisuje daną rolę/narzędzie/proces → zalicz jako dopasowanie
-Reguła: lepiej zaliczyć true przy wątpliwości (ryzyko przeoczenia szansy > ryzyko fałszywego alarmu)
-═══════════════════════════════════════
+BRAMKI (status: "pass" / "fail" / "unknown") — sprawdzane przed sygnałami, bez PASS na obu
+firma się nie kwalifikuje niezależnie od liczby trafionych sygnałów:
 
-BRANŻE — domyślny potencjał podróżowy (stosuj gdy brak strony lub strona skąpa):
-WYSOKI (score 65+): budownictwo, infrastruktura telekomunikacyjna/energetyczna,
-  serwis przemysłowy, IT consulting/integracja systemów, logistyka i transport,
-  handel hurtowy B2B, produkcja maszyn z serwisem, audyt i doradztwo
-ŚREDNI (score 40-64): branża medyczna (placówki/ubezpieczenia), produkcja z własną siecią sprzedaży,
-  nieruchomości komercyjne, HR/rekrutacja, szkolenia i e-learning, agencje eventowe
-NISKI (score <40): e-commerce, software house bez wdrożeń, agencja digital/marketing,
-  usługi lokalne (fryzjer, restauracja), praca zdalna i SaaS
+b2b: sprzedaż firma → firma, nie do konsumenta.
+  Główny dowód: wprost opisana obsługa firm/klientów biznesowych — "dla firm", "dla biznesu",
+  "klienci biznesowi", "sprzedaż hurtowa", "oferta B2B".
+  Drugorzędne wsparcie (nie wystarcza samo): NIP przy zamówieniu, brak cennika detalicznego
+  — zwykły sklep D2C też wystawia faktury firmom.
+
+company_size: minimum 15 pracowników. Użyj DANYCH HANDLOWYCH Z BAZY KLIENTA (zatrudnienie)
+  jeśli podane — to twarde dane, nie zgaduj z treści strony. Jeśli brak takich danych,
+  zwróć "unknown".
 
 ═══════════════════════════════════════
-SYGNAŁY — definicje. Podaj true/false wyłącznie na podstawie KONKRETNYCH DOWODÓW
-z treści strony lub danych KRS. Nie zgaduj na podstawie samej branży.
+SYGNAŁY (true/false) — każdy z nich to niezależne dopasowanie strukturalne (FIT) do
+profilu CRMtree, nie sygnał "dobrego momentu":
 
-field_sales = true gdy na stronie/KRS znalazłeś:
-  • "przedstawiciele handlowi", "handlowcy terenowi", "account manager w terenie"
-  • Oferty pracy: "Przedstawiciel Handlowy Regionu...", "KAM terenowy"
-  • Opis: "nasi handlowcy odwiedzają klientów", "obsługujemy klientów w terenie"
-  Wnioskowanie z branży dozwolone dla: FMCG, farmaceutyki, maszyny, chemia — gdy brak strony
-field_sales = false gdy: tylko sprzedaż online, e-commerce, brak wzmianek o terenie
+field_sales_team ("Dział handlowy"):
+  Główny dowód: podstrona zespołu/kontaktu z konkretnymi handlowcami, lub wprost
+  "dział handlowy"/formalna struktura organizacyjna sprzedaży.
+  Drugorzędne wsparcie: sam adres sprzedaz@ — może być zwykłą skrzynką ogólną.
 
-branches = true gdy COKOLWIEK z poniższych:
-  • KRS wykazuje oddziały (branches_count > 0) — twarde dane, niezbity dowód
-  • Na stronie: lista miast, mapa oddziałów, "oddziały w X, Y, Z", "biura regionalne"
-  • Stopka strony zawiera kilka adresów lub miast
-  • "jesteśmy w całej Polsce", "w całym kraju", "ogólnopolska sieć", "krajowy zasięg"
-  • Firma opisuje siebie jako "SIEĆ" dowolnego rodzaju: sieć placówek, sieć klinik, sieć aptek,
-    sieć salonów, sieć sklepów, sieć biur, sieć punktów — KAŻDA "sieć" = branches true
-  • Wiele "lokalizacji", "placówek", "oddziałów", "punktów", "klinik" w różnych miastach
-  • WYSZUKIWARKA LOKALIZACJI na stronie: "Znajdź placówkę", "Wyszukaj centrum",
-    "Wybierz klinikę", "Znajdź aptekę", "Znajdź punkt obsługi", "Znajdź salon" →
-    funkcja wyszukiwania lokalizacji = silny dowód na wiele lokalizacji = branches true
-  • Słowa "placówki", "placówkach", "klinikach", "przychodniach", "centrach" użyte w kontekście
-    "nasze placówki", "w placówkach", "wybierz placówkę" → wiele lokalizacji = branches true
-REGUŁA SPÓJNOŚCI: jeśli w ai_summary opisujesz firmę jako "krajową sieć", "sieć placówek",
-  "posiada oddziały w całej Polsce" itp. — branches MUSI być true. Sprzeczność jest błędem.
-REGUŁA AUTOMATYCZNA: jeśli branches_found.count ≥ 2 (sam odnalazłeś wiele lokalizacji),
-  to branches MUSI być true — wynik count≥2 z branches=false to logiczna sprzeczność.
-branches = false TYLKO gdy: firma jednoznacznie działa tylko lokalnie/regionalnie,
-  jeden adres, zero wzmianek o sieci lub wielu lokalizacjach
+custom_quote_process ("Złożony proces sprzedaży / indywidualna wycena"):
+  Relacyjny, projektowy lub negocjacyjny model, nie zakup impulsowy.
+  Główny dowód: fraza CTA — "zapytaj o ofertę", "poproś o wycenę", "indywidualna oferta",
+  "przygotujemy ofertę", "skontaktuj się z handlowcem".
+  Drugorzędne wsparcie: sam brak jawnego cennika bez takiej frazy.
 
-international = true gdy PRACOWNICY BIUROWI firmy (handlowcy, konsultanci, managerowie) jeżdżą za granicę:
-  • Na stronie: "klienci zagraniczni", "działamy w X krajach", "EU market", "obsługujemy rynek DACH/Benelux/CEE"
-  • Przynależność do zagranicznej grupy kapitałowej (wyraźna wzmianka lub holding w nazwie)
-  • Eksport produktów własnych z potrzebą serwisu/wdrożeń/sprzedaży za granicą
-  • "international clients", "foreign customers", "we operate in X countries"
-international = false gdy: wyraźnie lokalna lub ogólnopolska działalność bez wzmianek o zagranicznym zasięgu pracowników
+consultation_demo_needs_analysis ("Konsultacja, demo lub analiza potrzeb"):
+  Sprzedaż wymaga rozmowy przed zakupem, nie samoobsługowego checkoutu — łapie też firmy
+  z jawnym cennikiem, które mimo to sprzedają przez rozmowę (częste w SaaS/usługach).
+  Główny dowód: "umów demo", "zamów prezentację", "bezpłatna konsultacja", "dobór rozwiązania".
+  Jeśli to ten sam fragment tekstu co dowód dla custom_quote_process, oceń oba sygnały
+  niezależnie, ale nie licz jednego zdania jako dwóch niezależnych, mocniejszych dowodów.
 
-WYJĄTEK TRANSPORTOWY — KLUCZOWY:
-  Firmy transportowe, spedycyjne, logistyczne, kurierskie, morskie, lotnicze, kolejowe:
-  "dowozimy do Europy", "obsługujemy trasy EU", "transport do Niemiec/Czech/Słowacji",
-  "usługi w Polsce i krajach ościennych", "international freight", "cargo EU" →
-  international = false — to jest ZASIĘG TRASY PRZEWOZU, nie delegacja pracownika biurowego.
-  Kierowca, marynarz, pilot, kurier jeżdżący za granicę wykonuje swój ZAWÓD — nie jest w delegacji.
+distributed_sales_structure ("Rozproszona struktura sprzedaży / wiele oddziałów"):
+  Zespół lub sieć sprzedaży fizycznie rozproszona terytorialnie.
+  Główny dowód: konkretni przedstawiciele/oddziały z przypisanymi ludźmi.
+  Drugorzędne wsparcie: jednostka lokalna w KRS bez przypisanych osób (może być zwykłym
+  magazynem), wersja językowa strony (może być grzecznością wobec klienta zagranicznego).
 
-implementations = true TYLKO gdy na stronie znalazłeś WPROST:
-  • "wdrożenia systemów", "instalacje u klientów", "realizacje projektów na miejscu"
-  • Firma to integrator IT / VAR / wdrożeniowiec ERP/CRM/MES
-  • Producent maszyn/urządzeń z opisaną instalacją u klienta
-  • "projekty pod klucz", "wdrożenia on-site", "konsultanci u klienta"
-  NIE ustawiaj true tylko dlatego że firma jest medyczna, farmaceutyczna lub duża.
-  Brak wzmianki o wdrożeniach na stronie → false lub null.
+ecommerce_b2b ("Sprzedaż e-commerce (B2B)"):
+  Sklep/platforma zamówieniowa w domenie firmy z realną obsługą B2B, nie czysty
+  samoobsługowy self-service bez ludzi po stronie sprzedaży.
+  Główny dowód: sklep lub panel klienta B2B w domenie firmy.
 
-field_service = true TYLKO gdy na stronie znalazłeś WPROST:
-  • "serwis pogwarancyjny", "serwis mobilny", "ekipy serwisowe w terenie"
-  • "pogotowie techniczne", "awarie 24/7", "przeglądy instalacji u klienta"
-  • Firma serwisuje urządzenia/maszyny/instalacje fizycznie u klienta
-  NIE ustawiaj true tylko dlatego że firma jest medyczna, budowlana lub ma maszyny.
-  Szpital, przychodnia, ubezpieczalnia zdrowotna → field_service=false (obsługa stacjonarna).
-  Brak wzmianki o serwisie terenowym → false.
+dedicated_customer_care_b2b ("Dedykowana opieka nad klientem B2B"):
+  Dedykowany zespół posprzedażowy, ew. przypisany opiekun.
+  Główny dowód: "dedykowany opiekun", "opiekun biznesowy", "Key Account Manager",
+  "Customer Success", "obsługa posprzedażowa", "odnowienia umów", "stała opieka nad klientem".
+  Drugorzędne wsparcie: samo słowo "BOK" lub sama infolinia — może prowadzić do jednej
+  osoby lub zwykłego wsparcia technicznego, nie relacyjnej opieki.
 
-b2b_sales = true gdy:
-  • Firma sprzedaje innym firmom: przetargi, kontrakty, "klienci korporacyjni"
-  • "partnerzy biznesowi", "dla firm", "oferta B2B", "długoterminowe umowy"
-  • Opieka medyczna/zdrowotna dla pracodawców: "pakiety medyczne dla firm", "opieka zdrowotna
-    dla pracowników", "medycyna pracy", "abonament medyczny", "benefity zdrowotne",
-    "corporate health", "ubezpieczenie zdrowotne dla firm" → b2b_sales true
-  Wnioskowanie dozwolone: producent komponentów, dostawca dla przemysłu, usługi SaaS B2B
-b2b_sales = false gdy: czysto B2C (sklep detaliczny, usługi dla konsumentów bez oferty B2B)
+partner_dealer_network ("Sieć partnerów / dealerów"):
+  Firma buduje lub rozwija sieć sprzedaży pośredniej.
+  Główny dowód: "zostań partnerem", "sieć dealerska", "dla dystrybutorów", "strefa partnera"
+  w domenie firmy.
 
-travel_manager = true gdy na stronie lub w ogłoszeniach o pracę znalazłeś:
-  • Stanowisko lub rekrutacja: "Travel Manager", "Travel Coordinator", "Corporate Travel Manager",
-    "Specjalista ds. podróży służbowych", "Koordynator podróży",
-    "Procurement Manager", "Purchasing Manager", "Head of Procurement", "Head of Purchasing"
-  • Wzmianka o narzędziu lub agencji TMC/TMS: "Egencia", "CWT", "Carlson Wagonlit", "BCD Travel",
-    "FCM Travel", "AmTrav", "SAP Concur", "Atriis", "Cytric", "TravelPerk",
-    "WhyNot Travel", "whynot.travel", "eTravel", "etravel.pl", "Stare Miasto", "staremiasto.pl" —
-    współpraca z korporacyjną agencją podróży lub systemem zarządzania podróżami
-  • "polityka podróżna", "travel policy", "zarządzanie podróżami służbowymi",
-    "system rezerwacji podróży", "delegacje służbowe — regulamin"
-  • AGENCJA REKRUTACYJNA / EXECUTIVE SEARCH specjalizująca się w Procurement/Purchasing/Zakupy:
-    jeśli firma zajmuje się rekrutacją na stanowiska zakupowe dla klientów (Strategic Buyer,
-    Category Manager, CPO, Procurement Director, Purchasing Manager) → travel_manager = true,
-    ponieważ ta firma obsługuje sektor zakupowy korporacyjny — jej klienci to przedsiębiorstwa
-    z działami Procurement, które są naturalnym odbiorcą systemu zarządzania podróżami.
-travel_manager = true oznacza: firma MA JUŻ WDROŻONY PROCES zarządzania podróżami LUB
-  działa w środowisku korporacyjnych działów zakupowych (agencja Procurement executive search)
-  → to jest SZANSA SPRZEDAŻOWA — możemy zastąpić lub uzupełnić obecne rozwiązanie
-travel_manager = false gdy: brak powyższych wzmianek (domyślnie — nie używaj null dla tego sygnału)
-
-REGUŁA null (dla wszystkich sygnałów): gdy firma jest ewidentnie nie-B2B LUB brak danych.
+tender_bidding_department ("Przetargi / dział ofertowania"):
+  Firma SPRZEDAJE w przetargach — UWAGA, częsta pomyłka w drugą stronę:
+  Dowód pozytywny (true): "realizujemy zamówienia publiczne", "oferta dla sektora
+  publicznego", "doświadczenie w przetargach", "zrealizowane zamówienia",
+  "specjalista ds. przetargów/ofertowania", referencje od instytucji publicznych.
+  NIE liczy się, nawet jeśli słowo "przetarg" występuje (to firma KUPUJĄCA, zwróć false):
+  "postępowania zakupowe", "zamówienia dla dostawców", "przetargi organizowane przez nas",
+  "profil nabywcy".
 
 ═══════════════════════════════════════
-ZASADA NADRZĘDNA: ZASIĘG OPERACYJNY ≠ ZASIĘG DELEGACJI
-
-travel_scope, international i field_teams_likely mierzą zasięg DELEGACJI SŁUŻBOWYCH
-pracowników biurowych, handlowców, konsultantów, managerów, serwisantów.
-NIE mierzą zasięgu operacyjnego rdzennej działalności firmy.
-
-ZASADA OGÓLNA: Jeśli "podróż" pracownika jest de facto USŁUGĄ ŚWIADCZONĄ PRZEZ FIRMĘ
-(wożenie towaru, przewóz osób, dostarczanie przesyłek, żegluga, lot) — to NIE jest
-podróż służbowa w sensie delegacji. To codzienne obowiązki zawodowe.
-
-Delegacja służbowa = pracownik wyjeżdża Z SIEDZIBY do klienta/partnera/konferencji,
-a jego stanowisko NIE polega na podróżowaniu jako usłudze.
-
-Przykłady aktywności, które NIE są delegacjami (choć dotyczą przemieszczania):
-  TRANSPORT DROGOWY:    kierowcy TIR, transportowcy — jeżdżą do EU jako zawód
-  SPEDYCJA/LOGISTYKA:   koordynatorzy ładunków — operują zdalnie, kurs EUR/PLN nie jest delegacją
-  TRANSPORT MORSKI:     marynarze, oficerowie — pływają globalnie jako zawód
-  TRANSPORT LOTNICZY:   piloci, stewardesy — latają jako zawód
-  KURIERY/POCZTA:       kurierzy — dostarczają paczki jako zawód
-  HANDEL HURTOWY:       firma handluje zbożem/paszami/paliwem ponadgranicznie — to profil handlowy,
-                        nie podróże pracownicze (chyba że mają terenowych handlowców do negocjacji)
-
-Dla takich firm ustaw:
-  international = false (trasy przewozu ≠ zagraniczne delegacje)
-  travel_scope  = "local" lub "national" (wg lokalizacji biura/zarządu)
-  field_teams_likely = false (kierowcy/marynarze nie są "teams" w sensie delegacji)
-
-WYJĄTKI gdy nawet firma transportowa MOŻE mieć travel_scope="national"/"eu":
-  • Ma własny DZIAŁ SPRZEDAŻY z terenowymi handlowcami (field_sales=true)
-  • Ma biura/oddziały w różnych miastach/krajach (branches=true)
-  • Jej zarząd wyraźnie jeździ na negocjacje/targi branżowe za granicą
-
-═══════════════════════════════════════
-TRAVEL_SCOPE — zasięg geograficzny DELEGACJI pracowników nieoperacyjnych:
-"local"    = wyłącznie jedno miasto lub jeden region
-"national" = ogólnopolski (wiele miast, "cała Polska", "krajowa sieć", "ogólnopolski")
-"eu"       = pracownicy firmy (handlowcy/konsultanci/zarząd) jeżdżą do krajów EU
-"global"   = aktywność globalna pracowników (wiele kontynentów)
-
-OBOWIĄZKOWE:
-• branches=true z polskimi lokalizacjami → travel_scope MUSI być co najmniej "national"
-• international=true → travel_scope MUSI być co najmniej "eu"
-• "sieć placówek", "oddziały w Polsce", "ogólnopolski" → travel_scope = "national"
-• Jeden adres, opis lokalny, brak wzmianki o wielu lokalizacjach → travel_scope = "local"
-• Firma transportowa/spedycyjna/morska/kurierska bez własnych oddziałów lub handlowców → "local"
-SPRZECZNOŚĆ (np. branches=true i travel_scope=local) jest błędem — nie wolno.
-
-FIELD_TEAMS_LIKELY — czy NIEOPERACYJNY personel firmy regularnie wyjeżdża w teren:
-true gdy COKOLWIEK z poniższych:
-• field_sales=true, field_service=true lub implementations=true
-• branches=true — specjaliści, zarząd, szkoleniowcy przemieszczają się między lokalizacjami
-• travel_scope="national"/"eu"/"global" i firma prowadzi działalność wymagającą obecności u klienta
-false gdy: firma w pełni zdalna LUB czysto jednolokalowa bez obsługi w terenie
-false ZAWSZE dla: firm transportowych/kurierskich/morskich/lotniczych (kierowcy/marynarze to
-  personel operacyjny, nie "field teams" w sensie delegacji — ich przemieszczanie to zawód)
-
-SCORING — travel_potential_score (0-100):
-Krok 1 — baza wg liczby aktywnych sygnałów true
-  (field_sales + branches + international + implementations + field_service + b2b_sales + travel_manager):
-  7 → 90 | 6 → 80 | 5 → 70 | 4 → 60 | 3 → 50 | 2 → 40 | 1 → 30 | 0 → 15
-
-Krok 2 — korekta za skalę oddziałów (dodaj do bazy):
-  branches=true i branches_count ≥ 50  → +25
-  branches=true i branches_count 10-49 → +15
-  branches=true i branches_count 2-9   → +8
-  (tylko gdy znasz konkretną liczbę z KRS lub strony)
-
-Krok 3 — korekta za zasięg (dodaj do bazy):
-  travel_scope = "global"   → +10
-  travel_scope = "eu"       → +7
-  travel_scope = "national" → +5
-  travel_scope = "local"    → 0
-
-Krok 4 — korekta ujemna:
-  brak strony WWW I brak KRS → -10 (mało danych = mniej pewności)
-
-Wynik: ogranicz do przedziału 5–100.
-
-PRZYKŁADY sprawdzające:
-• Sieć 300 klinik + pakiety B2B (branches=true, count=300, b2b_sales=true, travel_scope=national):
-  2 sygnały → 40, +25 (300 oddziałów), +5 (national) = 70 ✓
-• Firma serwisowa ogólnopolska bez oddziałów (field_service=true, travel_scope=national):
-  1 sygnał → 30, +5 (national) = 35 ✓
-• Integrator IT EU (implementations=true, international=true, travel_scope=eu):
-  2 sygnały → 40, +7 (eu) = 47 ✓
-• Firma z Travel Managerem, oddziałami, B2B (travel_manager=true, branches=true, b2b_sales=true):
-  3 sygnały → 50, +8 (oddziały 2-9), +5 (national) = 63 ✓
-• Firma transportowa EU — "transport materiałów sypkich w Polsce i krajach ościennych, handel zbożem":
-  international=false (trasy TIR to zawód kierowcy, nie delegacje), travel_scope="local",
-  field_teams_likely=false, b2b_sales=true (handel hurtowy)
-  1 sygnał → 30, +0 (local) = 30 ✓ (NIE 37 przez błędne travel_scope=eu)
-• Armator / firma żeglugowa (marynarze operują globalnie):
-  international=false (żegluga to zawód marynarza), travel_scope="local",
-  field_teams_likely=false
-  Jeśli firma ma handlowców: b2b_sales=true → 1 sygnał → 30 ✓
-═══════════════════════════════════════
-
 Zwróć odpowiedź WYŁĄCZNIE jako JSON (bez markdown, bez \`\`\`):
 {
-  "travel_potential_score": <liczba 0-100 wg powyższego wzoru>,
-  "travel_signals": {
-    "field_sales":      <true|false|null>,
-    "branches":         <true|false|null>,
-    "international":    <true|false|null>,
-    "implementations":  <true|false|null>,
-    "field_service":    <true|false|null>,
-    "b2b_sales":        <true|false|null>,
-    "travel_manager":   <true|false|null>
+  "gates": {
+    "b2b": "pass|fail|unknown",
+    "company_size": "pass|fail|unknown"
   },
-  "branches_found": {
-    "count":     <liczba oddziałów/lokalizacji widoczna na stronie lub w KRS, null jeśli nie znaleziono>,
-    "locations": ["<miasto1>", "<miasto2>"],
-    "scope":     "<pl|eu|global>"
+  "icp_signals": {
+    "field_sales_team": <true|false>,
+    "custom_quote_process": <true|false>,
+    "consultation_demo_needs_analysis": <true|false>,
+    "distributed_sales_structure": <true|false>,
+    "ecommerce_b2b": <true|false>,
+    "dedicated_customer_care_b2b": <true|false>,
+    "partner_dealer_network": <true|false>,
+    "tender_bidding_department": <true|false>
   },
-  "travel_scope": "<local|national|eu|global>",
-  "field_teams_likely": <true|false>,
-  "ai_summary": "<2-3 zdania po polsku: DLACZEGO ta firma podróżuje lub nie, jakie konkretne cechy na to wskazują>",
+  "ai_summary": "<2-3 zdania po polsku: DLACZEGO ta firma pasuje lub nie pasuje do CRMtree, jakie konkretne cechy na to wskazują>",
   "signal_reasoning": {
-    "field_sales":      "<max 10 słów>",
-    "branches":         "<max 10 słów>",
-    "international":    "<max 10 słów>",
-    "implementations":  "<max 10 słów>",
-    "field_service":    "<max 10 słów>",
-    "b2b_sales":        "<max 10 słów>",
-    "travel_manager":   "<max 10 słów>"
+    "field_sales_team": "<max 10 słów>",
+    "custom_quote_process": "<max 10 słów>",
+    "consultation_demo_needs_analysis": "<max 10 słów>",
+    "distributed_sales_structure": "<max 10 słów>",
+    "ecommerce_b2b": "<max 10 słów>",
+    "dedicated_customer_care_b2b": "<max 10 słów>",
+    "partner_dealer_network": "<max 10 słów>",
+    "tender_bidding_department": "<max 10 słów>"
   },
   "key_contacts": [
     {"name": "<imię nazwisko>", "title": "<stanowisko>", "email": "<email lub null>", "phone": "<telefon lub null>"}
   ]
 }
 
-Dla branches_found: zlicz WSZYSTKIE unikalne lokalizacje widoczne na stronie (stopka, Kontakt, Oddziały, mapa) + KRS. Jeśli strona wymienia 3 miasta → count: 3.
 Dla key_contacts: wypełnij tylko pola których jesteś pewien. Puste pole → null. Max 8 osób.`;
 
-// Dynamiczna część promptu — dane konkretnej firmy (nie cachowane)
-function buildUserMessage(company, krsData, websiteText, fbData = null, linkedinText = '', gusData = null) {
+
+function buildUserMessage(company, krsData, websiteText, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
   const companyDesc = [
     `Firma: ${company.company_name || krsData?.companyName || gusData?.officialName || 'nieznana'}`,
     `NIP: ${company.nip}`,
@@ -1371,6 +1241,13 @@ function buildUserMessage(company, krsData, websiteText, fbData = null, linkedin
     ? `\nDANE Z LINKEDIN:\n${linkedinText.slice(0, 1500)}`
     : '';
 
+  // Ręcznie wklejony link do ofert pracy firmy (Pracuj.pl) — kontekst
+  // wspierający sygnały wymagające dowodu z ofert (np. dział handlowy,
+  // rekrutacja) tam, gdzie strona firmy sama tego nie pokazuje.
+  const pracujSection = pracujText
+    ? `\nOFERTY PRACY FIRMY (Pracuj.pl, link wklejony ręcznie):\n${pracujText.slice(0, 1500)}`
+    : '';
+
   const gusSection = gusData ? (() => {
     const lines = [
       gusData.officialName ? `Nazwa oficjalna (GUS): ${gusData.officialName}` : null,
@@ -1393,12 +1270,12 @@ function buildUserMessage(company, krsData, websiteText, fbData = null, linkedin
 DANE FIRMY:
 ${companyDesc}${fileSection}
 
-${websiteText ? `TREŚĆ ZE STRONY WWW:\n${websiteText}` : 'Strona WWW niedostępna — opieraj się na danych rejestrowych i handlowych.'}${fbSection}${linkedinSection}${gusSection}`;
+${websiteText ? `TREŚĆ ZE STRONY WWW:\n${websiteText}` : 'Strona WWW niedostępna — opieraj się na danych rejestrowych i handlowych.'}${fbSection}${linkedinSection}${pracujSection}${gusSection}`;
 }
 
 // Połączony prompt (dla endpointu inspekcji /prompt)
-function buildPromptText(company, krsData, websiteText, fbData = null, linkedinText = '', gusData = null) {
-  return `${SYSTEM_PROMPT}\n\n${buildUserMessage(company, krsData, websiteText, fbData, linkedinText, gusData)}`;
+function buildPromptText(company, krsData, websiteText, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
+  return `${SYSTEM_PROMPT}\n\n${buildUserMessage(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText)}`;
 }
 
 async function callDeepSeek(userMessage) {
@@ -1473,14 +1350,14 @@ async function callAnthropic(userMessage) {
   return data?.content?.[0]?.text || '{}';
 }
 
-async function analyzeWithAi(company, krsData, websiteText, fbData = null, linkedinText = '', gusData = null) {
+async function analyzeWithAi(company, krsData, websiteText, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
   const { rows } = await db.query(
     `SELECT value FROM app_settings WHERE key = 'prospect.ai_provider' AND tenant_id = $1`,
     [company.tenant_id]
   );
   const provider = rows[0]?.value || 'deepseek';
 
-  const userMessage = buildUserMessage(company, krsData, websiteText, fbData, linkedinText, gusData);
+  const userMessage = buildUserMessage(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText);
   const raw = provider === 'anthropic'
     ? await callAnthropic(userMessage)
     : await callDeepSeek(userMessage);
@@ -1489,7 +1366,7 @@ async function analyzeWithAi(company, krsData, websiteText, fbData = null, linke
 
   try {
     const parsed = JSON.parse(raw);
-    logger.info('[Prospect] AI parse OK', { provider, company: company.company_name, signals: parsed.travel_signals, summary: parsed.ai_summary?.slice(0, 80) });
+    logger.info('[Prospect] AI parse OK', { provider, company: company.company_name, signals: parsed.icp_signals, summary: parsed.ai_summary?.slice(0, 80) });
     return { result: parsed, provider };
   } catch {
     // Fallback: wytnij blok {} i spróbuj jeszcze raz
@@ -1500,7 +1377,7 @@ async function analyzeWithAi(company, krsData, websiteText, fbData = null, linke
     }
     try {
       const parsed = JSON.parse(match[0]);
-      logger.info('[Prospect] AI parse OK (regex fallback)', { provider, company: company.company_name, signals: parsed.travel_signals });
+      logger.info('[Prospect] AI parse OK (regex fallback)', { provider, company: company.company_name, signals: parsed.icp_signals });
       return { result: parsed, provider };
     } catch {
       logger.warn('[Prospect] AI JSON malformed after regex extract', { provider, rawLength: raw.length, rawTail: raw.slice(-200), preview: match[0].slice(0, 300) });
@@ -1604,6 +1481,28 @@ async function enrichOne(prospectId, opts = {}) {
       );
     }
 
+    // 2.6. Pracuj.pl — decyzja 19.08: automatyczne wyszukiwanie ofert po nazwie
+    // firmy nie działa niezawodnie (Pracuj.pl nie ma filtra po pracodawcy w
+    // publicznym wyszukiwaniu), więc user wkleja link ręcznie przy re-process —
+    // tu tylko pobieramy treść tego już znanego, konkretnego URL-a. Tylko przy
+    // ręcznym re-process (jak LinkedIn), nigdy w batchu.
+    let pracujText = '';
+    if (opts.processPracuj && company.pracuj_url) {
+      let pracujStatus = 'not_found';
+      try {
+        const { html } = await fetchPage(company.pracuj_url);
+        pracujText = html ? extractText(cheerio.load(html)) : '';
+        pracujStatus = pracujText.trim().length > 50 ? 'ok' : 'not_found';
+        enrichLog.pracuj = { url: company.pracuj_url, chars: pracujText.length, status: pracujStatus };
+      } catch (pracujErr) {
+        enrichLog.pracuj = { url: company.pracuj_url, status: 'not_found', error: pracujErr.message };
+      }
+      await db.query(
+        `UPDATE prospect_companies SET pracuj_status = $2 WHERE id = $1`,
+        [prospectId, pracujStatus]
+      );
+    }
+
     // 3. Website URL — jeśli ustawiony ręcznie (przez użytkownika), pomiń odkrywanie
     // Normalizuj URL tutaj jako safety-net (dane ze starych importów mogą być nieznormalizowane)
     let websiteUrl, websiteMethod;
@@ -1688,24 +1587,38 @@ async function enrichOne(prospectId, opts = {}) {
     }
 
     // 4. AI analysis
-    const { result: analysis, provider: usedProvider } = await analyzeWithAi(company, krsData, websiteText, fbData, linkedinText, gusData);
+    const { result: analysis, provider: usedProvider } = await analyzeWithAi(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText);
 
-    // Oddziały: KRS ma priorytet (twarde dane), fallback = AI z analizy strony WWW
-    const branchesCount = krsData?.branchesCount
-      ?? (analysis?.branches_found?.count > 0 ? analysis.branches_found.count : null);
-    const branchesScope = krsData?.branchesScope
-      ?? analysis?.branches_found?.scope
-      ?? null;
+    // Oddziały: tylko z KRS (twarde dane) — nowy prompt ICP nie zwraca już
+    // branches_found (to była część starego travel-scoringu).
+    const branchesCount = krsData?.branchesCount ?? null;
+    const branchesScope = krsData?.branchesScope ?? null;
 
-    const computedScore = calcTravelScore(analysis?.travel_signals, branchesCount, analysis?.travel_scope, !!websiteUrl, !!krsData, gusData);
+    const scoreResult   = calcIcpScore(analysis?.icp_signals);
+    const gateStatus    = icpGateStatus(analysis?.gates);
+    const downgradeFlags = calcIcpDowngradeFlags(websiteUrl, websiteStatus);
+
+    // Bonus (WhatsApp/CRM wykryty) potrzebuje SUROWEGO HTML strony głównej
+    // (script tagi) — scrapeWebsite() zwraca już oczyszczony tekst, więc to
+    // osobne, dodatkowe pobranie. Błąd tego kroku nie może wywalić enrichmentu.
+    let bonusResult = { bonus: 0, breakdown: [] };
+    if (websiteUrl) {
+      try {
+        const { html: homepageHtml } = await fetchPage(websiteUrl);
+        bonusResult = calcIcpBonus(homepageHtml);
+      } catch { /* bonus to dodatek, nie krytyczne jeśli się nie uda */ }
+    }
+
+    const totalScore = Math.min(100, scoreResult.raw + bonusResult.bonus);
+
     enrichLog.claude = {
-      provider:         usedProvider,
-      model:            usedProvider === 'anthropic' ? ANTHROPIC_MODEL : DEEPSEEK_MODEL,
-      score:            computedScore,
-      score_ai_raw:     analysis?.travel_potential_score ?? null,
+      provider:     usedProvider,
+      model:        usedProvider === 'anthropic' ? ANTHROPIC_MODEL : DEEPSEEK_MODEL,
+      icp_raw:      scoreResult.raw,
+      icp_bonus:    bonusResult.bonus,
+      icp_total:    totalScore,
+      gate_status:  gateStatus,
       signal_reasoning: analysis?.signal_reasoning || null,
-      branches_found:   analysis?.branches_found || null,
-      branches_source:  krsData?.branchesCount != null ? 'krs' : (branchesCount ? 'web' : 'none'),
     };
 
     // 5. Zapis do DB
@@ -1716,32 +1629,34 @@ async function enrichOne(prospectId, opts = {}) {
     await db.query(
       `UPDATE prospect_companies SET
         company_name           = COALESCE(company_name, $2),
-        krs_number             = COALESCE($3, krs_number),
-        legal_form             = $4,
-        registered_address     = $5,
-        registration_date      = $6,
-        branches_count         = $7,
-        branches_scope         = $8,
-        krs_website            = $9,
-        website_url            = $10,
-        travel_potential_score = $11,
-        travel_signals         = $12,
-        travel_scope           = $13,
-        field_teams_likely     = $14,
-        ai_summary             = $15,
-        key_contacts           = $16,
-        enrichment_log         = $17,
-        fb_about               = COALESCE($18, fb_about),
-        fb_category            = COALESCE($19, fb_category),
-        fb_fan_count           = COALESCE($20, fb_fan_count),
-        linkedin_url           = COALESCE($21, linkedin_url),
-        linkedin_status        = COALESCE($22, linkedin_status),
-        website_status         = COALESCE($23, website_status),
-        gus_regon              = COALESCE($24, gus_regon),
-        gus_pkd_main           = COALESCE($25, gus_pkd_main),
-        enriched_at            = NOW(),
-        enrichment_status      = 'done',
-        enrichment_error       = NULL
+        krs_number              = COALESCE($3, krs_number),
+        legal_form               = $4,
+        registered_address       = $5,
+        registration_date        = $6,
+        branches_count           = $7,
+        branches_scope           = $8,
+        krs_website              = $9,
+        website_url              = $10,
+        icp_score                = $11,
+        icp_signals               = $12,
+        icp_gates                 = $13,
+        icp_gate_status           = $14,
+        icp_bonus_signals         = $15,
+        icp_downgrade_flags       = $16,
+        ai_summary                = $17,
+        key_contacts              = $18,
+        enrichment_log            = $19,
+        fb_about                  = COALESCE($20, fb_about),
+        fb_category               = COALESCE($21, fb_category),
+        fb_fan_count              = COALESCE($22, fb_fan_count),
+        linkedin_url              = COALESCE($23, linkedin_url),
+        linkedin_status           = COALESCE($24, linkedin_status),
+        website_status            = COALESCE($25, website_status),
+        gus_regon                 = COALESCE($26, gus_regon),
+        gus_pkd_main              = COALESCE($27, gus_pkd_main),
+        enriched_at               = NOW(),
+        enrichment_status         = 'done',
+        enrichment_error          = NULL
       WHERE id = $1`,
       [
         prospectId,
@@ -1754,10 +1669,12 @@ async function enrichOne(prospectId, opts = {}) {
         branchesScope,
         krsData?.krsWebsite || null,
         websiteUrl || null,
-        computedScore,
-        analysis?.travel_signals ? JSON.stringify(analysis.travel_signals) : null,
-        analysis?.travel_scope || null,
-        analysis?.field_teams_likely ?? null,
+        totalScore,
+        JSON.stringify(scoreResult.breakdown),
+        analysis?.gates ? JSON.stringify(analysis.gates) : null,
+        gateStatus,
+        JSON.stringify(bonusResult.breakdown),
+        JSON.stringify(downgradeFlags),
         analysis?.ai_summary || null,
         keyContacts ? JSON.stringify(keyContacts) : null,
         JSON.stringify(enrichLog),
