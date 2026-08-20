@@ -139,8 +139,8 @@ function buildFilters(q, tenantId) {
 
 function findColumnKey(rowKeys, candidates) {
   for (const c of candidates) {
-    const normCandidate = c.toLowerCase().replace(/[\s\-_\.]/g, '');
-    const found = rowKeys.find(k => k.toLowerCase().trim().replace(/[\s\-_\.]/g, '') === normCandidate);
+    const normCandidate = c.toLowerCase().replace(/[\s_.-]/g, '');
+    const found = rowKeys.find(k => k.toLowerCase().trim().replace(/[\s_.-]/g, '') === normCandidate);
     if (found) return found;
   }
   return null;
@@ -149,7 +149,7 @@ function findColumnKey(rowKeys, candidates) {
 // Bezpieczna konwersja na integer — zwraca null jeśli niemożliwe
 function safeInt(val) {
   if (val === null || val === undefined || val === '') return null;
-  const s = String(val).replace(/[\s,]/g, '').replace(/[^0-9\-]/g, '');
+  const s = String(val).replace(/[\s,]/g, '').replace(/[^0-9-]/g, '');
   const n = parseInt(s, 10);
   return isNaN(n) ? null : n;
 }
@@ -346,7 +346,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
       // Revenue: może być z separatorami tysięcy (spacje lub kropki)
       const revenueRaw = getStr(row, revenueKey);
       const annualRevenue = revenueRaw
-        ? safeInt(revenueRaw.replace(/[\s\.]/g, '').replace(',', '.'))
+        ? safeInt(revenueRaw.replace(/[\s.]/g, '').replace(',', '.'))
         : null;
       const foundingYear   = safeYear(getStr(row, yearKey));
       const companySize    = getStr(row, sizeKey);
@@ -365,7 +365,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
       try {
         const result = await db.query(
           `INSERT INTO prospect_companies (
-             tenant_id, nip, regon, company_name, krs_number, website_url,
+             tenant_id, nip, regon, company_name, krs_number, website_url, website_source,
              employment_count, annual_revenue, founding_year, company_size,
              industry, company_profile,
              decision_maker_name, decision_maker_title, decision_maker_dept,
@@ -375,7 +375,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
              linkedin_url, decision_maker_linkedin, decision_maker_facebook,
              group_id, imported_by
            )
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+           VALUES ($1,$2,$3,$4,$5,$6,$29,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
            ON CONFLICT (tenant_id, nip) DO UPDATE SET
              regon                = COALESCE(EXCLUDED.regon,         prospect_companies.regon),
              company_name         = COALESCE(EXCLUDED.company_name,  prospect_companies.company_name),
@@ -383,6 +383,15 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
              website_url          = CASE
                WHEN EXCLUDED.website_url IS NOT NULL THEN EXCLUDED.website_url
                ELSE prospect_companies.website_url
+             END,
+             -- website_source: tylko gdy import faktycznie NIESIE nowy URL i
+             -- rekord dotąd go nie miał — nie nadpisuj pochodzenia istniejącego
+             -- URL-a (mógł być ustalony przez resolver/ręczną korektę po
+             -- pierwszym imporcie — patrz migracja 0269, decyzja 20.08).
+             website_source       = CASE
+               WHEN EXCLUDED.website_url IS NOT NULL AND prospect_companies.website_url IS NULL
+               THEN EXCLUDED.website_source
+               ELSE prospect_companies.website_source
              END,
              employment_count     = COALESCE(EXCLUDED.employment_count,    prospect_companies.employment_count),
              annual_revenue       = COALESCE(EXCLUDED.annual_revenue,      prospect_companies.annual_revenue),
@@ -426,6 +435,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
             sourceDatabase, facebookUrl,
             linkedinUrl, dmLinkedin, dmFacebook,
             importerGroupId, req.user.id,
+            websiteUrl ? 'csv_import' : null,
           ]
         );
         if (result.rows[0]?.inserted) added++;
@@ -528,6 +538,7 @@ router.get('/',
       const total = dataResult.rows[0]?.total_count || 0;
       const grand_total = parseInt(grandTotalResult.rows[0]?.count || '0');
       res.json({
+        // eslint-disable-next-line no-unused-vars -- destructure-to-discard, total_count is intentionally excluded from rest
         rows: dataResult.rows.map(r => { const { total_count, ...rest } = r; return rest; }),
         total,
         grand_total,
@@ -715,6 +726,10 @@ router.post('/:id/re-process',
            branches_scope         = NULL,
            krs_website            = NULL,
            website_url            = COALESCE($2, website_url),
+           -- Admin jawnie wpisał/poprawił URL w tym request'cie — to ludzka
+           -- weryfikacja, trwałe źródło 'manual_correction' (nigdy automatycznie
+           -- nadpisywane później, patrz enrichOne/migracja 0269, decyzja 20.08).
+           website_source          = CASE WHEN $2::TEXT IS NOT NULL THEN 'manual_correction' ELSE website_source END,
            nip                    = COALESCE($3::VARCHAR, nip),
            linkedin_url           = COALESCE($4, linkedin_url),
            pracuj_url              = COALESCE($5, pracuj_url),

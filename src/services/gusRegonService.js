@@ -67,7 +67,7 @@ function extractEnvelope(raw) {
 }
 
 function xmlVal(xml, tag) {
-  const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)<\/${tag}>`, 'i'));
+  const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, 'i'));
   return m ? m[1].trim() : '';
 }
 
@@ -125,10 +125,18 @@ async function daneSzukaj(paramXml, retry = true) {
   let match;
   while ((match = re.exec(inner)) !== null && results.length < 10) {
     results.push({
-      nip:   xmlVal(match[1], 'Nip'),
-      regon: xmlVal(match[1], 'Regon'),
-      name:  xmlVal(match[1], 'Nazwa'),
-      type:  xmlVal(match[1], 'Typ'),  // P=osoba prawna, F=osoba fizyczna, LP/LF=jednostka lokalna
+      nip:      xmlVal(match[1], 'Nip'),
+      regon:    xmlVal(match[1], 'Regon'),
+      name:     xmlVal(match[1], 'Nazwa'),
+      type:     xmlVal(match[1], 'Typ'),  // P=osoba prawna, F=osoba fizyczna, LP/LF=jednostka lokalna
+      // Adres rejestrowy — dostępny w odpowiedzi BIR1.1, wcześniej nie
+      // wyciągany (decyzja 20.08: KRS API (ms.gov.pl) jest w praktyce
+      // niedostępne — findKrsNumberByNip to no-op, legacy endpoint zwraca
+      // 400 — więc to jedyne realnie działające źródło twardego adresu
+      // rejestrowego do weryfikacji tożsamości domeny).
+      city:     xmlVal(match[1], 'Miejscowosc'),
+      postcode: xmlVal(match[1], 'KodPocztowy'),
+      street:   xmlVal(match[1], 'Ulica').replace(/^(ul\.|al\.|pl\.)\s*/i, '').trim(),
     });
   }
   return results;
@@ -214,6 +222,9 @@ async function getCompanyData(nip) {
   return {
     nip:          clean,
     regon:        basic.regon,
+    city:         basic.city     || null,
+    postcode:     basic.postcode || null,
+    street:       basic.street   || null,
     officialName: basic.name,
     entityType:   basic.type,
     pkdCodes,

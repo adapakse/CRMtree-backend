@@ -56,12 +56,187 @@ const LINK_SCORES = [
   // "realizacje"/"referencje" — dowody projektowe, wspierają sygnały przetargów
   // i złożonej sprzedaży (case studies, referencje od klientów/instytucji).
   { pattern: /realizacj|referencj|case.stud/i, score: 6 },
+  // Sklep/e-commerce B2B i zapytania ofertowe (RFQ) — dodane po korektach
+  // 20.08 (Wagner-service "Sklep internetowy" i Kigema "zapytanie ofertowe"
+  // nigdy nie trafiały do kandydatów, bo nie było dla nich żadnego wzorca).
+  { pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout|zapytani\w*.?ofert|request.?for.?quot|\brfq\b/i, score: 8 },
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────
 
 function normalizeNip(nip) {
   return String(nip || '').replace(/\D/g, '');
+}
+
+// Szuka 10 cyfr NIP-u faktycznie występujących razem w tekście (dopuszczając
+// typowe separatory: spacja/myślnik/kropka), np. "766-000-65-67". NIE sklejamy
+// wszystkich cyfr strony w jeden ciąg do wyszukania podciągu — na dużej stronie
+// (dużo telefonów/cen/dat) to dawało fałszywe trafienia w testach.
+function nipFoundInText(nip, text) {
+  const normalizedNip = normalizeNip(nip);
+  if (normalizedNip.length !== 10 || !text) return false;
+  const nipPattern = normalizedNip.split('').join('[\\s.-]?');
+  return new RegExp(nipPattern).test(text);
+}
+
+// KRS/REGON to gołe ciągi cyfr — bez etykiety w pobliżu łatwo o fałszywe
+// trafienie (numer telefonu, kod produktu, rok+coś). Wymagamy słowa
+// "KRS"/"REGON" w promieniu ~30 znaków PRZED znalezionym numerem (decyzja
+// 20.08, twardsza weryfikacja po regresji KZN/Wagner-service).
+function krsFoundInText(krsNumber, text) {
+  const digits = String(krsNumber || '').replace(/\D/g, '').replace(/^0+/, '');
+  if (digits.length < 6 || !text) return false; // KRS ma 10 cyfr, ale wiodące zera bywają pomijane w treści
+  const pattern = digits.split('').join('[\\s.-]?');
+  return new RegExp(`krs[^\\d]{0,30}0*${pattern}`, 'i').test(text);
+}
+
+function regonFoundInText(regon, text) {
+  const digits = String(regon || '').replace(/\D/g, '');
+  if ((digits.length !== 9 && digits.length !== 14) || !text) return false;
+  const pattern = digits.split('').join('[\\s.-]?');
+  return new RegExp(`regon[^\\d]{0,30}${pattern}`, 'i').test(text);
+}
+
+// ── Weryfikacja tożsamości domeny — drugi poziom, gdy NIP/KRS/REGON nie ──
+// występują w tekście (decyzja 20.08, po odkryciu że 7/13 sprawdzonych
+// POPRAWNYCH domen w ogóle nie publikuje NIP-u na stronie marketingowej —
+// samo rozszerzenie nipFoundInText nie wystarczało). Wymagamy DWÓCH
+// niezależnych sygnałów: dopasowania nazwy w title/h1 ORAZ dokładnego
+// elementu adresu (ulica lub kod pocztowy) **pochodzącego z danych
+// rejestrowych KRS**, znalezionego w treści strony. Samo miasto NIE
+// wystarcza (decyzja 20.08, druga tura twardnienia — KZN→kolejowe.edu.pl i
+// Wagner-service→wagnerservice.pl obie leżą w tym samym mieście co
+// prawdziwa firma i przechodziły samym dopasowaniem nazwa+miasto). Sama
+// nazwa też NIE wystarcza — zagraniczna firma o tej samej nazwie (Mirol
+// S.A., Argentyna) przeszłaby samym dopasowaniem nazwy. Zagraniczny adres
+// w bloku kontaktowym to dowód NEGATYWNY, dyskwalifikujący nawet przy
+// trafionej nazwie.
+const FOREIGN_COUNTRY_HINTS = /\b(argentina|buenos aires|c[oó]rdoba|deutschland|germany|gmbh|stra[sß]e|osterreich|austria|schweiz|switzerland|united states|\busa\b|united kingdom|france|espa[nñ]a|italia|italy)\b/i;
+
+// Wyciąga kod pocztowy i nazwę ulicy z KRS-owego registeredAddress
+// (`[ulica, nrDomu, miejscowosc, kodPocztowy].join(', ')` — patrz fetchKRS).
+// To jest jedyne dopuszczalne źródło "prawdy" dla adresu z KRS — NIE
+// zgadujemy adresu z danych CSV/importu, tylko z oficjalnego rejestru.
+function extractAddressGroundTruth(registeredAddress) {
+  if (!registeredAddress) return { postcode: null, street: null };
+  const postcodeMatch = registeredAddress.match(/\b\d{2}-\d{3}\b/);
+  const firstPart = registeredAddress.split(',')[0].trim();
+  // "ul./al./pl." to szum przy dopasowaniu tekstowym — zostaw samą nazwę.
+  const street = firstPart.replace(/^(ul\.|al\.|pl\.|ulica|aleja|plac)\s*/i, '').trim();
+  return {
+    postcode: postcodeMatch ? postcodeMatch[0] : null,
+    street: street.length >= 4 ? street : null,
+  };
+}
+
+// Drugie, niezależne źródło twardego adresu rejestrowego: GUS REGON BIR1.1
+// (decyzja 20.08, druga tura hardeningu). W praktyce jedyne REALNIE
+// działające źródło — KRS API (ms.gov.pl) używane przez fetchKRS() jest
+// obecnie niedostępne dla lookupu po samym NIP (findKrsNumberByNip to
+// świadomy no-op, legacy endpoint zwraca 400, patrz komentarz przy
+// findKrsNumberByNip) i zwraca dane tylko gdy prospect ma ręcznie/z CSV
+// podany krs_number. Bez tej zmiany identitySecondarySignal nigdy by nie
+// znalazł adresu dla firm bez krs_number w bazie — a to była większość
+// sprawdzanych rekordów (Berlinerluft, B2 Studio, KZN, Wagner-service...).
+function extractGusAddressGroundTruth(gusData) {
+  if (!gusData) return { postcode: null, street: null };
+  const postcode = gusData.postcode && /^\d{2}-\d{3}$/.test(gusData.postcode) ? gusData.postcode : null;
+  const street = gusData.street && gusData.street.length >= 4 ? gusData.street : null;
+  return { postcode, street };
+}
+
+// Blok kontaktowy/stopka — jedyne miejsce, gdzie zagraniczny adres liczy się
+// jako dowód NEGATYWNY (decyzja 20.08, po regresji Berlinerluft: polska
+// spółka-córka wspominająca w treści niemiecką spółkę-matkę GmbH była błędnie
+// blokowana, bo poprzednia wersja skanowała CAŁY tekst pod kątem
+// FOREIGN_COUNTRY_HINTS — samo wystąpienie "GmbH" w opisie grupy kapitałowej
+// wystarczało do odrzucenia poprawnej domeny). Ograniczamy skan do fragmentu
+// wokół danych kontaktowych tej firmy (adres/siedziba/kontakt), nie całej strony.
+function extractContactBlockText(text) {
+  if (!text) return '';
+  const markers = /(kontakt|siedziba|adres|nasz adres|dane (?:firmy|rejestrowe)|dane kontaktowe)/gi;
+  const blocks = [];
+  let m;
+  while ((m = markers.exec(text))) {
+    blocks.push(text.slice(m.index, m.index + 300));
+  }
+  return blocks.join(' ');
+}
+
+// Dopasowuje najbardziej charakterystyczne (pierwsze) słowo nazwy firmy do
+// title/h1 strony — ten sam wzorzec "pierwsze słowo = człon marki" co
+// guessDomainsFromName() używa do zgadywania domen.
+function nameTokensMatch(companyName, titleText) {
+  if (!companyName || !titleText) return false;
+  const norm  = normalizeName(companyName);
+  const words = norm.split(/[^a-z0-9]+/).filter(w => w.length >= 3);
+  if (!words.length) return false;
+  const firstWord  = words[0];
+  const titleNorm  = normalizeName(titleText);
+  return titleNorm.includes(firstWord);
+}
+
+// Drugi, niezależny od nazwy sygnał tożsamości — TYLKO dane z oficjalnego
+// rejestru KRS (ulica/kod pocztowy z registeredAddress), nigdy samo miasto
+// (decyzja 20.08, druga tura: miasto samo w sobie nie odróżnia prawdziwej
+// firmy od innej instytucji w tym samym mieście — patrz KZN/Wagner-service).
+function identitySecondarySignal(text, { krsData, gusData }) {
+  if (!text) return { positive: false, negative: false };
+  const fromKrs = extractAddressGroundTruth(krsData?.registeredAddress);
+  const fromGus = extractGusAddressGroundTruth(gusData);
+  const postcode = fromKrs.postcode || fromGus.postcode;
+  const street   = fromKrs.street   || fromGus.street;
+  const postcodeHit = !!postcode && text.includes(postcode);
+  const streetHit   = !!street &&
+    new RegExp(`\\b${street.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text);
+  // Zagraniczny adres liczy się jako negatywny TYLKO gdy pojawia się w bloku
+  // kontaktowym/adresowym tej firmy — nie gdy strona po prostu WSPOMINA
+  // zagraniczną spółkę-matkę/grupę kapitałową w treści opisowej (regresja
+  // Berlinerluft 20.08: polska spółka-córka opisująca niemiecki koncern-matkę
+  // była błędnie odrzucana).
+  const foreignHit = FOREIGN_COUNTRY_HINTS.test(extractContactBlockText(text));
+  return { positive: !!(postcodeHit || streetHit), negative: foreignHit, postcodeHit, streetHit, foreignHit };
+}
+
+// Decyduje czy domena (zgadnięta/wyszukana LUB ręcznie podana z CSV, gdy
+// wywołana z tego kontekstu) faktycznie należy do analizowanej firmy.
+//
+// Mocny dowód (wystarcza sam): NIP, KRS lub REGON znalezione w treści strony.
+// Słaby dowód (wymaga OBU): nazwa w title/h1 ORAZ dokładny element adresu
+// (ulica/kod pocztowy) z danych rejestrowych KRS lub GUS. Samo miasto nie wystarcza.
+function checkDomainIdentity({ nip, text, title, company, krsData, gusData }) {
+  if (nipFoundInText(nip, text))                    return { verified: true, reason: 'nip_match' };
+  if (krsFoundInText(krsData?.krsNumber, text))     return { verified: true, reason: 'krs_match' };
+  if (regonFoundInText(gusData?.regon, text))       return { verified: true, reason: 'regon_match' };
+  const nameHit   = nameTokensMatch(company.company_name, title);
+  const secondary = identitySecondarySignal(text, { krsData, gusData });
+  if (secondary.negative) return { verified: false, reason: 'foreign_address_conflict', nameHit, secondary };
+  if (nameHit && secondary.positive) return { verified: true, reason: 'name_plus_registry_address', nameHit, secondary };
+  return { verified: false, reason: 'insufficient_evidence', nameHit, secondary };
+}
+
+// Wykrywa strony-parkingi/domeny-na-sprzedaż — te zwracają HTTP 200 (więc nie
+// łapie ich odrzucanie 404), ale treść nie ma nic wspólnego z firmą (case: IMW
+// Inżynieria Maszyn Wałcz → imw.pl, giełda domen). Sprawdzane na surowym HTML
+// strony głównej PRZED zaufaniem domenie.
+// Rozszerzone 20.08 (druga tura) po tym jak imw.pl przeszedł niezauważony:
+// przekierowuje na premium.pl (polska giełda domen), treść zawiera "oferta
+// sprzedaży domeny"/"dzierżawa domeny", żadna z nich nie była wcześniej
+// łapana. Dodane też ogólne "gie[lł]da domen" i "aftermarket" (częste u
+// polskich pośredników sprzedaży domen).
+const DOMAIN_PARKING_HINTS = /domain (?:is )?for sale|this domain is parked|buy this domain|domena (?:jest )?na sprzeda[zż]|kup t[eę] domen[eę]|domena wystawiona na sprzeda[zż]|ofert[ay] sprzeda[zż]y domen|dzier[zż]awa domen|gie[lł]da domen|park(?:owana|ing) domen|sedoparking|dan\.com|godaddy.{0,20}(?:auction|park)|bodis\.com|afternic|aftermarket/i;
+
+// Znane hosty giełd/parkingów domen — sprawdzane na FINALNYM (po redirectach)
+// hostname, niezależnie od treści (case: imw.pl → 301 → premium.pl/imw.pl,
+// treść samej strony mogłaby się zmienić, host marketplace'u nie).
+const KNOWN_DOMAIN_MARKETPLACE_HOSTS = /(^|\.)(sedo\.com|dan\.com|afternic\.com|bodis\.com|premium\.pl|aftermarket\.pl|domeny\.pl|oxydomains\.com|godaddy\.com)$/i;
+
+function isDomainMarketplaceHost(hostname) {
+  return !!hostname && KNOWN_DOMAIN_MARKETPLACE_HOSTS.test(hostname);
+}
+
+function isDomainParkingPage(html) {
+  return !!html && DOMAIN_PARKING_HINTS.test(html.slice(0, 20_000));
 }
 
 function sleep(ms) {
@@ -152,13 +327,16 @@ function calcIcpScore(signals) {
 // tanie, wynikają z danych które i tak już mamy. Podmiot publiczny i świeże
 // duże wdrożenie wymagałyby nowego sygnału ocenianego przez AI — pominięte
 // świadomie na tym etapie.
-function calcIcpDowngradeFlags(websiteUrl, websiteStatus) {
+function calcIcpDowngradeFlags(websiteUrl, websiteStatus, identityUnconfirmed = false) {
   const flags = [];
   if (websiteUrl && !/^https:\/\//i.test(websiteUrl)) {
     flags.push({ id: 'brak_https', label: 'Strona bez https' });
   }
   if (!websiteUrl || websiteStatus === 'blocked' || websiteStatus === 'failed' || websiteStatus === 'not_found') {
     flags.push({ id: 'martwa_strona', label: 'Nie znaleziono/nie udało się wczytać strony' });
+  }
+  if (identityUnconfirmed) {
+    flags.push({ id: 'domena_niepotwierdzona', label: 'Nie potwierdzono, że to strona tej firmy (NIP/nazwa nie znalezione)' });
   }
   return flags;
 }
@@ -436,7 +614,7 @@ function guessDomainsFromName(name) {
 async function verifyUrl(url) {
   for (const method of ['head', 'get']) {
     try {
-      const resp = await axios[method](url, {
+      await axios[method](url, {
         timeout: 6_000, maxRedirects: 4,
         // Akceptuj 403/406/429 — strona istnieje, ale blokuje boty (WAF/Cloudflare)
         validateStatus: s => s < 400 || s === 403 || s === 406 || s === 429,
@@ -716,6 +894,40 @@ function isSameHost(a, b) {
   return a.replace(/^www\./, '') === b.replace(/^www\./, '');
 }
 
+// Wyciąga "domenę rejestrowalną" — uproszczone (bez pełnej public suffix
+// list), ale wystarczające dla polskich domen firmowych: ostatnie dwa człony,
+// albo trzy dla popularnych złożonych TLD (.com.pl itp.).
+const COMPOUND_TLDS = new Set(['com.pl', 'org.pl', 'net.pl', 'edu.pl', 'gov.pl', 'co.uk', 'com.de']);
+function registrableDomain(hostname) {
+  const parts = hostname.toLowerCase().split('.');
+  if (parts.length <= 2) return hostname.toLowerCase();
+  const lastTwo = parts.slice(-2).join('.');
+  if (COMPOUND_TLDS.has(lastTwo) && parts.length >= 3) return parts.slice(-3).join('.');
+  return lastTwo;
+}
+
+// Subdomeny komercyjnie istotne (portal B2B, sklep, konto klienta) — jedyne,
+// które crawler ma prawo odwiedzić poza głównym hostem. Bez tego ograniczenia
+// crawler łaziłby po całej organizacji (intranet, dokumentacja, itd. na innych
+// subdomenach tej samej domeny rejestrowalnej). Case: Vents Group — "Portal
+// B2B" żył na b2b.vents-group.pl i był całkowicie niewidoczny, bo
+// isSameHost() odrzucał każdą subdomenę jako "obcy host" (20.08).
+const RELEVANT_SUBDOMAIN_PATTERN = /^(b2b|shop|sklep|portal|konto|account|store|ecommerce|zamowienia|orders)\./i;
+
+// candidateHostname jest dopuszczony gdy: to ten sam host (jak wcześniej),
+// LUB to inna subdomena tej samej domeny rejestrowalnej ORAZ (prefiks
+// subdomeny sugeruje coś komercyjnie istotnego, LUB anchor/path linku do niej
+// wprost o tym mówi — np. "Portal B2B" linkujący na subdomenę bez oczywistego
+// prefiksu w nazwie).
+function isRelatedHost(candidateHostname, baseHostname, anchorAndPath = '') {
+  const cand = candidateHostname.toLowerCase();
+  const base = baseHostname.toLowerCase();
+  if (isSameHost(cand, base)) return true;
+  if (registrableDomain(cand) !== registrableDomain(base)) return false;
+  if (RELEVANT_SUBDOMAIN_PATTERN.test(cand)) return true;
+  return /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|\bb2b\b/i.test(deaccent(anchorAndPath));
+}
+
 // Wyciąga linki wewnętrzne; zwraca { path, fullHref, anchor }
 // fullHref zawiera pełny URL z właściwym hostname (po redirect), użyty do pobierania podstrony
 function extractInternalLinks($, baseHostname) {
@@ -739,11 +951,11 @@ function extractInternalLinks($, baseHostname) {
       }
     } catch { return; }
 
-    if (!isSameHost(full.hostname, baseHostname)) return;
+    const path = full.pathname.replace(/\/+$/, '') || '/';
+    if (!isRelatedHost(full.hostname, baseHostname, `${path} ${anchor}`)) return;
     if (/\.(pdf|doc|docx|xls|xlsx|jpg|jpeg|png|gif|svg|webp|mp4|zip|rar)$/i.test(full.pathname)) return;
     if (/\/(admin|panel|konto|cart|koszyk|login|logowanie|api\/|wp-admin|wp-content|wp-json)/i.test(full.pathname)) return;
 
-    const path = full.pathname.replace(/\/+$/, '') || '/';
     const fullHref = `${full.protocol}//${full.hostname}${path}`;
     links.push({ path, fullHref, anchor });
   });
@@ -827,22 +1039,76 @@ async function fetchPage(url) {
   return { html: resp.data, finalUrl };
 }
 
-// Wyciąga czytelny tekst — preferuje <main>/<article> żeby unikać nawigacji
+// Próg poniżej którego uznajemy oczyszczony tekst za "za krótki, żeby ufać
+// wybranemu kontenerowi" — patrz extractText() niżej.
+const TOO_SHORT_TEXT_THRESHOLD = 150;
+
+function cleanText(str) {
+  return str.replace(/\s+/g, ' ').replace(/(.)\1{5,}/g, '$1').trim();
+}
+
+// Wyciąga adres/nazwę firmy z JSON-LD (schema.org Organization/LocalBusiness),
+// jeśli strona go ma — ostatni fallback, gdy zarówno główny kontener jak i
+// całe body dają za mało tekstu (patrz extractText()).
+function extractJsonLdText($) {
+  const parts = [];
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const data = JSON.parse($(el).contents().text());
+      const items = Array.isArray(data) ? data : [data];
+      for (const item of items) {
+        const addr = item?.address;
+        if (addr) {
+          const addrStr = typeof addr === 'string'
+            ? addr
+            : [addr.streetAddress, addr.postalCode, addr.addressLocality].filter(Boolean).join(' ');
+          if (addrStr) parts.push(addrStr);
+        }
+        if (item?.name) parts.push(String(item.name));
+        if (item?.telephone) parts.push(String(item.telephone));
+      }
+    } catch { /* JSON-LD niepoprawny lub nie ten kształt — pomiń */ }
+  });
+  return parts.join(' ');
+}
+
+// Wyciąga czytelny tekst — preferuje <main>/<article> żeby unikać nawigacji,
+// ale z bezpiecznym fallbackiem, gdy ten kontener okaże się prawie pusty
+// (realny przypadek, 19.08: strony budowane na Elementor/page-builderach
+// często mają <main> jako pustą powłokę, a prawdziwa treść leży POZA nim w
+// DOM — wybranie "main" zamiast fallbacku na "body" ucinało wtedy stronę do
+// kilkudziesięciu znaków, tracąc np. całą sekcję adresów oddziałów).
+//
+// Nie usuwamy już całych <form>/<header>/<footer> — tylko interaktywne pola
+// formularzy (input/textarea/select/button) i iframe. Dane kontaktowe
+// (adresy, miasta, telefony) często siedzą wewnątrz <form>-a strony Kontakt
+// (sekcja z danymi obok pól) albo w <footer> — usuwanie tych tagów w całości
+// razem z widocznym tekstem było zbyt agresywne.
 function extractText($) {
-  $('script, style, noscript, iframe, form, nav, header, footer').remove();
+  $('script, style, noscript, iframe, nav').remove();
+  $('form input, form textarea, form select, form button, form label').remove();
   $('[class*="cookie"], [class*="Cookie"], [id*="cookie"], [id*="Cookie"]').remove();
   $('[class*="popup"], [class*="Popup"], [class*="modal"], [class*="Modal"]').remove();
   $('[aria-hidden="true"]').remove();
 
-  // Preferuj semantyczny kontener z treścią; fallback na body
   const main = $('main, [role="main"], article, #content, #main, .main-content, .page-content').first();
-  const src  = main.length ? main : $('body');
+  const mainText = main.length ? cleanText(main.text()) : '';
 
-  return src.text()
-    .replace(/\s+/g, ' ')
-    .replace(/(.)\1{5,}/g, '$1')
-    .trim()
-    .slice(0, 6000);
+  if (mainText.length >= TOO_SHORT_TEXT_THRESHOLD) {
+    return mainText.slice(0, 6000);
+  }
+
+  // Fallback 1: main za krótki (albo brak) — spróbuj całego body.
+  const bodyText = cleanText($('body').text());
+  if (bodyText.length >= TOO_SHORT_TEXT_THRESHOLD) {
+    return bodyText.slice(0, 6000);
+  }
+
+  // Fallback 2: nawet body za krótkie — ostatnia deska ratunku, JSON-LD
+  // (Organization/LocalBusiness ze schema.org, jeśli strona go ma).
+  const jsonLdText = cleanText(extractJsonLdText($));
+  const combined = [bodyText, jsonLdText].filter(Boolean).join(' ');
+  return combined.slice(0, 6000);
 }
 
 // Wyciąga emaile i telefony ze strony: mailto:/tel: linki, Schema.org, regex na tekście
@@ -857,7 +1123,7 @@ function extractContactsFromHtml(html, $) {
       const e = mailM[1].toLowerCase().trim();
       if (e.includes('@') && e.length < 100) emails.add(e);
     }
-    const telM = href.match(/^tel:([\d+\s()\-]+)/i);
+    const telM = href.match(/^tel:([\d+\s()-]+)/i);
     if (telM) {
       const p = telM[1].trim();
       if (p.replace(/\D/g, '').length >= 9) phones.add(p);
@@ -879,7 +1145,7 @@ function extractContactsFromHtml(html, $) {
   });
 
   const textForRegex = $('body').text();
-  for (const m of textForRegex.matchAll(/[\w.%+\-]+@[\w.\-]+\.[a-z]{2,}/gi)) {
+  for (const m of textForRegex.matchAll(/[\w.%+-]+@[\w.-]+\.[a-z]{2,}/gi)) {
     const e = m[0].toLowerCase();
     if (!e.includes('..') && e.length < 100) emails.add(e);
   }
@@ -928,20 +1194,183 @@ function mergeContacts(aiContacts, emails, phones) {
   return result.slice(0, 25);
 }
 
+// ── Niezawodność pobierania podstron (decyzja 19.08, po diagnozie ARPOL) ──
+// Sekwencyjne (nigdy równoległe do tego samego hosta — pętle poniżej to
+// for...await), z jitterem między próbami i retry+exponential backoff dla
+// 403/429/5xx/timeoutów/podejrzanie krótkiej odpowiedzi. Realny przypadek:
+// oferta pracy ARPOL "klientów kluczowych" była poprawnym kandydatem i
+// działała w izolacji, ale konsekwentnie znikała w pełnym crawlu (prawdopodobny
+// throttling serwera po kilku żądaniach pod rząd) — bez retry i tak ginęła
+// bez śladu w logach.
+const SUSPICIOUSLY_SHORT_HTML = 500; // bajtów — poniżej zakładamy błąd/pustą stronę
+
+async function sleepJittered(baseMs) {
+  const jitter = baseMs * (0.5 + Math.random()); // 0.5x-1.5x baseMs
+  return sleep(Math.round(jitter));
+}
+
+async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
+  let lastStatus = null;
+  let lastError = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) await sleepJittered(500 * Math.pow(2, attempt - 1)); // 500ms, 1000ms, ...
+    try {
+      const resp = await axios.get(url, {
+        timeout: 10_000,
+        maxRedirects: 5,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept-Language': 'pl,en;q=0.9',
+          'Accept': 'text/html,application/xhtml+xml,*/*',
+          'Accept-Encoding': 'gzip, deflate, br',
+        },
+        validateStatus: () => true, // sami decydujemy, co retry'ować
+      });
+      lastStatus = resp.status;
+      const finalUrl = resp.request?.res?.responseUrl || url;
+
+      // 404 = strona faktycznie nie istnieje pod tym URL-em — nie ma sensu
+      // retry'ować (nie jest to throttling/błąd przejściowy jak 403/429/5xx),
+      // i treść odpowiedzi (zwykle generyczna strona "nie znaleziono") NIGDY
+      // nie może być traktowana jak prawdziwa treść podstrony. Case: Oqema —
+      // 5 kandydatów zwracało HTTP 404 z identyczną, generyczną treścią,
+      // która i tak trafiała do modelu jako rzekoma treść realnej podstrony.
+      if (resp.status === 404) {
+        return { html: '', finalUrl, status: 404, attempts: attempt + 1 };
+      }
+
+      if ([403, 429, 500, 502, 503, 504].includes(resp.status)) {
+        if (attempt < maxRetries) {
+          const retryAfter = resp.headers['retry-after'];
+          const retryAfterMs = retryAfter && /^\d+$/.test(retryAfter) ? parseInt(retryAfter, 10) * 1000 : 0;
+          if (retryAfterMs > 0) await sleep(retryAfterMs);
+          continue;
+        }
+        return { html: '', finalUrl, status: resp.status, attempts: attempt + 1 };
+      }
+
+      const ct = resp.headers['content-type'] || '';
+      if (!ct.includes('html')) {
+        return { html: '', finalUrl, status: resp.status, attempts: attempt + 1 };
+      }
+
+      const html = resp.data;
+      if (typeof html === 'string' && html.length < SUSPICIOUSLY_SHORT_HTML && attempt < maxRetries) {
+        continue;
+      }
+      return { html, finalUrl, status: resp.status, attempts: attempt + 1 };
+    } catch (err) {
+      lastError = err;
+      if (attempt >= maxRetries) {
+        return { html: '', finalUrl: url, status: null, attempts: attempt + 1, error: err.message };
+      }
+    }
+  }
+  return { html: '', finalUrl: url, status: lastStatus, attempts: maxRetries + 1, error: lastError?.message };
+}
+
+// ── Kategorie treści + budżet znaków (decyzja 19.08) ─────────────────────
+// Zamiast dokładać całe strony wg rankingu aż do wyczerpania limitu 12000
+// znaków (przez co np. newsowa strona "spotkanie partnerów 2025" potrafiła
+// wypchnąć /kontakt czy realną ofertę pracy) — rezerwujemy budżet per
+// kategoria z góry, w kolejności priorytetu, zanim cokolwiek "nadwyżkowego"
+// dostanie resztę miejsca.
+const CONTENT_CATEGORIES = [
+  { id: 'kontakt_oddzialy', reserved: 3000, pattern: /kontakt|contact|oddzia[lł]|placow|lokalizacj|biur[ao]|adres|gdzie.jestesmy/i },
+  { id: 'o_nas_zespol',     reserved: 3000, pattern: /o[.-]?nas|o[.-]?firmie|about|zesp[oó][lł]|team|kim.jestesmy|historia/i },
+  { id: 'praca',            reserved: 2500, pattern: /praca|kariera|jobs|career|rekrutacj|dolacz|join/i },
+  { id: 'partnerzy',        reserved: 1500, pattern: /partner|dealer|dystrybutor|distributor/i },
+  // Dodane po korektach 20.08 — bez zarezerwowanego budżetu strona sklepu
+  // (Wagner-service) była wypychana przez ogólną treść "oferta".
+  { id: 'sklep_b2b',        reserved: 1500, pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout/i },
+  { id: 'oferta',           reserved: 2000, pattern: /oferta|us[lł]ug|produkt|rozwiazani|solution|service|zapytani\w*.?ofert|request.?for.?quot|\brfq\b/i },
+];
+const PER_PAGE_CHAR_CAP = 3000;
+
+// Frazy związane z ocenianymi sygnałami ICP — strony/fragmenty, które je
+// zawierają, są preferowane w obrębie tej samej kategorii (patrz
+// selectWithinBudget()), zamiast polegać wyłącznie na randze linku.
+const SIGNAL_KEYWORDS = /dzia[lł] handlow|dedykowan|opiekun|key account|klient\w* kluczow|indywidualn\w* wycen|zapytaj o ofert|um[oó]w demo|konsultacj|zosta[nń] partnerem|sie[cć] dealer|realizacj|referencj|przetarg|zam[oó]wien\w* publiczn|sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout|zapytani\w*.?ofert|request.?for.?quot|\brfq\b/i;
+
+function categorizePage(path, anchor) {
+  const hay = `${path} ${anchor || ''}`.toLowerCase();
+  for (const cat of CONTENT_CATEGORIES) if (cat.pattern.test(hay)) return cat.id;
+  return 'other';
+}
+
+// Rozdziela zebrane strony na budżet znaków: najpierw rezerwacja per
+// kategoria (w kolejności priorytetu), potem reszta budżetu dla nadwyżki
+// (np. newsy) wg rangi linku. Zwraca finalnie wybrane strony (przycięte do
+// limitu) + zbiór ścieżek, które się zmieściły — reszta trafia do
+// diagnostyki jako reason:'content_limit'.
+function selectWithinBudget(pages, totalLimit) {
+  const byCategory = new Map();
+  for (const cat of CONTENT_CATEGORIES) byCategory.set(cat.id, []);
+  byCategory.set('other', []);
+  for (const p of pages) byCategory.get(p.category).push({ ...p, text: p.text.slice(0, PER_PAGE_CHAR_CAP) });
+
+  for (const [, list] of byCategory) {
+    list.sort((a, b) => {
+      const aKw = SIGNAL_KEYWORDS.test(a.text) ? 1 : 0;
+      const bKw = SIGNAL_KEYWORDS.test(b.text) ? 1 : 0;
+      if (aKw !== bKw) return bKw - aKw;
+      return b.score - a.score;
+    });
+  }
+
+  const selected = [];
+  const includedPaths = new Set();
+  let used = 0;
+
+  for (const cat of CONTENT_CATEGORIES) {
+    let catUsed = 0;
+    for (const p of byCategory.get(cat.id)) {
+      if (catUsed >= cat.reserved || used >= totalLimit) break;
+      const room = Math.min(p.text.length, cat.reserved - catUsed, totalLimit - used);
+      if (room <= 0) break;
+      selected.push({ ...p, text: p.text.slice(0, room) });
+      includedPaths.add(p.path);
+      catUsed += room;
+      used += room;
+    }
+  }
+
+  const leftovers = pages
+    .filter(p => !includedPaths.has(p.path))
+    .map(p => ({ ...p, text: p.text.slice(0, PER_PAGE_CHAR_CAP) }))
+    .sort((a, b) => b.score - a.score);
+
+  for (const p of leftovers) {
+    if (used >= totalLimit) break;
+    const room = Math.min(p.text.length, totalLimit - used);
+    if (room <= 0) break;
+    selected.push({ ...p, text: p.text.slice(0, room) });
+    includedPaths.add(p.path);
+    used += room;
+  }
+
+  return { selected, includedPaths, used };
+}
+
 // Główna funkcja scrapingu — dynamiczna mapa strony
-// Zwraca { text: string, contacts: { emails: string[], phones: string[] } }
+// Zwraca { text: string, contacts: {...}, diagnostics: [...] }
 // Kontakty zbierane są przy okazji już-pobieranych stron — zero dodatkowych requestów
+// diagnostics: per-kandydat {url, attempt, http_status, raw_length, extracted_length, included, reason}
+// — patrz decyzja 19.08: żadna strona nie może "znikać" bez śladu w logach.
 async function scrapeWebsite(baseUrl) {
   const base = baseUrl.replace(/\/$/, '');
   let baseHostname;
   try {
     baseHostname = new URL(base).hostname;
-  } catch { return { text: '', contacts: { emails: [], phones: [] } }; }
+  } catch { return { text: '', contacts: { emails: [], phones: [] }, diagnostics: [], identity: { title: '', h1: '' } }; }
 
-  const texts     = [];
-  const fetched   = new Set();
-  const allEmails = new Set();
-  const allPhones = new Set();
+  const fetched     = new Set();
+  const allEmails    = new Set();
+  const allPhones    = new Set();
+  const diagnostics  = [];
+  const fetchedPages = []; // { path, anchor, score, text, category, label }
+  let identityTitle = '';
+  let identityH1    = '';
 
   function collectContacts(html, $page) {
     const { emails, phones } = extractContactsFromHtml(html, $page);
@@ -949,13 +1378,34 @@ async function scrapeWebsite(baseUrl) {
     phones.forEach(p => allPhones.add(p));
   }
 
+  function logDiag(entry) {
+    diagnostics.push(entry);
+    logger.info('[Prospect] Candidate page result', entry);
+  }
+
   // ── Krok 1: Homepage — wykryj rzeczywisty hostname po redirect ────
   let homepageHtml = '';
   let effectiveBase = base;
+  let homeSection = '';
 
   try {
     const { html, finalUrl } = await fetchPage(base);
     homepageHtml = typeof html === 'string' ? html : String(html);
+
+    // Host po redirectach sprawdzany NIEZALEŻNIE od treści (imw.pl → 301 →
+    // premium.pl — giełda domen; treść marketplace'u mogłaby się zmienić,
+    // sam fakt lądowania na znanym hoście giełdy domen nie).
+    let finalHostname = null;
+    try { finalHostname = new URL(finalUrl).hostname; } catch { /* zostaw null */ }
+
+    if (isDomainParkingPage(homepageHtml) || isDomainMarketplaceHost(finalHostname)) {
+      logger.info('[Prospect] Homepage looks like a domain-parking page — rejecting', { base, finalUrl, finalHostname });
+      return {
+        text: '', contacts: { emails: [], phones: [] },
+        diagnostics: [{ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: 0, included: false, reason: 'domain_parking' }],
+        identity: { title: '', h1: '' },
+      };
+    }
 
     try {
       const p = new URL(finalUrl);
@@ -967,22 +1417,34 @@ async function scrapeWebsite(baseUrl) {
     const $home = cheerio.load(homepageHtml);
     collectContacts(homepageHtml, $home);
 
+    // Tytuł/H1 strony głównej — wejście do weryfikacji tożsamości domeny
+    // (checkDomainIdentity w enrichOne), niezależnie od tego czy homeText
+    // okaże się wystarczająco długi.
+    identityTitle = $home('title').first().text().trim();
+    identityH1    = $home('h1').first().text().trim();
+
     const homeText = extractText($home);
     if (homeText.length > 100) {
-      texts.push(`[/ — strona główna]\n${homeText}`);
+      homeSection = `[/ — strona główna]\n${homeText}`;
+      logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: homeText.length, included: true, reason: 'included' });
     } else {
       const $meta = cheerio.load(homepageHtml);
       const title       = $meta('title').text().trim();
       const description = $meta('meta[name="description"]').attr('content')?.trim() || '';
       const ogDesc      = $meta('meta[property="og:description"]').attr('content')?.trim() || '';
       const fallback    = [title, description || ogDesc].filter(Boolean).join(' — ');
-      if (fallback.length > 10) texts.push(`[/ — strona główna (meta)]\n${fallback}`);
+      if (fallback.length > 10) {
+        homeSection = `[/ — strona główna (meta)]\n${fallback}`;
+        logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: homeText.length, included: true, reason: 'included_meta_fallback' });
+      } else {
+        logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: homeText.length, included: false, reason: 'too_short' });
+      }
     }
     fetched.add(effectiveBase);
     fetched.add(effectiveBase + '/');
   } catch (err) {
     logger.warn('[Prospect] Homepage fetch failed', { base, error: err.message });
-    return { text: '', contacts: { emails: [], phones: [] } };
+    return { text: '', contacts: { emails: [], phones: [] }, diagnostics: [{ url: base, attempt: 1, http_status: null, raw_length: 0, extracted_length: 0, included: false, reason: 'fetch_error' }], identity: { title: '', h1: '' } };
   }
 
   // ── Krok 2: Zbierz linki z nawigacji + sitemapy ──────────────────
@@ -1013,36 +1475,44 @@ async function scrapeWebsite(baseUrl) {
     top_candidates: candidates.map(c => `${c.path}(${c.score})`),
   });
 
-  // ── Krok 3: Pobierz wybrane podstrony (poziom 1) ─────────────────
+  // ── Krok 3: Pobierz wybrane podstrony (poziom 1), z retry+jitter ──
   const level2Links = new Map();
 
-  for (const { fullHref, path, anchor } of candidates) {
-    if (fetched.has(fullHref)) continue;
+  for (const { fullHref, path, anchor, score } of candidates) {
+    if (fetched.has(fullHref)) {
+      logDiag({ url: fullHref, attempt: 0, http_status: null, raw_length: 0, extracted_length: 0, included: false, reason: 'duplicate' });
+      continue;
+    }
     fetched.add(fullHref);
 
-    try {
-      const { html } = await fetchPage(fullHref);
-      const $page = cheerio.load(html);
-      collectContacts(html, $page);          // PRZED extractText — aria-hidden jeszcze istnieje
-      const text  = extractText($page);
-      if (text.length > 100) {
-        const label = anchor ? `${path} — ${anchor}` : path;
-        texts.push(`[${label}]\n${text}`);
-      }
-
-      for (const { path: p2, fullHref: h2, anchor: a2 } of extractInternalLinks($page, baseHostname)) {
-        if (fetched.has(h2) || allLinks.has(p2) || level2Links.has(p2)) continue;
-        const s2 = scoreLinkRelevance(p2, a2);
-        if (s2 >= 8) level2Links.set(p2, { path: p2, fullHref: h2, anchor: a2, score: s2 });
-      }
-    } catch (err) {
-      logger.debug('[Prospect] Subpage fetch failed', { url: fullHref, error: err.message });
+    const { html, status, attempts, error } = await fetchPageForCrawl(fullHref);
+    if (error || !html) {
+      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: status === 404 ? 'not_found' : 'fetch_error' });
+      await sleepJittered(400);
+      continue;
     }
 
-    await sleep(400);
+    const $page = cheerio.load(html);
+    collectContacts(html, $page);          // PRZED extractText — aria-hidden jeszcze istnieje
+    const text  = extractText($page);
+    if (text.length > 100) {
+      const label = anchor ? `${path} — ${anchor}` : path;
+      fetchedPages.push({ path, anchor, score, text, label, category: categorizePage(path, anchor) });
+      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: true, reason: 'included' });
+    } else {
+      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short' });
+    }
+
+    for (const { path: p2, fullHref: h2, anchor: a2 } of extractInternalLinks($page, baseHostname)) {
+      if (fetched.has(h2) || allLinks.has(p2) || level2Links.has(p2)) continue;
+      const s2 = scoreLinkRelevance(p2, a2);
+      if (s2 >= 8) level2Links.set(p2, { path: p2, fullHref: h2, anchor: a2, score: s2 });
+    }
+
+    await sleepJittered(400);
   }
 
-  // ── Krok 4: Pobierz strony poziomu 2 (maks. 6) ───────────────────
+  // ── Krok 4: Pobierz strony poziomu 2 (maks. 6), z retry+jitter ────
   const level2Candidates = Array.from(level2Links.values())
     .sort((a, b) => b.score - a.score)
     .slice(0, 6);
@@ -1054,32 +1524,55 @@ async function scrapeWebsite(baseUrl) {
     });
   }
 
-  for (const { fullHref, path, anchor } of level2Candidates) {
-    if (fetched.has(fullHref)) continue;
+  for (const { fullHref, path, anchor, score } of level2Candidates) {
+    if (fetched.has(fullHref)) {
+      logDiag({ url: fullHref, attempt: 0, http_status: null, raw_length: 0, extracted_length: 0, included: false, reason: 'duplicate' });
+      continue;
+    }
     fetched.add(fullHref);
 
-    try {
-      const { html } = await fetchPage(fullHref);
-      const $page = cheerio.load(html);
-      collectContacts(html, $page);          // PRZED extractText — aria-hidden jeszcze istnieje
-      const text  = extractText($page);
-      if (text.length > 100) {
-        const label = anchor ? `${path} — ${anchor}` : path;
-        texts.push(`[${label}]\n${text}`);
-      }
-    } catch (err) {
-      logger.debug('[Prospect] Level-2 subpage fetch failed', { url: fullHref, error: err.message });
+    const { html, status, attempts, error } = await fetchPageForCrawl(fullHref);
+    if (error || !html) {
+      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: 'fetch_error' });
+      await sleepJittered(400);
+      continue;
     }
 
-    await sleep(400);
+    const $page = cheerio.load(html);
+    collectContacts(html, $page);          // PRZED extractText — aria-hidden jeszcze istnieje
+    const text  = extractText($page);
+    if (text.length > 100) {
+      const label = anchor ? `${path} — ${anchor}` : path;
+      fetchedPages.push({ path, anchor, score, text, label, category: categorizePage(path, anchor) });
+      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: true, reason: 'included' });
+    } else {
+      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short' });
+    }
+
+    await sleepJittered(400);
   }
+
+  // ── Krok 5: Budżetowany wybór treści do limitu 12000 znaków ──────
+  const remainingBudget = Math.max(0, 12_000 - homeSection.length);
+  const { selected, includedPaths } = selectWithinBudget(fetchedPages, remainingBudget);
+
+  // Strony, które miały dobrą treść, ale nie zmieściły się w budżecie —
+  // odnotuj to wprost w diagnostyce zamiast cichego pominięcia.
+  for (const p of fetchedPages) {
+    if (!includedPaths.has(p.path)) {
+      const diag = diagnostics.find(d => d.url.includes(p.path) && d.reason === 'included');
+      if (diag) diag.reason = 'content_limit', diag.included = false;
+    }
+  }
+
+  const finalTexts = [homeSection, ...selected.map(p => `[${p.label}]\n${p.text}`)].filter(Boolean);
 
   const contacts = {
     emails: [...allEmails].filter(e => e.includes('@')),
     phones: [...allPhones].filter(p => p.replace(/\D/g, '').length >= 9),
   };
 
-  return { text: texts.join('\n\n---\n\n').slice(0, 12_000), contacts };
+  return { text: finalTexts.join('\n\n---\n\n'), contacts, diagnostics, identity: { title: identityTitle, h1: identityH1 } };
 }
 
 // ── 4. AI analysis (DeepSeek) ───────────────────────────────────────
@@ -1117,8 +1610,14 @@ SYGNAŁY (true/false) — każdy z nich to niezależne dopasowanie strukturalne 
 profilu CRMtree, nie sygnał "dobrego momentu":
 
 field_sales_team ("Dział handlowy"):
-  Główny dowód: podstrona zespołu/kontaktu z konkretnymi handlowcami, lub wprost
-  "dział handlowy"/formalna struktura organizacyjna sprzedaży.
+  Główny dowód: jawna nazwa "dział handlowy"/formalna struktura organizacyjna
+  sprzedaży, LUB podstrona zespołu/kontaktu z co najmniej 2-3 nazwanymi
+  osobami pełniącymi role stricte handlowe (przedstawiciel handlowy,
+  sprzedawca, account manager — nie zarząd).
+  NIE wystarcza: jedna nazwana osoba na stanowisku dyrektorskim
+  ("Dyrektor Handlowy", "Dyrektor ds. Handlowych") bez opisanego zespołu ani
+  innych wymienionych handlowców — to może być jedna osoba w zarządzie,
+  nie dowód na istnienie sformalizowanego działu.
   Drugorzędne wsparcie: sam adres sprzedaz@ — może być zwykłą skrzynką ogólną.
 
 custom_quote_process ("Złożony proces sprzedaży / indywidualna wycena"):
@@ -1130,15 +1629,36 @@ custom_quote_process ("Złożony proces sprzedaży / indywidualna wycena"):
 consultation_demo_needs_analysis ("Konsultacja, demo lub analiza potrzeb"):
   Sprzedaż wymaga rozmowy przed zakupem, nie samoobsługowego checkoutu — łapie też firmy
   z jawnym cennikiem, które mimo to sprzedają przez rozmowę (częste w SaaS/usługach).
-  Główny dowód: "umów demo", "zamów prezentację", "bezpłatna konsultacja", "dobór rozwiązania".
+  Główny dowód (dosłowna fraza LUB funkcjonalny odpowiednik — oba liczą się tak samo):
+    - dosłowne: "umów demo", "zamów prezentację", "bezpłatna konsultacja", "dobór rozwiązania";
+    - funkcjonalne: oferta personalizacji/dostosowania produktu do wymagań klienta ("custom",
+      "dostosowane do indywidualnych potrzeb", "prace/projekty zlecone indywidualnie", karta
+      personalizacji per klient);
+    - przypisany doradca/opiekun/dyrektor regionalny opisany jako doradztwo projektowe lub
+      techniczne (np. "Doradcy Twojego projektu"), nawet bez słowa "konsultacja";
+    - formularz zbierający szczegółowe parametry rozwiązania/zamówienia (RFQ, zapytanie
+      ofertowe z polami technicznymi), nie sam formularz kontaktowy ogólnego typu;
+    - sprzedaż oparta na indywidualnym projekcie technicznym/architektonicznym/inżynierskim,
+      gdzie analiza wymagań klienta jest jawnie opisanym etapem procesu (nie samym typem
+      działalności — patrz zastrzeżenie niżej).
+  Drugorzędne wsparcie (nie wystarcza samo): ogólne hasło "indywidualne podejście do klienta"
+  bez opisu konkretnego procesu, etapu lub osoby.
+  ZASTRZEŻENIE: nie ustawiaj true wyłącznie na podstawie branży/typu działalności ani z
+  domysłu "każdy proces projektowy wymaga analizy potrzeb" — musi być konkretny tekstowy
+  sygnał z listy powyżej, nie sama inferencja z rodzaju firmy.
   Jeśli to ten sam fragment tekstu co dowód dla custom_quote_process, oceń oba sygnały
   niezależnie, ale nie licz jednego zdania jako dwóch niezależnych, mocniejszych dowodów.
 
 distributed_sales_structure ("Rozproszona struktura sprzedaży / wiele oddziałów"):
-  Zespół lub sieć sprzedaży fizycznie rozproszona terytorialnie.
-  Główny dowód: konkretni przedstawiciele/oddziały z przypisanymi ludźmi.
-  Drugorzędne wsparcie: jednostka lokalna w KRS bez przypisanych osób (może być zwykłym
-  magazynem), wersja językowa strony (może być grzecznością wobec klienta zagranicznego).
+  Zespół lub sieć sprzedaży fizycznie rozproszona terytorialnie, WŁASNA (ta sama osoba
+  prawna, nie osobne podmioty).
+  Główny dowód: oficjalne oddziały, biura regionalne lub placówki firmy w kilku miastach —
+  to WYSTARCZA samo w sobie, nawet bez podanych nazwisk osób przy adresach. Przypisani
+  regionalni handlowcy/przedstawiciele zwiększają pewność, ale NIE są warunkiem koniecznym.
+  NIE liczy się (to nie własne oddziały tej firmy): lokalizacje realizacji/projektów u
+  klientów, siedziby klientów, adresy zewnętrznych partnerów/dealerów/niezależnych
+  dystrybutorów (nawet zagranicznych, nawet z "recognized distributor" w opisie), ani
+  spółki-siostry/spółki z tej samej grupy kapitałowej (to osobne podmioty prawne).
 
 ecommerce_b2b ("Sprzedaż e-commerce (B2B)"):
   Sklep/platforma zamówieniowa w domenie firmy z realną obsługą B2B, nie czysty
@@ -1149,19 +1669,34 @@ dedicated_customer_care_b2b ("Dedykowana opieka nad klientem B2B"):
   Dedykowany zespół posprzedażowy, ew. przypisany opiekun.
   Główny dowód: "dedykowany opiekun", "opiekun biznesowy", "Key Account Manager",
   "Customer Success", "obsługa posprzedażowa", "odnowienia umów", "stała opieka nad klientem".
+  Stanowiska/oferty pracy "Specjalista ds. klientów kluczowych", "Key Account Manager",
+  "opiekun klienta biznesowego" i ich jednoznaczne odpowiedniki to RÓWNIEŻ mocny dowód —
+  ogłoszenie o pracę na taką rolę liczy się tak samo jak opis usługi na stronie.
   Drugorzędne wsparcie: samo słowo "BOK" lub sama infolinia — może prowadzić do jednej
   osoby lub zwykłego wsparcia technicznego, nie relacyjnej opieki.
 
 partner_dealer_network ("Sieć partnerów / dealerów"):
-  Firma buduje lub rozwija sieć sprzedaży pośredniej.
+  Firma buduje lub rozwija sieć sprzedaży pośredniej przez NIEZALEŻNE, osobne podmioty
+  odsprzedające jej produkty (dealerzy, dystrybutorzy, franczyzobiorcy).
   Główny dowód: "zostań partnerem", "sieć dealerska", "dla dystrybutorów", "strefa partnera"
-  w domenie firmy.
+  w domenie firmy, LUB jawnie wymieniona lista niezależnych dystrybutorów/przedstawicieli
+  na rynkach zagranicznych (np. podstrona "distribution"/"dystrybucja", formularz dla
+  zagranicznych dystrybutorów rozpoczynających współpracę).
+  NIE liczy się: linki do spółek-sióstr/spółek z tej samej grupy kapitałowej — to nie sieć
+  odsprzedawców, tylko wewnętrzna struktura grupy — chyba że tekst wprost opisuje je jako
+  dealerów/dystrybutorów tej firmy, nie jako powiązane firmy.
 
 tender_bidding_department ("Przetargi / dział ofertowania"):
-  Firma SPRZEDAJE w przetargach — UWAGA, częsta pomyłka w drugą stronę:
-  Dowód pozytywny (true): "realizujemy zamówienia publiczne", "oferta dla sektora
-  publicznego", "doświadczenie w przetargach", "zrealizowane zamówienia",
-  "specjalista ds. przetargów/ofertowania", referencje od instytucji publicznych.
+  Firma SPRZEDAJE w przetargach — UWAGA, częsta pomyłka w obie strony:
+  Dowód pozytywny (true): jawny język udziału w postępowaniu przetargowym JAKO
+  WYKONAWCA/OFERENT — "realizujemy zamówienia publiczne", "oferta dla sektora publicznego",
+  "doświadczenie w przetargach", "specjalista ds. przetargów/ofertowania", "startujemy w
+  przetargach", "oferty przetargowe", "wygraliśmy przetarg".
+  NIE WYSTARCZA samo posiadanie klientów/zamawiających publicznych w portfolio realizacji
+  (gmina, muzeum, biblioteka, urząd jako "Inwestor:" zrealizowanego projektu) — to dowód na
+  OBSŁUGĘ sektora publicznego, nie na SPOSÓB pozyskania tego kontraktu. Bez jawnego słowa
+  "przetarg"/"zamówienie publiczne"/"PZP" użytego w kontekście SPRZEDAŻY (nie samego faktu
+  posiadania takiego klienta), zwróć false.
   NIE liczy się, nawet jeśli słowo "przetarg" występuje (to firma KUPUJĄCA, zwróć false):
   "postępowania zakupowe", "zamówienia dla dostawców", "przetargi organizowane przez nas",
   "profil nabywcy".
@@ -1509,21 +2044,32 @@ async function enrichOne(prospectId, opts = {}) {
       );
     }
 
-    // 3. Website URL — jeśli ustawiony ręcznie (przez użytkownika), pomiń odkrywanie
-    // Normalizuj URL tutaj jako safety-net (dane ze starych importów mogą być nieznormalizowane)
-    let websiteUrl, websiteMethod;
+    // 3. Website URL — jeśli już mamy zapisany URL (z importu, ręcznej korekty
+    // LUB poprzedniego przebiegu resolvera), użyj go bez ponownego szukania.
+    // Normalizuj URL tutaj jako safety-net (dane ze starych importów mogą być nieznormalizowane).
+    //
+    // website_source (kolumna, migracja 0269, decyzja 20.08) — TRWAŁE pochodzenie
+    // URL-a, NIGDY nie zmieniane przy samym ponownym użyciu istniejącego URL-a.
+    // Poprzednio każdy rerun z już-ustawionym website_url etykietował go jako
+    // 'manual' bez względu na prawdziwe pochodzenie — to nie problem samo w
+    // sobie (URL się nie zmieniał), ale uniemożliwiało odróżnienie "prawdziwy
+    // import CSV" (ufny) od "wynik resolvera z poprzedniego przebiegu"
+    // (dalej wymaga weryfikacji tożsamości przy każdym użyciu).
+    let websiteUrl, websiteMethod, websiteSource;
     if (company.website_url) {
-      websiteUrl   = normalizeWebsiteUrl(company.website_url) || company.website_url;
+      websiteUrl    = normalizeWebsiteUrl(company.website_url) || company.website_url;
       websiteMethod = 'manual';
-      enrichLog.website = { url: websiteUrl, method: websiteMethod };
+      websiteSource = company.website_source || 'legacy_unknown'; // PRESERWUJ, nie nadpisuj
+      enrichLog.website = { url: websiteUrl, method: websiteMethod, source: websiteSource };
     } else {
       const found  = await findWebsiteUrl(
         company.company_name || krsData?.companyName,
         krsData?.krsWebsite
       );
-      websiteUrl   = found.url;
+      websiteUrl    = found.url;
       websiteMethod = found.method;
-      enrichLog.website = { url: websiteUrl, method: websiteMethod };
+      websiteSource = websiteUrl ? 'resolver' : null;
+      enrichLog.website = { url: websiteUrl, method: websiteMethod, source: websiteSource };
     }
 
     // Wymaganie #2: bez URL strony WWW nie ma sensu kontynuować — chyba że mamy dane z LinkedIn
@@ -1533,7 +2079,8 @@ async function enrichOne(prospectId, opts = {}) {
       // URL się nie zmienił — pomijamy wyszukiwanie URL (DDG/Google/Bing), ale scraping i tak ruszy poniżej
       websiteUrl   = company.website_url ? (normalizeWebsiteUrl(company.website_url) || company.website_url) : null;
       websiteMethod = 'skip_url_resolution';
-      enrichLog.website = { url: websiteUrl, method: 'skip_url_resolution' };
+      websiteSource = company.website_source || 'legacy_unknown'; // PRESERWUJ
+      enrichLog.website = { url: websiteUrl, method: 'skip_url_resolution', source: websiteSource };
     } else {
       if (!websiteUrl) websiteStatus = 'not_found';
 
@@ -1543,8 +2090,13 @@ async function enrichOne(prospectId, opts = {}) {
             `UPDATE prospect_companies SET
                enrichment_status = 'no_website',
                website_status    = 'not_found',
-               enriched_at       = NOW(),
-               enrichment_log    = $2
+               icp_score          = NULL,
+               icp_signals         = NULL,
+               icp_gates            = NULL,
+               icp_bonus_signals     = NULL,
+               icp_gate_status        = 'needs_review',
+               enriched_at             = NOW(),
+               enrichment_log           = $2
              WHERE id = $1`,
             [prospectId, JSON.stringify(enrichLog)]
           );
@@ -1564,6 +2116,66 @@ async function enrichOne(prospectId, opts = {}) {
       scrapedContacts = scraped.contacts;
       enrichLog.website.chars_extracted = websiteText.length;
       enrichLog.website.pages_count = (websiteText.match(/^\[/gm) || []).length || 1;
+      // Diagnostyka per-kandydat (decyzja 19.08) — żadna strona nie znika bez
+      // śladu: url, próby, status HTTP, długości przed/po, czy weszła do
+      // finalnej treści, i dokładny powód jeśli nie.
+      enrichLog.website.candidates = scraped.diagnostics || [];
+
+      // Weryfikacja tożsamości domeny (decyzja 20.08, po ARPOL/Mirol/IMW-Deckert)
+      // — dla źródeł niepewnych z natury (zgadnięta domena/wynik wyszukiwarki)
+      // ORAZ dla adresów podanych ręcznie/z CSV (te bywają błędne w danych
+      // źródłowych — case: IMW Inżynieria Maszyn Wałcz → deckert.de, niemiecka
+      // firma). NIP w tekście wystarcza sam. W jego braku: wymagane DWA
+      // niezależne sygnały (nazwa w title/h1 + miasto/KRS/REGON) — samo
+      // dopasowanie nazwy zawiodło już dwukrotnie (Ims R&d→ims.com,
+      // Mirol sp. z o.o.→mirol.com/Argentyna, ta sama nazwa, inna firma).
+      const identity = scraped.identity || { title: '', h1: '' };
+      const identityCheck = checkDomainIdentity({
+        nip: company.nip,
+        text: websiteText,
+        title: `${identity.title} ${identity.h1}`.trim(),
+        company, krsData, gusData,
+      });
+      enrichLog.website.identity_check = { verified: identityCheck.verified, reason: identityCheck.reason };
+
+      // websiteSource === 'manual_correction' — admin jawnie wpisał/poprawił
+      // ten URL przez UI: to już jest ludzka weryfikacja, nie uruchamiamy
+      // automatycznego checku tożsamości nad nim (decyzja 20.08).
+      const trustedByHuman = websiteSource === 'manual_correction';
+
+      if (!trustedByHuman && websiteText.trim() && !identityCheck.verified) {
+        // Domena nie przeszła weryfikacji tożsamości — niezależnie od źródła
+        // (csv_import/legacy_unknown/resolver — decyzja 20.08, po regresji
+        // KZN/Wagner-service/Dach Centrum: poprzednio tylko 'manual' szedł tu,
+        // a domeny z resolvera po nieudanym checku po cichu leciały dalej z
+        // pustym tekstem do AI, co dawało 0/needs_review z zerowych sygnałów
+        // zamiast jawnego "niepotwierdzona domena"). NIE wysyłamy treści do
+        // modelu — mogłaby dotyczyć zupełnie innej firmy. Rekord idzie do
+        // needs_review z flagą do ręcznej korekty adresu, a stare icp_score/
+        // icp_signals są jawnie czyszczone, żeby nie zostawić w bazie
+        // nieaktualnego "qualified" obok nieaktualnej domeny.
+        logger.info('[Prospect] Domain failed identity check — flagging for manual review, skipping AI', { prospectId, websiteUrl, websiteSource, websiteMethod, reason: identityCheck.reason });
+        enrichLog.website.identity_check_failed = true;
+        const flags = calcIcpDowngradeFlags(websiteUrl, 'unconfirmed', true);
+        await db.query(
+          `UPDATE prospect_companies SET
+             enrichment_status   = 'done',
+             website_url         = $2,
+             website_source      = COALESCE(website_source, $5),
+             website_status      = 'unconfirmed',
+             icp_score            = NULL,
+             icp_signals           = NULL,
+             icp_gates              = NULL,
+             icp_bonus_signals       = NULL,
+             icp_gate_status          = 'needs_review',
+             icp_downgrade_flags       = $3,
+             enriched_at                = NOW(),
+             enrichment_log               = $4
+           WHERE id = $1`,
+          [prospectId, websiteUrl, JSON.stringify(flags), JSON.stringify(enrichLog), websiteSource]
+        );
+        return { status: 'needs_review', prospectId, reason: 'domain_unconfirmed' };
+      }
 
       // Jeśli scraping nie zwrócił żadnej treści (timeout, 403, parking page itp.)
       // → kontynuuj z pustym tekstem jeśli mamy dane KRS lub LinkedIn
@@ -1578,8 +2190,13 @@ async function enrichOne(prospectId, opts = {}) {
                enrichment_status = 'no_website',
                website_url       = COALESCE($3, website_url),
                website_status    = $4,
-               enriched_at       = NOW(),
-               enrichment_log    = $2
+               icp_score          = NULL,
+               icp_signals         = NULL,
+               icp_gates            = NULL,
+               icp_bonus_signals     = NULL,
+               icp_gate_status        = 'needs_review',
+               enriched_at             = NOW(),
+               enrichment_log           = $2
              WHERE id = $1`,
             [prospectId, JSON.stringify(enrichLog), websiteUrl, websiteStatus]
           );
@@ -1643,6 +2260,7 @@ async function enrichOne(prospectId, opts = {}) {
         branches_scope           = $8,
         krs_website              = $9,
         website_url              = $10,
+        website_source            = COALESCE(website_source, $28),
         icp_score                = $11,
         icp_signals               = $12,
         icp_gates                 = $13,
@@ -1692,6 +2310,7 @@ async function enrichOne(prospectId, opts = {}) {
         websiteStatus,
         gusData?.regon || null,
         gusData?.pkdMain || null,
+        websiteSource || null,
       ]
     );
 
@@ -1838,4 +2457,5 @@ module.exports = {
   // Eksport dodatkowy na potrzeby menuAuditTool.js — diagnostyczne narzędzie
   // audytu menu nawigacyjnego, reużywa scrapingu zamiast duplikować go.
   fetchKRS, findWebsiteUrl, scrapeWebsite, normalizeName, fetchPage, extractText, extractInternalLinks, scoreLinkRelevance,
+  checkDomainIdentity, isDomainParkingPage,
 };
