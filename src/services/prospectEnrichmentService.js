@@ -60,6 +60,12 @@ const LINK_SCORES = [
   // 20.08 (Wagner-service "Sklep internetowy" i Kigema "zapytanie ofertowe"
   // nigdy nie trafiały do kandydatów, bo nie było dla nich żadnego wzorca).
   { pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout|zapytani\w*.?ofert|request.?for.?quot|\brfq\b/i, score: 8 },
+  // Strony opisujące szczegółowy proces obsługi/certyfikacji/akredytacji —
+  // dotąd nierozpoznawane żadnym wzorcem (case: Inova — "Certyfikacja
+  // wyrobów", opis wstępnej rozmowy o wymaganiach/dokumentacji/opłatach,
+  // score=0 → link filtrowany PRZED dotarciem do budżetu treści, mimo że
+  // był na homepage z anchorem "Biuro Certyfikacji Wyrobów").
+  { pattern: /certyfikacj|akredytacj|procedura|zasady.wsp[oó]lpracy|jak.to.dziala|jak.dzia[lł]a|krok.po.kroku/i, score: 8 },
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -1234,6 +1240,18 @@ const CRAWL_CONCURRENCY = 3;         // maks. równoległych pobrań podstron te
 const FAST_LEVEL1_LIMIT = 4;         // tryb szybki (patrz enrichOne) — tylko najważniejsze podstrony
 const FULL_LEVEL1_LIMIT = 12;        // tryb pełny — bez zmian względem poprzedniego zachowania
 
+// Fallback wykrywania podstron (decyzja 20.08, case: Modro — nawigacja na
+// stronie głównej dała 1 link na całą firmę, prawdopodobnie menu renderowane
+// przez JS). Generyczna lista typowych ścieżek polskich/angielskich stron
+// firmowych — bez odniesienia do konkretnej firmy — próbowana TYLKO gdy
+// zwykła nawigacja+sitemapa dały poniżej MIN_DISCOVERED_LINKS realnych
+// kandydatów, więc nie kosztuje nic na normalnie zlinkowanych stronach.
+const MIN_DISCOVERED_LINKS = 3;
+const COMMON_PATH_GUESSES = [
+  '/kontakt', '/oferta', '/o-nas', '/o-firmie', '/uslugi', '/produkty', '/firma',
+  '/contact', '/about', '/about-us', '/services', '/products', '/company',
+];
+
 // Pula workerów o ograniczonej równoległości — używana zarówno przy pobieraniu
 // podstron jednej firmy (CRAWL_CONCURRENCY) jak i w runBatch (BATCH_CONCURRENCY).
 async function runWithConcurrency(items, limit, worker) {
@@ -1317,15 +1335,23 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
 // wypchnąć /kontakt czy realną ofertę pracy) — rezerwujemy budżet per
 // kategoria z góry, w kolejności priorytetu, zanim cokolwiek "nadwyżkowego"
 // dostanie resztę miejsca.
+// Kolejność listy = priorytet budżetu (decyzja 20.08, druga tura): "oferta"
+// przesunięta przed "o_nas_zespol" (tam mieszka "historia") i "praca"
+// (kariera) — realny przypadek Inova: strona /Oferta z opisem certyfikacji
+// (dowód sygnału konsultacja/dobór rozwiązania) była w całości wycinana przez
+// content_limit, bo kategorie "o_nas_zespol"/"praca" (przetwarzane wcześniej
+// w starej kolejności) zdążyły wyczerpać budżet zanim "oferta" dostała swoją
+// turę — mimo że miała własną rezerwację, globalny `used` już przekraczał
+// pozostały budżet. "sklep_b2b" zostaje PRZED "oferta" (bez zmian względem
+// poprzedniej kolejności) — to zachowuje wcześniejszą poprawkę 20.08
+// (Wagner-service: sklep wypychany przez ogólną treść oferty).
 const CONTENT_CATEGORIES = [
   { id: 'kontakt_oddzialy', reserved: 3000, pattern: /kontakt|contact|oddzia[lł]|placow|lokalizacj|biur[ao]|adres|gdzie.jestesmy/i },
+  { id: 'sklep_b2b',        reserved: 1500, pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout/i },
+  { id: 'oferta',           reserved: 2000, pattern: /oferta|us[lł]ug|produkt|rozwiazani|solution|service|zapytani\w*.?ofert|request.?for.?quot|\brfq\b|certyfikacj|akredytacj|procedura|zasady.wsp[oó]lpracy/i },
   { id: 'o_nas_zespol',     reserved: 3000, pattern: /o[.-]?nas|o[.-]?firmie|about|zesp[oó][lł]|team|kim.jestesmy|historia/i },
   { id: 'praca',            reserved: 2500, pattern: /praca|kariera|jobs|career|rekrutacj|dolacz|join/i },
   { id: 'partnerzy',        reserved: 1500, pattern: /partner|dealer|dystrybutor|distributor/i },
-  // Dodane po korektach 20.08 — bez zarezerwowanego budżetu strona sklepu
-  // (Wagner-service) była wypychana przez ogólną treść "oferta".
-  { id: 'sklep_b2b',        reserved: 1500, pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout/i },
-  { id: 'oferta',           reserved: 2000, pattern: /oferta|us[lł]ug|produkt|rozwiazani|solution|service|zapytani\w*.?ofert|request.?for.?quot|\brfq\b/i },
 ];
 const PER_PAGE_CHAR_CAP = 3000;
 
@@ -1537,6 +1563,27 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     const existing = allLinks.get(path);
     if (!existing || score > existing.score) {
       allLinks.set(path, { path, fullHref, anchor, score });
+    }
+  }
+
+  // Nawigacja (+ sitemapa) dała prawie nic — spróbuj typowych ścieżek podstron
+  // zamiast poddawać się po jednym linku. Tylko przy pierwszym przebiegu
+  // (nie przy kontynuacji z resume — jeśli fast już próbował i nie znalazł,
+  // nie powtarzamy tych samych nieudanych prób).
+  if (!resume) {
+    const realCandidateCount = Array.from(allLinks.values()).filter(l => l.score > 0 && l.path !== '/').length;
+    if (realCandidateCount < MIN_DISCOVERED_LINKS) {
+      logger.info('[Prospect] Navigation yielded too few links — trying common path guesses', {
+        base, effectiveBase, realCandidateCount,
+      });
+      async function tryPathGuess(path) {
+        if (allLinks.has(path)) return;
+        const hit = await verifyUrl(`${effectiveBase}${path}`);
+        if (!hit) return;
+        const score = scoreLinkRelevance(path, '');
+        if (score > 0) allLinks.set(path, { path, fullHref: hit, anchor: '', score });
+      }
+      await runWithConcurrency(COMMON_PATH_GUESSES, CRAWL_CONCURRENCY, tryPathGuess);
     }
   }
 
@@ -1811,8 +1858,9 @@ consultation_demo_needs_analysis ("Konsultacja, demo lub analiza potrzeb"):
     - funkcjonalne: oferta personalizacji/dostosowania produktu do wymagań klienta ("custom",
       "dostosowane do indywidualnych potrzeb", "prace/projekty zlecone indywidualnie", karta
       personalizacji per klient);
-    - przypisany doradca/opiekun/dyrektor regionalny opisany jako doradztwo projektowe lub
-      techniczne (np. "Doradcy Twojego projektu"), nawet bez słowa "konsultacja";
+    - przypisany doradca/opiekun/dyrektor regionalny opisany jako doradztwo PRZEDSPRZEDAŻOWE,
+      projektowe lub techniczne PRZY DOBORZE ROZWIĄZANIA (np. "Doradcy Twojego projektu"),
+      nawet bez słowa "konsultacja";
     - formularz zbierający szczegółowe parametry rozwiązania/zamówienia (RFQ, zapytanie
       ofertowe z polami technicznymi), nie sam formularz kontaktowy ogólnego typu;
     - sprzedaż oparta na indywidualnym projekcie technicznym/architektonicznym/inżynierskim,
@@ -1820,6 +1868,20 @@ consultation_demo_needs_analysis ("Konsultacja, demo lub analiza potrzeb"):
       działalności — patrz zastrzeżenie niżej).
   Drugorzędne wsparcie (nie wystarcza samo): ogólne hasło "indywidualne podejście do klienta"
   bez opisu konkretnego procesu, etapu lub osoby.
+  NIE LICZY SIĘ (mimo słowa "doradca"/"konsultacja" w tekście):
+    - doradca/opiekun ds. likwidacji szkód, ubezpieczeniowy, reklamacji lub gwarancji — to
+      obsługa posprzedażowa/roszczeniowa, nie doradztwo przy wyborze zakupu;
+    - serwisant, doradca serwisowy/techniczny wsparcia posprzedażowego, opiekun serwisu —
+      to wsparcie techniczne dla już kupionego produktu, nie etap sprzedaży;
+    - ogólny, poradnikowy tekst nieopisujący WŁASNEGO procesu tej firmy (np. blogowa porada
+      "na co zwrócić uwagę kupując X" bez odniesienia do konkretnej usługi/osoby/etapu w tej
+      firmie) — to nie jest dowód konsultacji sprzedażowej, tylko treść informacyjna;
+    - sama produkcja/wykonanie "na wymiar" lub "według dokumentacji/wytycznych klienta" —
+      to dowód dla custom_quote_process (indywidualna wycena), NIE automatycznie dla tego
+      sygnału; liczy się TYLKO jeśli osobno opisany jest etap doradztwa/rozmowy o
+      wymaganiach przed złożeniem zamówienia, nie sam fakt wykonania na zamówienie;
+    - sam formularz kontaktowy ogólnego typu (imię, e-mail, wiadomość) — to nie jest dowód
+      konsultacji/analizy potrzeb, nawet jeśli firma go używa jako jedynego kanału kontaktu.
   ZASTRZEŻENIE: nie ustawiaj true wyłącznie na podstawie branży/typu działalności ani z
   domysłu "każdy proces projektowy wymaga analizy potrzeb" — musi być konkretny tekstowy
   sygnał z listy powyżej, nie sama inferencja z rodzaju firmy.
