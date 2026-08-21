@@ -1128,7 +1128,15 @@ function isRelatedHost(candidateHostname, baseHostname, anchorAndPath = '') {
 
 // Wyciąga linki wewnętrzne; zwraca { path, fullHref, anchor }
 // fullHref zawiera pełny URL z właściwym hostname (po redirect), użyty do pobierania podstrony
-function extractInternalLinks($, baseHostname) {
+// baseProtocol (np. 'http:') — protokół, pod którym strona główna faktycznie
+// odpowiedziała (patrz effectiveBase w _crawlWebsite). Domyślnie 'https:' dla
+// wywołań spoza crawla (np. menuAuditTool.js), które go nie przekazują.
+// Bez tego linki względne ("/kontakt") były zawsze wymuszane na https, nawet
+// gdy realnie działa tylko http — case: Konmet, strona ma we własnej
+// nawigacji bezwzględne linki https, ale HTTPS na tym hoście jest zepsute
+// (wygasły cert + inna/brakująca treść), więc każda podstrona kończyła się
+// fetch_error mimo że dokładnie ta sama ścieżka po http działa poprawnie.
+function extractInternalLinks($, baseHostname, baseProtocol = 'https:') {
   const links = [];
   $('a[href]').each((_, el) => {
     const raw = ($(el).attr('href') || '').trim();
@@ -1141,9 +1149,9 @@ function extractInternalLinks($, baseHostname) {
         full = new URL(raw);
       } else if (raw.startsWith('//')) {
         // Protocol-relative URL
-        full = new URL(`https:${raw}`);
+        full = new URL(`${baseProtocol}${raw}`);
       } else if (raw.startsWith('/')) {
-        full = new URL(`https://${baseHostname}${raw}`);
+        full = new URL(`${baseProtocol}//${baseHostname}${raw}`);
       } else {
         return; // ścieżka względna bez / (rzadkie) — pomijamy
       }
@@ -1811,8 +1819,14 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
   // Tryb szybki (fast) pomija sitemapę — to 1-3 dodatkowe żądania HTTP, a
   // nawigacja sama w sobie już wskazuje najważniejsze podstrony (patrz
   // enrichOne — scrapeWebsiteFast/continueCrawlToFull).
+  // Protokół, pod którym strona główna faktycznie odpowiedziała — linki
+  // względne w nawigacji muszą go dziedziczyć, nie być na sztywno https
+  // (patrz komentarz przy extractInternalLinks).
+  let baseProtocol = 'https:';
+  try { baseProtocol = new URL(effectiveBase).protocol; } catch { /* zostaw https: */ }
+
   const $ = cheerio.load(homepageHtml);
-  const navLinks     = extractInternalLinks($, baseHostname);
+  const navLinks     = extractInternalLinks($, baseHostname, baseProtocol);
   const sitemapLinks = fast ? [] : await fetchSitemapUrls(effectiveBase, baseHostname);
 
   const allLinks = resume?.allLinks ?? new Map();
@@ -1893,7 +1907,7 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
 
     // Tryb szybki nie rozwija się do poziomu 2 — pomiń zbieranie kandydatów.
     if (!fast) {
-      for (const { path: p2, fullHref: h2, anchor: a2 } of extractInternalLinks($page, baseHostname)) {
+      for (const { path: p2, fullHref: h2, anchor: a2 } of extractInternalLinks($page, baseHostname, baseProtocol)) {
         if (fetched.has(h2) || allLinks.has(p2) || level2Links.has(p2)) continue;
         const s2 = scoreLinkRelevance(p2, a2);
         if (s2 >= 8) level2Links.set(p2, { path: p2, fullHref: h2, anchor: a2, score: s2 });
@@ -2695,6 +2709,9 @@ async function enrichOne(prospectId, opts = {}) {
         // URL) — pełny crawl zobaczyłby dokładnie to samo, więc dokańczanie
         // crawla tylko kosztowałoby czas bez szans na inny wynik (decyzja
         // 20.08, patrz DETERMINISTIC_FETCH_ERROR / deterministicFailure).
+        // Fallback po deterministicFailure był testowany 21.08 na stałej
+        // próbce 20 firm — 0/20 odzyskanych, +330% czasu, +225% requestów;
+        // wycofane tego samego dnia jako nieopłacalne (patrz historia).
         logger.info('[Prospect] Fast scan hit a deterministic failure — not completing crawl', {
           prospectId, websiteUrl, type: fastScraped.deterministicFailure.type, reason: fastScraped.deterministicFailure.reason,
         });

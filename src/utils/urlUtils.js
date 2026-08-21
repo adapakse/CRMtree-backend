@@ -5,7 +5,7 @@
  *
  * Obsługuje warianty:
  *   https://www.firma.pl     → https://www.firma.pl
- *   http://www.firma.pl      → https://www.firma.pl
+ *   http://www.firma.pl      → http://www.firma.pl   (jawny http:// zostaje — patrz niżej)
  *   htts://www.firma.pl      → https://www.firma.pl  (literówka w protokole)
  *   htps://www.firma.pl      → https://www.firma.pl  (literówka)
  *   htp://www.firma.pl       → https://www.firma.pl  (literówka)
@@ -18,7 +18,15 @@
  *   firma.pl                 → https://firma.pl
  *   ""  / null / undefined   → null
  *
- * Strategia: wyciągnij czystą część domenową (+ opcjonalna ścieżka), dołącz https://.
+ * Strategia: wyciągnij czystą część domenową (+ opcjonalna ścieżka), dołącz
+ * protokół. Jawnie podane, poprawnie zapisane "http://" lub "https://"
+ * zostaje zachowane (decyzja 21.08 — wymuszanie https psuło firmy, których
+ * strona realnie działa tylko po http, np. Konmet: HTTPS ma tam wygasły
+ * certyfikat i inną/brakującą treść nawet po zignorowaniu certyfikatu, więc
+ * wymuszony https:// czynił stronę niedostępną mimo że http:// działa
+ * poprawnie). Literówki w protokole (htt(p)s, brak dwukropka/ukośników,
+ * spacje) oraz URL bez protokołu nadal domyślnie dostają https:// — tylko
+ * dokładnie zapisany, jawny protokół jest honorowany.
  * Nie walidujemy czy domena istnieje — to zadanie scrappera.
  */
 function normalizeWebsiteUrl(raw) {
@@ -30,6 +38,14 @@ function normalizeWebsiteUrl(raw) {
   s = s.replace(/^["'`]+|["'`]+$/g, '').trim();
 
   if (!s) return null;
+
+  // Jawny, poprawnie zapisany protokół (http:// lub https://) — zachowaj go.
+  // Wykryty PRZED dalszymi krokami, które i tak wycinają protokół z `s`;
+  // literówki (htts/htps/htp itp.) celowo NIE pasują do tego wzorca i nadal
+  // trafiają do domyślnego https:// niżej — bez zmiany zachowania.
+  let scheme = 'https:';
+  const explicitProtocol = s.match(/^(https?):\/\//i);
+  if (explicitProtocol) scheme = explicitProtocol[1].toLowerCase() + ':';
 
   // ── Krok 1: Wyciągnij część po protokole ───────────────────────────
   // Obsługa:
@@ -61,7 +77,7 @@ function normalizeWebsiteUrl(raw) {
   // Wzorzec: ciąg liter a-z (2-8 znaków, żeby nie wyciąć 'www') + dowolna kombinacja [:/\s]
   // Ale TYLKO jeśli po usunięciu zostaje coś z kropką (domena)
   if (!s.includes('://')) {
-    const afterStrip = s.replace(/^[a-z]{2,8}\s*[:\/\s]+/i, '');
+    const afterStrip = s.replace(/^[a-z]{2,8}\s*[:/\s]+/i, '');
     if (afterStrip && afterStrip.includes('.') && afterStrip !== s) {
       // Sprawdź że nie usunęliśmy samego 'www' — 'www.firma.pl' → 'firma.pl' (za dużo!)
       // Klucz: nie stripuj jeśli pierwsze słowo to 'www' lub 'ftp'
@@ -80,8 +96,8 @@ function normalizeWebsiteUrl(raw) {
   // Krok 5: Sanity check — musi mieć kropkę (minimalna struktura domeny)
   if (!s || !s.includes('.')) return null;
 
-  // Krok 6: Scal z https://
-  return `https://${s}`;
+  // Krok 6: Scal z protokołem — zachowany jawny http(s):// albo domyślny https:
+  return `${scheme}//${s}`;
 }
 
 /**
