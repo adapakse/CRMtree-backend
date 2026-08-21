@@ -643,6 +643,138 @@ function guessDomainsFromName(name) {
   return [...seen];
 }
 
+// ── Fallback drugiej domeny — uruchamiany WYŁĄCZNIE po odrzuceniu pierwszej ──
+// (decyzja 21.08, audyt 24 firm bez poprawnie znalezionej strony — patrz
+// prospekty-29-firm-bez-strony-do-rewalidacji.md). Bez tego fallbacku resolver
+// po odrzuceniu websiteUrl przez checkDomainIdentity nie miał żadnej drugiej
+// próby — kolejny przebieg dawał dokładnie ten sam wynik (guessDomainsFromName/
+// verifyFirstOf są deterministyczne: pierwszy odpowiadający kandydat zawsze ten
+// sam). Dodatkowy problem guessDomainsFromName(): firstWord to surowe pierwsze
+// słowo znormalizowanej nazwy, WŁĄCZNIE z opisowymi członami — dwie różne firmy
+// zaczynające się od "Przedsiębiorstwo..." dostają identyczną (błędną)
+// propozycję domeny (case: Fortech i Zetpri-Rembud w audycie 21.08, obie
+// wylądowały na przedsiebiorstwo.com.pl). GENERIC_NAME_WORDS pomija te opisowe/
+// prawne/spójnikowe człony, żeby zostały tylko znaczące słowa marki.
+const GENERIC_NAME_WORDS = new Set([
+  'przedsiebiorstwo', 'osrodek', 'rozlewnia', 'centrum', 'zaklad', 'zaklady',
+  'grupa', 'biuro', 'instytut',
+  'innowacyjno', 'wdrozeniowe', 'inzynieryjno', 'budowlane', 'badan', 'certyfikacji',
+  'wod', 'mineralnych',
+  // Człony częste w nazwach spółek-córek/grup kapitałowych — same w sobie nie
+  // odróżniają marki (case: Ameri-pol Trading, Epam Systems (Poland))
+  'trading', 'systems', 'polska', 'poland', 'holding', 'group', 'international',
+  // Generyczne określenia typu działalności — nie są marką (case: Tenir Serwis)
+  'serwis', 'service', 'uslugi',
+  // Spójniki
+  'i', 'z', 'w', 'na', 'do', 'dla', 'oraz', 'a',
+]);
+
+const FALLBACK_MAX_HOSTS       = 4;
+const FALLBACK_CONCURRENCY     = 3;
+const FALLBACK_TIME_BUDGET_MS  = 8_000;
+
+// Do FALLBACK_MAX_HOSTS unikalnych hostów z DWÓCH znaczących słów nazwy (po
+// odfiltrowaniu GENERIC_NAME_WORDS) — wersja bez myślnika i z myślnikiem, TLD
+// .com.pl/.pl/.com. Jeden URL na host (bez oddzielnych wariantów www/http/
+// https — verifyUrl (maxRedirects) i tak podąży za przekierowaniem na
+// kanoniczny wariant). Pętla idzie TLD-najpierw z obiema formami na zmianę
+// (nie forma-najpierw) — inaczej przy FALLBACK_MAX_HOSTS=4 wariant z
+// myślnikiem nigdy nie dociera do dalszych TLD (case: Ostróda Yacht,
+// Star-Dust — poprawna domena to hyphenated+.com.pl, obcięta przy formie
+// jako zewnętrznej pętli). `excludeUrls` (zawsze zawiera już odrzucony URL)
+// wycina kandydatów wskazujących na tę samą domenę rejestrowalną — nie ma
+// sensu ponownie próbować URL-a, który identity-check już odrzucił.
+function guessFallbackDomains(name, excludeUrls = []) {
+  const norm  = normalizeName(name || '');
+  const words = norm.split(/[^a-z0-9]+/).filter(Boolean).filter(w => !GENERIC_NAME_WORDS.has(w));
+  if (!words.length) return [];
+
+  const significant = words.slice(0, 2);
+  const compact      = significant.join('');
+  const hyphenated   = significant.join('-');
+  const forms = [...new Set([compact, hyphenated])].filter(Boolean);
+
+  const excludedHosts = new Set(
+    excludeUrls.filter(Boolean).map(u => {
+      try { return registrableDomain(new URL(u).hostname); } catch { return null; }
+    }).filter(Boolean)
+  );
+
+  const tlds = ['.com.pl', '.pl', '.com'];
+  const seenHosts = new Set();
+  const candidates = [];
+  for (const tld of tlds) {
+    for (const form of forms) {
+      const host = `${form}${tld}`;
+      if (seenHosts.has(host) || excludedHosts.has(host)) continue;
+      seenHosts.add(host);
+      candidates.push(`https://${host}`);
+      if (candidates.length >= FALLBACK_MAX_HOSTS) return candidates;
+    }
+  }
+  return candidates;
+}
+
+// Weryfikuje jednego kandydata: HTTP odpowiada (verifyUrl) → scrapuje →
+// checkDomainIdentity (bez żadnych zmian w tej funkcji — patrz komentarz w
+// checkDomainIdentity powyżej). Samo odpowiadanie HTTP NIE wystarcza, to
+// tylko wstępny filtr przed kosztownym scrapingiem. `scraped` (z crawlState)
+// dołączony TYLKO gdy zweryfikowany — enrichOne go reużywa do
+// continueCrawlToFull bez ponownego pobierania strony głównej; reszta
+// kandydatów go nie potrzebuje (patrz resolveDomainFallback, gdzie jest
+// wycinany przed zapisem do `attempts`, żeby nie rozdymać enrichment_log).
+async function checkFallbackCandidate(url, { company, krsData, gusData }) {
+  const verifiedUrl = await verifyUrl(url);
+  if (!verifiedUrl) return { url, exists: false, verified: false };
+
+  const scraped = await scrapeWebsiteFast(verifiedUrl);
+  if (scraped.deterministicFailure) {
+    return { url: verifiedUrl, exists: true, verified: false, reason: scraped.deterministicFailure.type };
+  }
+  const identity = scraped.identity || { title: '', h1: '' };
+  const identityCheck = checkDomainIdentity({
+    nip: company.nip,
+    text: scraped.text,
+    title: `${identity.title} ${identity.h1}`.trim(),
+    company, krsData, gusData,
+  });
+  return {
+    url: verifiedUrl, exists: true,
+    verified: identityCheck.verified, reason: identityCheck.reason, evidence: identityCheck.evidence,
+    scraped: identityCheck.verified ? scraped : undefined,
+  };
+}
+
+// Próbuje kandydatów w grupach po FALLBACK_CONCURRENCY, zatrzymuje się na
+// PIERWSZYM zweryfikowanym trafieniu. Cały resolve ma twardy limit
+// FALLBACK_TIME_BUDGET_MS (Promise.race) — niezależnie od tego, ile trwają
+// pojedyncze requesty/scrapy, wywołujący nie czeka dłużej niż budżet. Nie
+// woła AI, nie zapisuje nic do bazy — zwraca tylko wynik do decyzji
+// wywołującego.
+async function resolveDomainFallback({ company, krsData, gusData, rejectedUrl }) {
+  const candidates = guessFallbackDomains(company.company_name, [rejectedUrl]);
+
+  const resolvePromise = (async () => {
+    const attempts = [];
+    for (let i = 0; i < candidates.length; i += FALLBACK_CONCURRENCY) {
+      const batch = candidates.slice(i, i + FALLBACK_CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(url => checkFallbackCandidate(url, { company, krsData, gusData }))
+      );
+      const hit = results.find(r => r.verified);
+      attempts.push(...results.map(r => ({ url: r.url, exists: r.exists, verified: r.verified, reason: r.reason, evidence: r.evidence })));
+      if (hit) return { url: hit.url, method: 'fallback_heuristic', attempts, scraped: hit.scraped };
+    }
+    return { url: null, method: 'none', attempts };
+  })();
+
+  const timeoutPromise = new Promise(resolve => {
+    setTimeout(() => resolve({ url: null, method: 'timeout', attempts: [] }), FALLBACK_TIME_BUDGET_MS);
+  });
+
+  return Promise.race([resolvePromise, timeoutPromise]);
+}
+
 // Sprawdza czy URL odpowiada (HEAD, fallback GET), zwraca URL lub null
 async function verifyUrl(url) {
   for (const method of ['head', 'get']) {
@@ -2456,10 +2588,45 @@ async function enrichOne(prospectId, opts = {}) {
         // wciąż na to reaguje.
         identityCheck = computeIdentityCheck(scraped);
         scanStage = 'full';
+      } else {
+        // Domena niepotwierdzona i nie zaufana — JEDNA próba fallbacku (patrz
+        // resolveDomainFallback, przetestowany 21.08 na 20 ręcznie
+        // potwierdzonych domenach + 8 kontrolach) zanim rekord pójdzie do
+        // needs_review. Nigdy dla manual_correction/trustedDomain — trustedByHuman
+        // już wyklucza tę gałąź, więc ręcznie wpisany URL nigdy nie jest
+        // nadpisywany. Fallback ma własny twardy limit czasu i liczby
+        // kandydatów — tu wołany co najwyżej raz na przebieg enrichOne.
+        const fallbackResult = await resolveDomainFallback({ company, krsData, gusData, rejectedUrl: websiteUrl });
+        enrichLog.website.fallback = {
+          attempted:        true,
+          candidates_tried: fallbackResult.attempts.length,
+          found_url:        fallbackResult.url,
+          method:           fallbackResult.method,
+        };
+        if (fallbackResult.url) {
+          logger.info('[Prospect] Fallback found a verified alternate domain — completing full crawl', {
+            prospectId, rejectedUrl: websiteUrl, foundUrl: fallbackResult.url,
+          });
+          websiteUrl    = fallbackResult.url;
+          // 'resolver', nie 'fallback_heuristic' — website_source ma CHECK
+          // constraint (migracja 0269) ograniczony do 4 wartości; metoda na
+          // poziomie szczegółu (fallback_heuristic) i tak jest już zapisana w
+          // enrichLog.website.fallback.method, kolumna nie musi jej powielać.
+          websiteSource = 'resolver';
+          scraped       = await continueCrawlToFull(websiteUrl, fallbackResult.scraped.crawlState);
+          identityCheck = computeIdentityCheck(scraped);
+          scanStage     = 'full';
+          // enrichLog.website.url/source zostały ustawione PRZED tym blokiem
+          // (na oryginalnym, odrzuconym URL-u) — bez tej podmiany log
+          // mylnie pokazywałby stary URL mimo że reszta enrichmentu (i finalny
+          // website_url w DB) dotyczy już domeny znalezionej przez fallback.
+          enrichLog.website.url    = websiteUrl;
+          enrichLog.website.source = websiteSource;
+        }
+        // else: fallback nic nie znalazł — zostajemy przy wyniku fast
+        // oryginalnego URL-a (scanStage='fast'), identityCheck wciąż
+        // niepotwierdzony — patrz gałąź needs_review niżej.
       }
-      // else: domena niepotwierdzona i nie zaufana — zostajemy przy wyniku
-      // fast (scanStage='fast'), crawl się nie pogłębia, AI się nie wywołuje
-      // — patrz gałąź needs_review niżej.
 
       websiteText     = scraped.text;       // string — wszystkie sprawdzenia .trim()/.length niżej bez zmian
       scrapedContacts = scraped.contacts;
@@ -2826,4 +2993,9 @@ module.exports = {
   // audytu menu nawigacyjnego, reużywa scrapingu zamiast duplikować go.
   fetchKRS, findWebsiteUrl, scrapeWebsite, normalizeName, fetchPage, extractText, extractInternalLinks, scoreLinkRelevance,
   checkDomainIdentity, isDomainParkingPage,
+  // Eksport na potrzeby ręcznego/testowego wywołania fallbacku drugiej domeny
+  // w izolacji (audyt 21.08) — enrichOne woła resolveDomainFallback()
+  // wewnętrznie (patrz gałąź "domena niepotwierdzona i nie zaufana"), ten
+  // eksport służy tylko testom poza pełnym przebiegiem enrichmentu.
+  guessFallbackDomains, resolveDomainFallback, scrapeWebsiteFast,
 };
