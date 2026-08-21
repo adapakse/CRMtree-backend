@@ -18,6 +18,7 @@
 // ─────────────────────────────────────────────────────────────────
 
 const axios      = require('axios');
+const https      = require('https');
 const cheerio    = require('cheerio');
 const db         = require('../config/database');
 const logger     = require('../utils/logger');
@@ -169,13 +170,45 @@ function extractContactBlockText(text) {
   return blocks.join(' ');
 }
 
-// Dopasowuje najbardziej charakterystyczne (pierwsze) słowo nazwy firmy do
-// title/h1 strony — ten sam wzorzec "pierwsze słowo = człon marki" co
-// guessDomainsFromName() używa do zgadywania domen.
+// Człony opisowe/prawne/spójnikowe pomijane przy wyborze "najbardziej
+// charakterystycznego słowa" nazwy firmy — współdzielone przez nameTokensMatch()
+// (identity-check, niżej) i guessFallbackDomains() (fallback drugiej domeny,
+// dalej w pliku). Bez tego filtra dwie różne firmy zaczynające się od
+// "Przedsiębiorstwo..." dają identyczny (błędny) pierwszy token — dla
+// nameTokensMatch to fałszywe odrzucenie identity-check (case: Kopalnia
+// Ogorzelec, Insbud — audyt 21.08: title strony ewidentnie zawiera markę,
+// ale "przedsiebiorstwo" jako pierwsze słowo nigdy się w title nie pojawia),
+// dla guessFallbackDomains identyczna błędna propozycja domeny (case: Fortech
+// i Zetpri-Rembud, oba na przedsiebiorstwo.com.pl).
+const GENERIC_NAME_WORDS = new Set([
+  'przedsiebiorstwo', 'osrodek', 'rozlewnia', 'centrum', 'zaklad', 'zaklady',
+  'grupa', 'biuro', 'instytut', 'spolka',
+  'innowacyjno', 'wdrozeniowe', 'inzynieryjno', 'budowlane', 'badan', 'certyfikacji',
+  'wod', 'mineralnych',
+  // Kolejne opisowe człony po "przedsiębiorstwo" — filtr musi przejść PRZEZ
+  // WSZYSTKIE z nich, nie tylko pierwsze słowo, żeby dotrzeć do właściwej
+  // marki (case: "Przedsiębiorstwo Wielobranżowe Kopalnia Ogorzelec" — bez
+  // 'wielobranzowe' pierwszym niegenerycznym słowem zostawało "wielobranżowe",
+  // nie "kopalnia"; "Przedsiębiorstwo Robót Instalacyjnych 'insbud'" — bez
+  // 'robot'/'instalacyjne(-ych)' zostawało "robót"/"instalacyjnych", nie
+  // "insbud" — oba potwierdzone empirycznie, patrz test 21.08 na tych firmach)
+  'wielobranzowe', 'robot', 'instalacyjne', 'instalacyjnych',
+  // Człony częste w nazwach spółek-córek/grup kapitałowych — same w sobie nie
+  // odróżniają marki (case: Ameri-pol Trading, Epam Systems (Poland))
+  'trading', 'systems', 'polska', 'poland', 'holding', 'group', 'international',
+  // Generyczne określenia typu działalności — nie są marką (case: Tenir Serwis)
+  'serwis', 'service', 'uslugi',
+  // Spójniki
+  'i', 'z', 'w', 'na', 'do', 'dla', 'oraz', 'a',
+]);
+
+// Dopasowuje najbardziej charakterystyczne słowo nazwy firmy (pierwsze PO
+// odfiltrowaniu GENERIC_NAME_WORDS) do title/h1 strony — ten sam wzorzec co
+// guessDomainsFromName()/guessFallbackDomains() używają do zgadywania domen.
 function nameTokensMatch(companyName, titleText) {
   if (!companyName || !titleText) return false;
   const norm  = normalizeName(companyName);
-  const words = norm.split(/[^a-z0-9]+/).filter(w => w.length >= 3);
+  const words = norm.split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !GENERIC_NAME_WORDS.has(w));
   if (!words.length) return false;
   const firstWord  = words[0];
   const titleNorm  = normalizeName(titleText);
@@ -292,6 +325,24 @@ function isDomainParkingPage(html) {
 // wystawiony dla home.pl, monipol.pl — strona-parking; oba eskalowały do
 // pełnego crawlu mimo że wynik nie mógł się zmienić).
 const DETERMINISTIC_FETCH_ERROR = /certificate|altnames|ERR_TLS|CERT_HAS_EXPIRED|UNABLE_TO_VERIFY_LEAF|SELF_SIGNED|ENOTFOUND|EAI_AGAIN/i;
+
+// Podzbiór DETERMINISTIC_FETCH_ERROR dotyczący WYŁĄCZNIE certyfikatu (nie DNS)
+// — ENOTFOUND/EAI_AGAIN celowo wykluczone, bo pominięcie walidacji certyfikatu
+// nie naprawi nierozwiązującej się nazwy hosta (rozwiązanie DNS zachodzi przed
+// handshake TLS). Używane WYŁĄCZNIE w fetchPageForCrawl (publiczny crawler
+// stron firm — audyt 21.08 pokazał 4 firmy z realnymi, żywymi stronami
+// odrzucanymi wyłącznie przez błąd certyfikatu: altname niepasujący do
+// wildcardu hostingu (*.home.pl), wygasły certyfikat, niekompletny łańcuch).
+const TLS_CERT_ERROR = /certificate|altnames|ERR_TLS|CERT_HAS_EXPIRED|UNABLE_TO_VERIFY_LEAF|SELF_SIGNED/i;
+
+// Agent z pominiętą walidacją certyfikatu — celowo NIE globalny (nie dotyka
+// process.env.NODE_TLS_REJECT_UNAUTHORIZED ani domyślnej konfiguracji axios).
+// Przekazywany jawnie jako `httpsAgent` WYŁĄCZNIE w jednej, kontrolowanej
+// próbie w fetchPageForCrawl, po wyczerpaniu normalnych retry z ważną
+// walidacją. Domena pobrana w ten sposób i tak musi przejść zwykły
+// checkDomainIdentity — to wyłącznie odzyskanie treści do analizy, nie
+// automatyczne zaufanie.
+const insecureHttpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -649,26 +700,8 @@ function guessDomainsFromName(name) {
 // po odrzuceniu websiteUrl przez checkDomainIdentity nie miał żadnej drugiej
 // próby — kolejny przebieg dawał dokładnie ten sam wynik (guessDomainsFromName/
 // verifyFirstOf są deterministyczne: pierwszy odpowiadający kandydat zawsze ten
-// sam). Dodatkowy problem guessDomainsFromName(): firstWord to surowe pierwsze
-// słowo znormalizowanej nazwy, WŁĄCZNIE z opisowymi członami — dwie różne firmy
-// zaczynające się od "Przedsiębiorstwo..." dostają identyczną (błędną)
-// propozycję domeny (case: Fortech i Zetpri-Rembud w audycie 21.08, obie
-// wylądowały na przedsiebiorstwo.com.pl). GENERIC_NAME_WORDS pomija te opisowe/
-// prawne/spójnikowe człony, żeby zostały tylko znaczące słowa marki.
-const GENERIC_NAME_WORDS = new Set([
-  'przedsiebiorstwo', 'osrodek', 'rozlewnia', 'centrum', 'zaklad', 'zaklady',
-  'grupa', 'biuro', 'instytut',
-  'innowacyjno', 'wdrozeniowe', 'inzynieryjno', 'budowlane', 'badan', 'certyfikacji',
-  'wod', 'mineralnych',
-  // Człony częste w nazwach spółek-córek/grup kapitałowych — same w sobie nie
-  // odróżniają marki (case: Ameri-pol Trading, Epam Systems (Poland))
-  'trading', 'systems', 'polska', 'poland', 'holding', 'group', 'international',
-  // Generyczne określenia typu działalności — nie są marką (case: Tenir Serwis)
-  'serwis', 'service', 'uslugi',
-  // Spójniki
-  'i', 'z', 'w', 'na', 'do', 'dla', 'oraz', 'a',
-]);
-
+// sam). GENERIC_NAME_WORDS (definicja przy nameTokensMatch, na początku pliku)
+// pomija te same opisowe/prawne/spójnikowe człony przy zgadywaniu domeny.
 const FALLBACK_MAX_HOSTS       = 4;
 const FALLBACK_CONCURRENCY     = 3;
 const FALLBACK_TIME_BUDGET_MS  = 8_000;
@@ -1252,8 +1285,8 @@ function extractJsonLdText($) {
 function extractText($) {
   $('script, style, noscript, iframe, nav').remove();
   $('form input, form textarea, form select, form button, form label').remove();
-  $('[class*="cookie"], [class*="Cookie"], [id*="cookie"], [id*="Cookie"]').remove();
-  $('[class*="popup"], [class*="Popup"], [class*="modal"], [class*="Modal"]').remove();
+  $('[class*="cookie"]:not(html):not(body), [class*="Cookie"]:not(html):not(body), [id*="cookie"]:not(html):not(body), [id*="Cookie"]:not(html):not(body)').remove();
+  $('[class*="popup"]:not(html):not(body), [class*="Popup"]:not(html):not(body), [class*="modal"]:not(html):not(body), [class*="Modal"]:not(html):not(body)').remove();
   $('[aria-hidden="true"]').remove();
 
   const main = $('main, [role="main"], article, #content, #main, .main-content, .page-content').first();
@@ -1401,25 +1434,91 @@ async function sleepJittered(baseMs) {
   return sleep(Math.round(jitter));
 }
 
+const CRAWL_REQUEST_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept-Language': 'pl,en;q=0.9',
+  'Accept': 'text/html,application/xhtml+xml,*/*',
+  'Accept-Encoding': 'gzip, deflate, br',
+};
+
+// Jedna, dodatkowa, KONTROLOWANA próba pobrania po wyczerpaniu normalnych
+// retry z ważną walidacją certyfikatu — WYŁĄCZNIE gdy ostatni błąd dotyczył
+// samego certyfikatu (TLS_CERT_ERROR), nigdy DNS. Zwraca html + tlsUnverified
+// przy sukcesie, albo null gdy i to się nie uda (serwer faktycznie
+// nieosiągalny niezależnie od certyfikatu).
+async function fetchInsecureFallback(url, timeoutMs = 10_000) {
+  if (timeoutMs <= 0) return null;
+  try {
+    const resp = await axios.get(url, {
+      timeout: timeoutMs, maxRedirects: 5, headers: CRAWL_REQUEST_HEADERS,
+      validateStatus: () => true, httpsAgent: insecureHttpsAgent,
+    });
+    const finalUrl = resp.request?.res?.responseUrl || url;
+    const ct = resp.headers['content-type'] || '';
+    if (resp.status >= 400 || !ct.includes('html')) return null;
+    if (typeof resp.data !== 'string' || resp.data.length < SUSPICIOUSLY_SHORT_HTML) return null;
+    return { html: resp.data, finalUrl, status: resp.status };
+  } catch {
+    return null; // nawet bez walidacji certyfikatu nieosiągalny — zostaw oryginalny błąd
+  }
+}
+
+// Po ENOTFOUND na "www." (DNS bez rekordu dla www — apex bywa jedynym
+// skonfigurowanym hostem) próbujemy OD RAZU apex, zamiast dalej retry'ować
+// www (DNS się nie zmieni w ciągu kilku sekund). Jeśli apex też zawiedzie
+// przez błąd certyfikatu, dopina się do istniejącego TLS fallbacku. Cała
+// próba (apex + ewentualny TLS fallback) mieści się we wspólnym, malejącym
+// budżecie `deadline` przekazanym przez fetchPageForCrawl — żadnego
+// dodatkowego stałego timeoutu.
+async function fetchApexAfterWwwEnotfound(wwwUrl, hostname, deadline) {
+  const apexUrl = wwwUrl.replace(hostname, hostname.slice(4));
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    return { html: '', finalUrl: wwwUrl, status: null, error: `getaddrinfo ENOTFOUND ${hostname}` };
+  }
+  try {
+    const resp = await axios.get(apexUrl, {
+      timeout: remaining, maxRedirects: 5, headers: CRAWL_REQUEST_HEADERS, validateStatus: () => true,
+    });
+    const finalUrl = resp.request?.res?.responseUrl || apexUrl;
+    const ct = resp.headers['content-type'] || '';
+    if (resp.status >= 400 || !ct.includes('html') || typeof resp.data !== 'string') {
+      return { html: '', finalUrl, status: resp.status, error: `apex fetch failed: HTTP ${resp.status}` };
+    }
+    return { html: resp.data, finalUrl, status: resp.status };
+  } catch (apexErr) {
+    if (TLS_CERT_ERROR.test(apexErr.message)) {
+      const insecure = await fetchInsecureFallback(apexUrl, deadline - Date.now());
+      if (insecure) {
+        logger.warn('[Prospect] tls_unverified — fetched apex (no-www) despite TLS certificate error', {
+          url: apexUrl, originalError: apexErr.message, status: insecure.status,
+        });
+        return { ...insecure, tlsUnverified: true };
+      }
+    }
+    return { html: '', finalUrl: apexUrl, status: null, error: apexErr.message };
+  }
+}
+
 async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
+  const deadline = Date.now() + 10_000;
   let lastStatus = null;
   let lastError = null;
+  let lastFinalUrl = url;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) await sleepJittered(500 * Math.pow(2, attempt - 1)); // 500ms, 1000ms, ...
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
     try {
       const resp = await axios.get(url, {
-        timeout: 10_000,
+        timeout: remaining,
         maxRedirects: 5,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Accept-Language': 'pl,en;q=0.9',
-          'Accept': 'text/html,application/xhtml+xml,*/*',
-          'Accept-Encoding': 'gzip, deflate, br',
-        },
+        headers: CRAWL_REQUEST_HEADERS,
         validateStatus: () => true, // sami decydujemy, co retry'ować
       });
       lastStatus = resp.status;
       const finalUrl = resp.request?.res?.responseUrl || url;
+      lastFinalUrl = finalUrl;
 
       // 404 = strona faktycznie nie istnieje pod tym URL-em — nie ma sensu
       // retry'ować (nie jest to throttling/błąd przejściowy jak 403/429/5xx),
@@ -1435,7 +1534,7 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
         if (attempt < maxRetries) {
           const retryAfter = resp.headers['retry-after'];
           const retryAfterMs = retryAfter && /^\d+$/.test(retryAfter) ? parseInt(retryAfter, 10) * 1000 : 0;
-          if (retryAfterMs > 0) await sleep(retryAfterMs);
+          if (retryAfterMs > 0) await sleep(Math.min(retryAfterMs, Math.max(0, deadline - Date.now())));
           continue;
         }
         return { html: '', finalUrl, status: resp.status, attempts: attempt + 1 };
@@ -1453,12 +1552,37 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
       return { html, finalUrl, status: resp.status, attempts: attempt + 1 };
     } catch (err) {
       lastError = err;
+
+      if (/ENOTFOUND/.test(err.message)) {
+        let hostname = null;
+        try { hostname = new URL(url).hostname; } catch { /* zostaw null */ }
+        if (hostname && hostname.startsWith('www.')) {
+          // DNS dla www się nie zmieni w kolejnych sekundach — nie ponawiamy
+          // www, tylko od razu próbujemy apex w pozostałym budżecie.
+          const apexResult = await fetchApexAfterWwwEnotfound(url, hostname, deadline);
+          logger.warn('[Prospect] ENOTFOUND on www. host — tried apex without www instead of retrying', {
+            url, originalError: err.message, finalUrl: apexResult.finalUrl,
+            status: apexResult.status, apexError: apexResult.error || null,
+          });
+          return { ...apexResult, attempts: attempt + 2 };
+        }
+      }
+
       if (attempt >= maxRetries) {
-        return { html: '', finalUrl: url, status: null, attempts: attempt + 1, error: err.message };
+        if (TLS_CERT_ERROR.test(err.message)) {
+          const insecure = await fetchInsecureFallback(url, deadline - Date.now());
+          if (insecure) {
+            logger.warn('[Prospect] tls_unverified — fetched despite TLS certificate error', {
+              url, originalError: err.message, status: insecure.status,
+            });
+            return { ...insecure, attempts: attempt + 2, tlsUnverified: true };
+          }
+        }
+        return { html: '', finalUrl: lastFinalUrl, status: null, attempts: attempt + 1, error: err.message };
       }
     }
   }
-  return { html: '', finalUrl: url, status: lastStatus, attempts: maxRetries + 1, error: lastError?.message };
+  return { html: '', finalUrl: lastFinalUrl, status: lastStatus, attempts: maxRetries + 1, error: lastError?.message };
 }
 
 // ── Kategorie treści + budżet znaków (decyzja 19.08) ─────────────────────
@@ -1586,6 +1710,7 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
   let homepageHtml    = resume?.homepageHtml   ?? '';
   let effectiveBase   = resume?.effectiveBase  ?? base;
   let homeSection     = resume?.homeSection    ?? '';
+  let tlsUnverified   = resume?.tlsUnverified  ?? false;
 
   function collectContacts(html, $page) {
     const { emails, phones } = extractContactsFromHtml(html, $page);
@@ -1605,8 +1730,9 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     // (fetchPageForCrawl — retry+jitter, nigdy nie rzuca wyjątku) zamiast
     // jednorazowego fetchPage(), żeby przejściowe błędy (timeout, throttling)
     // dostały tę samą szansę na retry co reszta crawla (decyzja 20.08).
-    const { html, finalUrl, status: homeStatus, error: homeError } = await fetchPageForCrawl(base);
+    const { html, finalUrl, status: homeStatus, error: homeError, tlsUnverified: homeTlsUnverified } = await fetchPageForCrawl(base);
     homepageHtml = typeof html === 'string' ? html : '';
+    if (homeTlsUnverified) tlsUnverified = true;
 
     if (!homepageHtml) {
       // Błąd deterministyczny (TLS/DNS) — nie zniknie przy ponownej próbie
@@ -1826,7 +1952,7 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     state: {
       fetched, allEmails, allPhones, diagnostics, fetchedPages,
       identityTitle, identityH1, homepageHtml, effectiveBase, homeSection, baseHostname,
-      allLinks, level2Links,
+      allLinks, level2Links, tlsUnverified,
     },
   };
 }
@@ -1872,7 +1998,7 @@ function dedupeRepeatedFragments(sections) {
 }
 
 function finalizeCrawl(state) {
-  const { homeSection, fetchedPages, diagnostics, allEmails, allPhones, identityTitle, identityH1 } = state;
+  const { homeSection, fetchedPages, diagnostics, allEmails, allPhones, identityTitle, identityH1, tlsUnverified } = state;
   const remainingBudget = Math.max(0, 12_000 - homeSection.length);
   const { selected, includedPaths } = selectWithinBudget(fetchedPages, remainingBudget);
 
@@ -1900,6 +2026,7 @@ function finalizeCrawl(state) {
     text: finalTexts.join('\n\n---\n\n'), contacts, diagnostics,
     identity: { title: identityTitle, h1: identityH1 }, deterministicFailure: null,
     dedup: { chars_before: dedupCharsBefore, chars_after: dedupCharsAfter },
+    tls_unverified: !!tlsUnverified,
   };
 }
 
@@ -2636,6 +2763,10 @@ async function enrichOne(prospectId, opts = {}) {
       // usunięciu dokładnych powtórek między podstronami; chars_after === ta
       // sama liczba co chars_extracted (dedup już wliczony do websiteText).
       if (scraped.dedup) enrichLog.website.dedup = scraped.dedup;
+      // Strona pobrana mimo błędu certyfikatu TLS (patrz TLS_CERT_ERROR /
+      // fetchInsecureFallback) — wyłącznie odzyskanie treści, checkDomainIdentity
+      // niżej nadal decyduje o weryfikacji bez żadnej taryfy ulgowej.
+      if (scraped.tls_unverified) enrichLog.website.tls_unverified = true;
       // Diagnostyka per-kandydat (decyzja 19.08) — żadna strona nie znika bez
       // śladu: url, próby, status HTTP, długości przed/po, czy weszła do
       // finalnej treści, i dokładny powód jeśli nie.
