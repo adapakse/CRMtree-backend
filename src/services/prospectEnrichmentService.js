@@ -195,7 +195,17 @@ function identitySecondarySignal(text, { krsData, gusData }) {
   // Berlinerluft 20.08: polska spółka-córka opisująca niemiecki koncern-matkę
   // była błędnie odrzucana).
   const foreignHit = FOREIGN_COUNTRY_HINTS.test(extractContactBlockText(text));
-  return { positive: !!(postcodeHit || streetHit), negative: foreignHit, postcodeHit, streetHit, foreignHit };
+  // Obcy adres NIE liczy się jako konflikt, jeśli w tym samym tekście jest
+  // TAKŻE własny, lokalny adres firmy (postcode LUB street z KRS/GUS) —
+  // typowy przypadek: polska spółka-córka wymienia obok siebie swój adres
+  // ORAZ adres zagranicznej centrali/oddziału (case: Cartonplast Polska →
+  // cartonplast.com, stopka z niemiecką centralą Cartonplast Group GmbH obok
+  // poprawnego polskiego adresu). Gdy lokalnego adresu brak, obcy trop nadal
+  // sam wystarcza do odrzucenia (case: Mirol sp. z o.o.→mirol.com/Argentyna,
+  // IMW Inżynieria Maszyn Wałcz→deckert.de — tam nie ma żadnego lokalnego
+  // dopasowania obok obcego, więc weto zostaje).
+  const negative = foreignHit && !(postcodeHit || streetHit);
+  return { positive: !!(postcodeHit || streetHit), negative, postcodeHit, streetHit, foreignHit };
 }
 
 // Decyduje czy domena (zgadnięta/wyszukana LUB ręcznie podana z CSV, gdy
@@ -205,14 +215,42 @@ function identitySecondarySignal(text, { krsData, gusData }) {
 // Słaby dowód (wymaga OBU): nazwa w title/h1 ORAZ dokładny element adresu
 // (ulica/kod pocztowy) z danych rejestrowych KRS lub GUS. Samo miasto nie wystarcza.
 function checkDomainIdentity({ nip, text, title, company, krsData, gusData }) {
-  if (nipFoundInText(nip, text))                    return { verified: true, reason: 'nip_match' };
-  if (krsFoundInText(krsData?.krsNumber, text))     return { verified: true, reason: 'krs_match' };
-  if (regonFoundInText(gusData?.regon, text))       return { verified: true, reason: 'regon_match' };
-  const nameHit   = nameTokensMatch(company.company_name, title);
-  const secondary = identitySecondarySignal(text, { krsData, gusData });
-  if (secondary.negative) return { verified: false, reason: 'foreign_address_conflict', nameHit, secondary };
-  if (nameHit && secondary.positive) return { verified: true, reason: 'name_plus_registry_address', nameHit, secondary };
-  return { verified: false, reason: 'insufficient_evidence', nameHit, secondary };
+  const nipMatch   = nipFoundInText(nip, text);
+  const krsMatch   = krsFoundInText(krsData?.krsNumber, text);
+  const regonMatch = regonFoundInText(gusData?.regon, text);
+  const nameHit    = nameTokensMatch(company.company_name, title);
+  const secondary  = identitySecondarySignal(text, { krsData, gusData });
+
+  // Diagnostyka (decyzja 20.08) — obliczana ZAWSZE, niezależnie od tego,
+  // która gałąź niżej decyduje o wyniku, żeby enrichLog.website.identity_check
+  // pokazywał pełny obraz (NIP/KRS/REGON/nazwa/adres/konflikt) nawet gdy
+  // trafienie było na mocnym dowodzie (nip/krs/regon), gdzie wcześniej te pola
+  // w ogóle się nie liczyły. Sama kolejność i progi weryfikacji niżej — bez zmian.
+  const fromKrs = extractAddressGroundTruth(krsData?.registeredAddress);
+  const fromGus = extractGusAddressGroundTruth(gusData);
+  const evidence = {
+    nip_checked:      normalizeNip(nip) || null,
+    nip_match:        nipMatch,
+    krs_checked:      krsData?.krsNumber || null,
+    krs_match:        krsMatch,
+    regon_checked:    gusData?.regon || null,
+    regon_match:      regonMatch,
+    company_name:     company.company_name || null,
+    title_h1:         title || null,
+    name_hit:         nameHit,
+    address_postcode: fromKrs.postcode || fromGus.postcode || null,
+    address_street:   fromKrs.street   || fromGus.street   || null,
+    postcode_hit:     secondary.postcodeHit,
+    street_hit:       secondary.streetHit,
+    foreign_conflict: secondary.foreignHit,
+  };
+
+  if (nipMatch)   return { verified: true, reason: 'nip_match', evidence };
+  if (krsMatch)   return { verified: true, reason: 'krs_match', evidence };
+  if (regonMatch) return { verified: true, reason: 'regon_match', evidence };
+  if (secondary.negative) return { verified: false, reason: 'foreign_address_conflict', nameHit, secondary, evidence };
+  if (nameHit && secondary.positive) return { verified: true, reason: 'name_plus_registry_address', nameHit, secondary, evidence };
+  return { verified: false, reason: 'insufficient_evidence', nameHit, secondary, evidence };
 }
 
 // Wykrywa strony-parkingi/domeny-na-sprzedaż — te zwracają HTTP 200 (więc nie
@@ -238,6 +276,16 @@ function isDomainMarketplaceHost(hostname) {
 function isDomainParkingPage(html) {
   return !!html && DOMAIN_PARKING_HINTS.test(html.slice(0, 20_000));
 }
+
+// Błędy fetcha uznawane za DETERMINISTYCZNE — nie znikną przy ponownej próbie
+// tego samego URL-a (błędny/niepasujący certyfikat TLS, błąd rozwiązywania
+// DNS). Odróżnione od transientnych (timeout, throttling, 5xx), dla których
+// retry ma sens (patrz fetchPageForCrawl). Używane w enrichOne: skan
+// dwustopniowy nie eskaluje fast→full po takim błędzie, bo pełny crawl
+// zawiódłby identycznie (case: 2026-08-20, peter-schmidt.com.pl — cert
+// wystawiony dla home.pl, monipol.pl — strona-parking; oba eskalowały do
+// pełnego crawlu mimo że wynik nie mógł się zmienić).
+const DETERMINISTIC_FETCH_ERROR = /certificate|altnames|ERR_TLS|CERT_HAS_EXPIRED|UNABLE_TO_VERIFY_LEAF|SELF_SIGNED|ENOTFOUND|EAI_AGAIN/i;
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -388,33 +436,12 @@ async function fetchKRS(nip, krsNumberHint) {
     }
   }
 
-  // Fallback: stary endpoint podmiot?nip= (zwraca 400 od 2026-07, zostawiamy na wypadek naprawy przez MS)
-  for (const url of [
-    `${KRS_BASE}/OdpisAktualny/podmiot?nip=${n}&rejestr=P&format=json`,
-    `${KRS_BASE}/OdpisAktualny/podmiot?nip=${n}&format=json`,
-  ]) {
-    try {
-      const { data } = await axios.get(url, {
-        timeout: 10_000,
-        headers: { Accept: 'application/json', 'User-Agent': 'WorktripsPlatform/1.0' },
-      });
-      const result = parseKRS(data);
-      if (result) {
-        logger.info('[Prospect] KRS found via legacy NIP endpoint', { nip: n });
-        return result;
-      }
-    } catch (err) {
-      const status = err.response?.status;
-      if (status === 404) continue;
-      if (status === 400) {
-        logger.debug('[Prospect] KRS legacy NIP endpoint zwraca 400 (znany błąd MS)', { nip: n });
-        break;
-      }
-      logger.warn('[Prospect] KRS legacy request error', { nip: n, status, error: err.message });
-    }
-  }
-
-  logger.info('[Prospect] KRS not found for NIP', { nip: n });
+  // Legacy endpoint podmiot?nip= pomijany celowo (decyzja 20.08, przyspieszenie
+  // enrichmentu) — zwraca 400 dla KAŻDEGO NIP-u od 2026-07 (patrz komentarz przy
+  // findKrsNumberByNip), więc to zapytanie nigdy nie zwraca danych, tylko kosztuje
+  // czas. Jeśli MS kiedyś naprawi endpoint, workaround pozostaje: ręcznie podany
+  // krs_number w bazie (patrz pętla wyżej z krsNumer).
+  logger.info('[Prospect] KRS not found for NIP (legacy endpoint skipped — known broken)', { nip: n });
   return null;
 }
 
@@ -1195,14 +1222,29 @@ function mergeContacts(aiContacts, emails, phones) {
 }
 
 // ── Niezawodność pobierania podstron (decyzja 19.08, po diagnozie ARPOL) ──
-// Sekwencyjne (nigdy równoległe do tego samego hosta — pętle poniżej to
-// for...await), z jitterem między próbami i retry+exponential backoff dla
-// 403/429/5xx/timeoutów/podejrzanie krótkiej odpowiedzi. Realny przypadek:
-// oferta pracy ARPOL "klientów kluczowych" była poprawnym kandydatem i
-// działała w izolacji, ale konsekwentnie znikała w pełnym crawlu (prawdopodobny
-// throttling serwera po kilku żądaniach pod rząd) — bez retry i tak ginęła
-// bez śladu w logach.
+// Maks. CRAWL_CONCURRENCY podstron równocześnie (decyzja 20.08, przyspieszenie
+// enrichmentu — poprzednio było w pełni sekwencyjne), każda z osobnym jitterem
+// między próbami i retry+exponential backoff dla 403/429/5xx/timeoutów/
+// podejrzanie krótkiej odpowiedzi. Retry per-URL zostaje bez zmian — to on,
+// nie sama sekwencyjność, chronił przed throttlingiem w przypadku ARPOL
+// (oferta pracy "klientów kluczowych" znikała w pełnym crawlu, prawdopodobny
+// throttling po kilku żądaniach pod rząd, bez śladu w logach bez retry).
 const SUSPICIOUSLY_SHORT_HTML = 500; // bajtów — poniżej zakładamy błąd/pustą stronę
+const CRAWL_CONCURRENCY = 3;         // maks. równoległych pobrań podstron tej samej firmy
+const FAST_LEVEL1_LIMIT = 4;         // tryb szybki (patrz enrichOne) — tylko najważniejsze podstrony
+const FULL_LEVEL1_LIMIT = 12;        // tryb pełny — bez zmian względem poprzedniego zachowania
+
+// Pula workerów o ograniczonej równoległości — używana zarówno przy pobieraniu
+// podstron jednej firmy (CRAWL_CONCURRENCY) jak i w runBatch (BATCH_CONCURRENCY).
+async function runWithConcurrency(items, limit, worker) {
+  let idx = 0;
+  const runWorker = async () => {
+    while (idx < items.length) {
+      await worker(items[idx++]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runWorker));
+}
 
 async function sleepJittered(baseMs) {
   const jitter = baseMs * (0.5 + Math.random()); // 0.5x-1.5x baseMs
@@ -1357,20 +1399,35 @@ function selectWithinBudget(pages, totalLimit) {
 // Kontakty zbierane są przy okazji już-pobieranych stron — zero dodatkowych requestów
 // diagnostics: per-kandydat {url, attempt, http_status, raw_length, extracted_length, included, reason}
 // — patrz decyzja 19.08: żadna strona nie może "znikać" bez śladu w logach.
-async function scrapeWebsite(baseUrl) {
+// Rdzeń crawlowania, wspólny dla przebiegu "od zera" i dla kontynuacji
+// (resume) z wcześniejszego etapu fast. Zwraca ALBO { terminal } — twardy
+// wynik końcowy (błąd/parking/zły URL, patrz deterministicFailure) — ALBO
+// { state } — surowy, niezbudżetowany stan crawla, który finalizeCrawl()
+// zamienia na finalny { text, contacts, ... }, i który continueCrawlToFull()
+// może przyjąć jako `resume`, żeby NIE pobierać ponownie stron już pobranych
+// (dedup przez `fetched` Set działa identycznie dla resume jak dla świeżego
+// przebiegu — patrz fetchLevel1Candidate/fetchLevel2Candidate niżej).
+async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
   const base = baseUrl.replace(/\/$/, '');
-  let baseHostname;
-  try {
-    baseHostname = new URL(base).hostname;
-  } catch { return { text: '', contacts: { emails: [], phones: [] }, diagnostics: [], identity: { title: '', h1: '' } }; }
+  let baseHostname = resume?.baseHostname ?? null;
+  if (!baseHostname) {
+    try {
+      baseHostname = new URL(base).hostname;
+    } catch {
+      return { terminal: { text: '', contacts: { emails: [], phones: [] }, diagnostics: [], identity: { title: '', h1: '' }, deterministicFailure: { type: 'invalid_url', reason: 'invalid_url' } } };
+    }
+  }
 
-  const fetched     = new Set();
-  const allEmails    = new Set();
-  const allPhones    = new Set();
-  const diagnostics  = [];
-  const fetchedPages = []; // { path, anchor, score, text, category, label }
-  let identityTitle = '';
-  let identityH1    = '';
+  const fetched      = resume?.fetched      ?? new Set();
+  const allEmails     = resume?.allEmails     ?? new Set();
+  const allPhones      = resume?.allPhones     ?? new Set();
+  const diagnostics    = resume?.diagnostics   ?? [];
+  const fetchedPages   = resume?.fetchedPages  ?? []; // { path, anchor, score, text, category, label }
+  let identityTitle   = resume?.identityTitle  ?? '';
+  let identityH1      = resume?.identityH1     ?? '';
+  let homepageHtml    = resume?.homepageHtml   ?? '';
+  let effectiveBase   = resume?.effectiveBase  ?? base;
+  let homeSection     = resume?.homeSection    ?? '';
 
   function collectContacts(html, $page) {
     const { emails, phones } = extractContactsFromHtml(html, $page);
@@ -1383,14 +1440,31 @@ async function scrapeWebsite(baseUrl) {
     logger.info('[Prospect] Candidate page result', entry);
   }
 
-  // ── Krok 1: Homepage — wykryj rzeczywisty hostname po redirect ────
-  let homepageHtml = '';
-  let effectiveBase = base;
-  let homeSection = '';
+  // ── Krok 1: Homepage — pomijane przy kontynuacji (resume), mamy już dane
+  // z etapu fast (homepageHtml/effectiveBase/homeSection/identity*/fetched). ─
+  if (!resume) {
+    // Homepage używa tego samego bezpiecznego fetcha co podstrony
+    // (fetchPageForCrawl — retry+jitter, nigdy nie rzuca wyjątku) zamiast
+    // jednorazowego fetchPage(), żeby przejściowe błędy (timeout, throttling)
+    // dostały tę samą szansę na retry co reszta crawla (decyzja 20.08).
+    const { html, finalUrl, status: homeStatus, error: homeError } = await fetchPageForCrawl(base);
+    homepageHtml = typeof html === 'string' ? html : '';
 
-  try {
-    const { html, finalUrl } = await fetchPage(base);
-    homepageHtml = typeof html === 'string' ? html : String(html);
+    if (!homepageHtml) {
+      // Błąd deterministyczny (TLS/DNS) — nie zniknie przy ponownej próbie
+      // tego samego URL-a, patrz enrichOne (etap fast NIE kontynuuje crawla
+      // na podstawie tej flagi).
+      const deterministic = !!homeError && DETERMINISTIC_FETCH_ERROR.test(homeError);
+      logger.warn('[Prospect] Homepage fetch failed', { base, error: homeError, status: homeStatus, deterministic });
+      return {
+        terminal: {
+          text: '', contacts: { emails: [], phones: [] },
+          diagnostics: [{ url: base, attempt: 1, http_status: homeStatus, raw_length: 0, extracted_length: 0, included: false, reason: homeStatus === 404 ? 'not_found' : 'fetch_error' }],
+          identity: { title: '', h1: '' },
+          deterministicFailure: deterministic ? { type: 'tls_dns', reason: homeError } : null,
+        },
+      };
+    }
 
     // Host po redirectach sprawdzany NIEZALEŻNIE od treści (imw.pl → 301 →
     // premium.pl — giełda domen; treść marketplace'u mogłaby się zmienić,
@@ -1401,9 +1475,14 @@ async function scrapeWebsite(baseUrl) {
     if (isDomainParkingPage(homepageHtml) || isDomainMarketplaceHost(finalHostname)) {
       logger.info('[Prospect] Homepage looks like a domain-parking page — rejecting', { base, finalUrl, finalHostname });
       return {
-        text: '', contacts: { emails: [], phones: [] },
-        diagnostics: [{ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: 0, included: false, reason: 'domain_parking' }],
-        identity: { title: '', h1: '' },
+        terminal: {
+          text: '', contacts: { emails: [], phones: [] },
+          diagnostics: [{ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: 0, included: false, reason: 'domain_parking' }],
+          identity: { title: '', h1: '' },
+          // Potwierdzony parking — kolejna próba zobaczyłaby tę samą stronę,
+          // więc enrichOne nie kontynuuje crawla na podstawie tej flagi.
+          deterministicFailure: { type: 'domain_parking', reason: 'domain_parking' },
+        },
       };
     }
 
@@ -1442,17 +1521,17 @@ async function scrapeWebsite(baseUrl) {
     }
     fetched.add(effectiveBase);
     fetched.add(effectiveBase + '/');
-  } catch (err) {
-    logger.warn('[Prospect] Homepage fetch failed', { base, error: err.message });
-    return { text: '', contacts: { emails: [], phones: [] }, diagnostics: [{ url: base, attempt: 1, http_status: null, raw_length: 0, extracted_length: 0, included: false, reason: 'fetch_error' }], identity: { title: '', h1: '' } };
   }
 
-  // ── Krok 2: Zbierz linki z nawigacji + sitemapy ──────────────────
+  // ── Krok 2: Zbierz linki z nawigacji (+ sitemapy w trybie pełnym) ─
+  // Tryb szybki (fast) pomija sitemapę — to 1-3 dodatkowe żądania HTTP, a
+  // nawigacja sama w sobie już wskazuje najważniejsze podstrony (patrz
+  // enrichOne — scrapeWebsiteFast/continueCrawlToFull).
   const $ = cheerio.load(homepageHtml);
   const navLinks     = extractInternalLinks($, baseHostname);
-  const sitemapLinks = await fetchSitemapUrls(effectiveBase, baseHostname);
+  const sitemapLinks = fast ? [] : await fetchSitemapUrls(effectiveBase, baseHostname);
 
-  const allLinks = new Map();
+  const allLinks = resume?.allLinks ?? new Map();
   for (const { path, fullHref, anchor } of [...navLinks, ...sitemapLinks]) {
     const score = scoreLinkRelevance(path, anchor);
     const existing = allLinks.get(path);
@@ -1461,10 +1540,11 @@ async function scrapeWebsite(baseUrl) {
     }
   }
 
+  const level1Limit = fast ? FAST_LEVEL1_LIMIT : FULL_LEVEL1_LIMIT;
   const candidates = Array.from(allLinks.values())
     .filter(l => l.score > 0 && l.path !== '/')
     .sort((a, b) => b.score - a.score)
-    .slice(0, 12);
+    .slice(0, level1Limit);
 
   logger.info('[Prospect] Site map discovered', {
     base,
@@ -1475,13 +1555,16 @@ async function scrapeWebsite(baseUrl) {
     top_candidates: candidates.map(c => `${c.path}(${c.score})`),
   });
 
-  // ── Krok 3: Pobierz wybrane podstrony (poziom 1), z retry+jitter ──
-  const level2Links = new Map();
+  // ── Krok 3: Pobierz wybrane podstrony (poziom 1), maks. CRAWL_CONCURRENCY
+  // równocześnie — każda z osobnym retry+jitter (patrz fetchPageForCrawl).
+  // Przy kontynuacji (resume) `fetched` już zawiera URL-e pobrane w fast —
+  // fetchLevel1Candidate je pomija (reason: 'duplicate'), NIE pobiera ponownie. ─
+  const level2Links = resume?.level2Links ?? new Map();
 
-  for (const { fullHref, path, anchor, score } of candidates) {
+  async function fetchLevel1Candidate({ fullHref, path, anchor, score }) {
     if (fetched.has(fullHref)) {
       logDiag({ url: fullHref, attempt: 0, http_status: null, raw_length: 0, extracted_length: 0, included: false, reason: 'duplicate' });
-      continue;
+      return;
     }
     fetched.add(fullHref);
 
@@ -1489,7 +1572,7 @@ async function scrapeWebsite(baseUrl) {
     if (error || !html) {
       logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: status === 404 ? 'not_found' : 'fetch_error' });
       await sleepJittered(400);
-      continue;
+      return;
     }
 
     const $page = cheerio.load(html);
@@ -1503,17 +1586,23 @@ async function scrapeWebsite(baseUrl) {
       logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short' });
     }
 
-    for (const { path: p2, fullHref: h2, anchor: a2 } of extractInternalLinks($page, baseHostname)) {
-      if (fetched.has(h2) || allLinks.has(p2) || level2Links.has(p2)) continue;
-      const s2 = scoreLinkRelevance(p2, a2);
-      if (s2 >= 8) level2Links.set(p2, { path: p2, fullHref: h2, anchor: a2, score: s2 });
+    // Tryb szybki nie rozwija się do poziomu 2 — pomiń zbieranie kandydatów.
+    if (!fast) {
+      for (const { path: p2, fullHref: h2, anchor: a2 } of extractInternalLinks($page, baseHostname)) {
+        if (fetched.has(h2) || allLinks.has(p2) || level2Links.has(p2)) continue;
+        const s2 = scoreLinkRelevance(p2, a2);
+        if (s2 >= 8) level2Links.set(p2, { path: p2, fullHref: h2, anchor: a2, score: s2 });
+      }
     }
 
     await sleepJittered(400);
   }
 
-  // ── Krok 4: Pobierz strony poziomu 2 (maks. 6), z retry+jitter ────
-  const level2Candidates = Array.from(level2Links.values())
+  await runWithConcurrency(candidates, CRAWL_CONCURRENCY, fetchLevel1Candidate);
+
+  // ── Krok 4: Pobierz strony poziomu 2 (maks. 6) — pomijane w trybie ──
+  // szybkim (patrz enrichOne — scrapeWebsiteFast/continueCrawlToFull).
+  const level2Candidates = fast ? [] : Array.from(level2Links.values())
     .sort((a, b) => b.score - a.score)
     .slice(0, 6);
 
@@ -1524,10 +1613,10 @@ async function scrapeWebsite(baseUrl) {
     });
   }
 
-  for (const { fullHref, path, anchor, score } of level2Candidates) {
+  async function fetchLevel2Candidate({ fullHref, path, anchor, score }) {
     if (fetched.has(fullHref)) {
       logDiag({ url: fullHref, attempt: 0, http_status: null, raw_length: 0, extracted_length: 0, included: false, reason: 'duplicate' });
-      continue;
+      return;
     }
     fetched.add(fullHref);
 
@@ -1535,7 +1624,7 @@ async function scrapeWebsite(baseUrl) {
     if (error || !html) {
       logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: 'fetch_error' });
       await sleepJittered(400);
-      continue;
+      return;
     }
 
     const $page = cheerio.load(html);
@@ -1552,7 +1641,59 @@ async function scrapeWebsite(baseUrl) {
     await sleepJittered(400);
   }
 
-  // ── Krok 5: Budżetowany wybór treści do limitu 12000 znaków ──────
+  await runWithConcurrency(level2Candidates, CRAWL_CONCURRENCY, fetchLevel2Candidate);
+
+  return {
+    state: {
+      fetched, allEmails, allPhones, diagnostics, fetchedPages,
+      identityTitle, identityH1, homepageHtml, effectiveBase, homeSection, baseHostname,
+      allLinks, level2Links,
+    },
+  };
+}
+
+// ── Krok 5: Budżetowany wybór treści do limitu 12000 znaków ──────────
+// Deduplikacja fragmentów (decyzja 20.08) — usuwa WYŁĄCZNIE dokładne,
+// znormalizowane (trim + collapse spacji + lowercase) powtórki fragmentów
+// zdań między podstronami tej samej firmy, PRZED wysłaniem do AI. Typowy
+// przypadek: identyczna stopka z adresem/telefonem/copyright na każdej
+// podstronie. Zachowywane jest PIERWSZE wystąpienie (w kolejności, w jakiej
+// trafiają do promptu — homepage, potem wybrane podstrony wg rangi), usuwane
+// są tylko KOLEJNE, dokładne powtórki. Fragmenty krótsze niż
+// DEDUP_MIN_FRAGMENT_LEN nigdy nie są usuwane — to często generyczne, krótkie
+// frazy (nie bloki boilerplate), a ich usunięcie byłoby zbyt agresywne.
+// Działa na już oczyszczonym tekście z extractText() — NIE na surowym HTML,
+// więc collectContacts()/extractContactsFromHtml() (wołane wcześniej, na
+// surowym HTML każdej strony) tej deduplikacji w ogóle nie widzą.
+const DEDUP_MIN_FRAGMENT_LEN = 20;
+
+function normalizeFragmentKey(fragment) {
+  return fragment.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function dedupeRepeatedFragments(sections) {
+  const seen = new Set();
+  let charsBefore = 0;
+  const deduped = sections.map(text => {
+    charsBefore += text.length;
+    const fragments = text.split(/(?<=[.!?])\s+/);
+    const kept = [];
+    for (const frag of fragments) {
+      const key = normalizeFragmentKey(frag);
+      if (key.length >= DEDUP_MIN_FRAGMENT_LEN) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
+      kept.push(frag);
+    }
+    return kept.join(' ').replace(/\s+/g, ' ').trim();
+  });
+  const charsAfter = deduped.reduce((sum, t) => sum + t.length, 0);
+  return { sections: deduped, charsBefore, charsAfter };
+}
+
+function finalizeCrawl(state) {
+  const { homeSection, fetchedPages, diagnostics, allEmails, allPhones, identityTitle, identityH1 } = state;
   const remainingBudget = Math.max(0, 12_000 - homeSection.length);
   const { selected, includedPaths } = selectWithinBudget(fetchedPages, remainingBudget);
 
@@ -1565,14 +1706,50 @@ async function scrapeWebsite(baseUrl) {
     }
   }
 
-  const finalTexts = [homeSection, ...selected.map(p => `[${p.label}]\n${p.text}`)].filter(Boolean);
+  const rawSections = [homeSection, ...selected.map(p => `[${p.label}]\n${p.text}`)].filter(Boolean);
+  const { sections: finalTexts, charsBefore: dedupCharsBefore, charsAfter: dedupCharsAfter } = dedupeRepeatedFragments(rawSections);
+  logger.info('[Prospect] Content dedup', {
+    chars_before: dedupCharsBefore, chars_after: dedupCharsAfter, removed: dedupCharsBefore - dedupCharsAfter,
+  });
 
   const contacts = {
     emails: [...allEmails].filter(e => e.includes('@')),
     phones: [...allPhones].filter(p => p.replace(/\D/g, '').length >= 9),
   };
 
-  return { text: finalTexts.join('\n\n---\n\n'), contacts, diagnostics, identity: { title: identityTitle, h1: identityH1 } };
+  return {
+    text: finalTexts.join('\n\n---\n\n'), contacts, diagnostics,
+    identity: { title: identityTitle, h1: identityH1 }, deterministicFailure: null,
+    dedup: { chars_before: dedupCharsBefore, chars_after: dedupCharsAfter },
+  };
+}
+
+// Crawl "od zera" w jednym kroku (bez podziału na fast/pełny) — zachowany dla
+// zgodności/eksportu; enrichOne od decyzji 20.08 (jedno wywołanie AI) używa
+// zamiast tego pary scrapeWebsiteFast() + continueCrawlToFull() niżej.
+async function scrapeWebsite(baseUrl, { fast = false } = {}) {
+  const result = await _crawlWebsite(baseUrl, { fast });
+  if (result.terminal) return result.terminal;
+  return finalizeCrawl(result.state);
+}
+
+// Etap szybki (decyzja 20.08) — WYŁĄCZNIE weryfikacja domeny + wykrywanie
+// trwałych błędów (TLS/DNS/parking). Nigdy nie woła AI — patrz enrichOne.
+// Zwraca też surowy `crawlState`, żeby continueCrawlToFull() mógł dokończyć
+// crawl bez ponownego pobierania stron już pobranych tutaj.
+async function scrapeWebsiteFast(baseUrl) {
+  const result = await _crawlWebsite(baseUrl, { fast: true });
+  if (result.terminal) return { ...result.terminal, crawlState: null };
+  return { ...finalizeCrawl(result.state), crawlState: result.state };
+}
+
+// Dokańcza crawl do pełnej głębokości (sitemapa + do 12 podstron poziomu 1 +
+// poziom 2) na bazie stanu ze scrapeWebsiteFast(). Strony już pobrane w fast
+// NIE są pobierane ponownie — dedup przez `fetched` Set w _crawlWebsite.
+async function continueCrawlToFull(baseUrl, crawlState) {
+  const result = await _crawlWebsite(baseUrl, { fast: false, resume: crawlState });
+  if (result.terminal) return result.terminal; // nie powinno wystąpić przy kontynuacji — homepage już pobrany OK
+  return finalizeCrawl(result.state);
 }
 
 // ── 4. AI analysis (DeepSeek) ───────────────────────────────────────
@@ -1844,16 +2021,24 @@ async function callDeepSeek(userMessage) {
   );
 
   const choice = data?.choices?.[0];
+  const usage = {
+    prompt_tokens:            data?.usage?.prompt_tokens ?? null,
+    completion_tokens:        data?.usage?.completion_tokens ?? null,
+    prompt_cache_hit_tokens:  data?.usage?.prompt_cache_hit_tokens ?? null,
+    prompt_cache_miss_tokens: data?.usage?.prompt_cache_miss_tokens ?? null,
+  };
   logger.info('[Prospect] DeepSeek raw API response', {
     model:            data?.model,
     finish_reason:    choice?.finish_reason,
-    completion_tokens: data?.usage?.completion_tokens,
-    prompt_tokens:    data?.usage?.prompt_tokens,
+    completion_tokens: usage.completion_tokens,
+    prompt_tokens:    usage.prompt_tokens,
+    prompt_cache_hit_tokens:  usage.prompt_cache_hit_tokens,
+    prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
     contentLength:    choice?.message?.content?.length,
     contentPreview:   choice?.message?.content?.slice(0, 300),
   });
 
-  return choice?.message?.content || '{}';
+  return { content: choice?.message?.content || '{}', model: data?.model || null, usage };
 }
 
 async function callAnthropic(userMessage) {
@@ -1888,7 +2073,27 @@ async function callAnthropic(userMessage) {
     }
   );
 
-  return data?.content?.[0]?.text || '{}';
+  // Anthropic nazywa te pola inaczej niż DeepSeek — mapujemy na te same nazwy
+  // (prompt_cache_hit_tokens/prompt_cache_miss_tokens) dla spójnego logu/enrichLog
+  // niezależnie od providera. cache_read = trafienie cache'u (hit), input_tokens
+  // to tokeny faktycznie przetworzone poza trafionym cache'em (miss).
+  const usage = {
+    prompt_tokens:            data?.usage?.input_tokens ?? null,
+    completion_tokens:        data?.usage?.output_tokens ?? null,
+    prompt_cache_hit_tokens:  data?.usage?.cache_read_input_tokens ?? null,
+    prompt_cache_miss_tokens: data?.usage?.input_tokens ?? null,
+  };
+  logger.info('[Prospect] Anthropic raw API response', {
+    model: data?.model,
+    stop_reason: data?.stop_reason,
+    prompt_tokens: usage.prompt_tokens,
+    completion_tokens: usage.completion_tokens,
+    prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens,
+    prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
+    contentLength: data?.content?.[0]?.text?.length,
+  });
+
+  return { content: data?.content?.[0]?.text || '{}', model: data?.model || null, usage };
 }
 
 async function analyzeWithAi(company, krsData, websiteText, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
@@ -1899,7 +2104,7 @@ async function analyzeWithAi(company, krsData, websiteText, fbData = null, linke
   const provider = rows[0]?.value || 'deepseek';
 
   const userMessage = buildUserMessage(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText);
-  const raw = provider === 'anthropic'
+  const { content: raw, model: usedModel, usage } = provider === 'anthropic'
     ? await callAnthropic(userMessage)
     : await callDeepSeek(userMessage);
 
@@ -1908,21 +2113,21 @@ async function analyzeWithAi(company, krsData, websiteText, fbData = null, linke
   try {
     const parsed = JSON.parse(raw);
     logger.info('[Prospect] AI parse OK', { provider, company: company.company_name, signals: parsed.icp_signals, summary: parsed.ai_summary?.slice(0, 80) });
-    return { result: parsed, provider };
+    return { result: parsed, provider, model: usedModel, usage };
   } catch {
     // Fallback: wytnij blok {} i spróbuj jeszcze raz
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) {
       logger.warn('[Prospect] AI returned unparseable response', { provider, preview: raw.slice(0, 200) });
-      return { result: null, provider };
+      return { result: null, provider, model: usedModel, usage };
     }
     try {
       const parsed = JSON.parse(match[0]);
       logger.info('[Prospect] AI parse OK (regex fallback)', { provider, company: company.company_name, signals: parsed.icp_signals });
-      return { result: parsed, provider };
+      return { result: parsed, provider, model: usedModel, usage };
     } catch {
       logger.warn('[Prospect] AI JSON malformed after regex extract', { provider, rawLength: raw.length, rawTail: raw.slice(-200), preview: match[0].slice(0, 300) });
-      return { result: null, provider };
+      return { result: null, provider, model: usedModel, usage };
     }
   }
 }
@@ -1941,6 +2146,19 @@ async function enrichOne(prospectId, opts = {}) {
   );
   if (!rows.length) throw new Error(`Prospect ${prospectId} not found`);
   const company = rows[0];
+
+  // opts.dryRun / opts.trustedDomain — WYŁĄCZNIE do ręcznego testowania (patrz
+  // reczne-sprawdzanie-enrichment-100.md), nigdy ustawiane przez route'y/batch.
+  // trustedDomain: pomija TYLKO bramkę identity-check (dokładnie ten sam efekt
+  // co istniejący website_source === 'manual_correction' — nie zmienia
+  // checkDomainIdentity() ani żadnej reguły weryfikacji, tylko czy jej wynik
+  // blokuje AI). dryRun: żaden UPDATE do bazy się nie wykonuje — wynik, który
+  // normalnie trafiłby do bazy, wraca w polach zwracanego obiektu zamiast tego.
+  const dryRun = opts.dryRun === true;
+  async function persistUpdate(query, params) {
+    if (dryRun) return { rows: [] };
+    return db.query(query, params);
+  }
 
   const enrichLog = { timestamp: new Date().toISOString() };
 
@@ -2013,7 +2231,7 @@ async function enrichOne(prospectId, opts = {}) {
         enrichLog.linkedin = { url: null, method: 'none', status: 'not_found' };
       }
       // Zawsze zapisz URL i status gdy user jawnie zażądał przetworzenia LinkedIn
-      await db.query(
+      await persistUpdate(
         `UPDATE prospect_companies SET
            linkedin_url    = COALESCE($2, linkedin_url),
            linkedin_status = $3
@@ -2038,7 +2256,7 @@ async function enrichOne(prospectId, opts = {}) {
       } catch (pracujErr) {
         enrichLog.pracuj = { url: company.pracuj_url, status: 'not_found', error: pracujErr.message };
       }
-      await db.query(
+      await persistUpdate(
         `UPDATE prospect_companies SET pracuj_status = $2 WHERE id = $1`,
         [prospectId, pracujStatus]
       );
@@ -2086,7 +2304,7 @@ async function enrichOne(prospectId, opts = {}) {
 
       if (!websiteUrl) {
         if (!linkedinText.trim()) {
-          await db.query(
+          await persistUpdate(
             `UPDATE prospect_companies SET
                enrichment_status = 'no_website',
                website_status    = 'not_found',
@@ -2101,26 +2319,27 @@ async function enrichOne(prospectId, opts = {}) {
             [prospectId, JSON.stringify(enrichLog)]
           );
           logger.info('[Prospect] No website found — stopping enrichment', { prospectId });
-          return { status: 'no_website', prospectId };
+          return { status: 'no_website', prospectId, ...(dryRun ? { dryRun: true, enrichment_log: enrichLog } : {}) };
         }
         logger.info('[Prospect] No website but LinkedIn data available — continuing enrichment', { prospectId });
       }
     }
 
     // 3. Scraping — zawsze scrapuj gdy URL dostępny; skipWebsite pomija tylko wyszukiwanie URL
+    //
+    // Etap szybki (decyzja 20.08, przyspieszenie enrichmentu) służy WYŁĄCZNIE
+    // do weryfikacji domeny i wykrywania trwałych błędów (TLS/DNS/parking) —
+    // nigdy nie woła AI. Dopiero gdy domena jest potwierdzona (identity-check)
+    // LUB zaufana (manual_correction/trustedDomain), crawl jest dokańczany do
+    // pełnej głębokości (sitemapa + do 12 podstron poziomu 1 + poziom 2),
+    // WYKORZYSTUJĄC strony już pobrane w fast (continueCrawlToFull — bez
+    // ponownego ich pobierania, patrz dedup w _crawlWebsite), i dopiero na tej
+    // pełnej treści wykonywane jest dokładnie JEDNO wywołanie DeepSeeka.
     let websiteText = '';
     let scrapedContacts = { emails: [], phones: [] };
-    if (websiteUrl) {
-      const scraped = await scrapeWebsite(websiteUrl);
-      websiteText     = scraped.text;       // string — wszystkie sprawdzenia .trim()/.length niżej bez zmian
-      scrapedContacts = scraped.contacts;
-      enrichLog.website.chars_extracted = websiteText.length;
-      enrichLog.website.pages_count = (websiteText.match(/^\[/gm) || []).length || 1;
-      // Diagnostyka per-kandydat (decyzja 19.08) — żadna strona nie znika bez
-      // śladu: url, próby, status HTTP, długości przed/po, czy weszła do
-      // finalnej treści, i dokładny powód jeśli nie.
-      enrichLog.website.candidates = scraped.diagnostics || [];
+    let scanStage = websiteUrl ? 'fast' : 'no_website_url';
 
+    function computeIdentityCheck(scrapedResult) {
       // Weryfikacja tożsamości domeny (decyzja 20.08, po ARPOL/Mirol/IMW-Deckert)
       // — dla źródeł niepewnych z natury (zgadnięta domena/wynik wyszukiwarki)
       // ORAZ dla adresów podanych ręcznie/z CSV (te bywają błędne w danych
@@ -2129,19 +2348,81 @@ async function enrichOne(prospectId, opts = {}) {
       // niezależne sygnały (nazwa w title/h1 + miasto/KRS/REGON) — samo
       // dopasowanie nazwy zawiodło już dwukrotnie (Ims R&d→ims.com,
       // Mirol sp. z o.o.→mirol.com/Argentyna, ta sama nazwa, inna firma).
-      const identity = scraped.identity || { title: '', h1: '' };
-      const identityCheck = checkDomainIdentity({
+      const identity = scrapedResult.identity || { title: '', h1: '' };
+      return checkDomainIdentity({
         nip: company.nip,
-        text: websiteText,
+        text: scrapedResult.text,
         title: `${identity.title} ${identity.h1}`.trim(),
         company, krsData, gusData,
       });
-      enrichLog.website.identity_check = { verified: identityCheck.verified, reason: identityCheck.reason };
+    }
 
+    if (websiteUrl) {
       // websiteSource === 'manual_correction' — admin jawnie wpisał/poprawił
       // ten URL przez UI: to już jest ludzka weryfikacja, nie uruchamiamy
       // automatycznego checku tożsamości nad nim (decyzja 20.08).
-      const trustedByHuman = websiteSource === 'manual_correction';
+      // opts.trustedDomain — wyłącznie testowe, identyczny efekt jak wyżej
+      // (patrz komentarz przy dryRun na początku funkcji).
+      const trustedByHuman = websiteSource === 'manual_correction' || opts.trustedDomain === true;
+
+      const fastScraped = await scrapeWebsiteFast(websiteUrl);
+      let scraped = fastScraped;
+      let identityCheck = computeIdentityCheck(fastScraped);
+
+      if (fastScraped.deterministicFailure) {
+        // Błąd deterministyczny (TLS/DNS, potwierdzony parking domeny, zły
+        // URL) — pełny crawl zobaczyłby dokładnie to samo, więc dokańczanie
+        // crawla tylko kosztowałoby czas bez szans na inny wynik (decyzja
+        // 20.08, patrz DETERMINISTIC_FETCH_ERROR / deterministicFailure).
+        logger.info('[Prospect] Fast scan hit a deterministic failure — not completing crawl', {
+          prospectId, websiteUrl, type: fastScraped.deterministicFailure.type, reason: fastScraped.deterministicFailure.reason,
+        });
+        scanStage = fastScraped.deterministicFailure.type === 'domain_parking'
+          ? 'fast_domain_parking'
+          : 'fast_deterministic_fetch_error';
+      } else if (identityCheck.verified || trustedByHuman) {
+        // Domena potwierdzona (lub zaufana) — dokończ crawl do pełnej
+        // głębokości, ponownie wykorzystując strony już pobrane w fast.
+        logger.info('[Prospect] Domain confirmed — completing full crawl', {
+          prospectId, websiteUrl, reason: identityCheck.reason, trustedByHuman,
+        });
+        scraped = await continueCrawlToFull(websiteUrl, fastScraped.crawlState);
+        // Tożsamość przeliczona na pełnej treści — czysto diagnostyczne
+        // (evidence w logu bogatsze), decyzja o kontynuacji już zapadła wyżej;
+        // może jednak wykryć konflikt (np. zagraniczny adres) niewidoczny w
+        // wąskiej treści fast — sprawdzenie niżej (`!identityCheck.verified`)
+        // wciąż na to reaguje.
+        identityCheck = computeIdentityCheck(scraped);
+        scanStage = 'full';
+      }
+      // else: domena niepotwierdzona i nie zaufana — zostajemy przy wyniku
+      // fast (scanStage='fast'), crawl się nie pogłębia, AI się nie wywołuje
+      // — patrz gałąź needs_review niżej.
+
+      websiteText     = scraped.text;       // string — wszystkie sprawdzenia .trim()/.length niżej bez zmian
+      scrapedContacts = scraped.contacts;
+      enrichLog.website.chars_extracted = websiteText.length;
+      enrichLog.website.pages_count = (websiteText.match(/^\[/gm) || []).length || 1;
+      // Deduplikacja fragmentów (decyzja 20.08) — liczba znaków przed/po
+      // usunięciu dokładnych powtórek między podstronami; chars_after === ta
+      // sama liczba co chars_extracted (dedup już wliczony do websiteText).
+      if (scraped.dedup) enrichLog.website.dedup = scraped.dedup;
+      // Diagnostyka per-kandydat (decyzja 19.08) — żadna strona nie znika bez
+      // śladu: url, próby, status HTTP, długości przed/po, czy weszła do
+      // finalnej treści, i dokładny powód jeśli nie.
+      enrichLog.website.candidates = scraped.diagnostics || [];
+      // Szczegóły identity-check (decyzja 20.08) — NIP/KRS/REGON sprawdzone i
+      // trafione, nazwa firmy vs title/h1, adres z KRS/GUS i czy trafił w
+      // tekście, oraz czy wykryto konflikt zagranicznego adresu.
+      enrichLog.website.identity_check = {
+        verified: identityCheck.verified,
+        reason:   identityCheck.reason,
+        evidence: identityCheck.evidence || null,
+      };
+      // Zapisane od razu (nie dopiero po AI) — inaczej wczesne return'y niżej
+      // (identity-check-fail, brak treści) nigdy nie zapisywały scan_stage,
+      // mimo że skan już się odbył (decyzja 20.08, znaleziona luka w logach).
+      enrichLog.website.scan_stage = scanStage;
 
       if (!trustedByHuman && websiteText.trim() && !identityCheck.verified) {
         // Domena nie przeszła weryfikacji tożsamości — niezależnie od źródła
@@ -2157,7 +2438,7 @@ async function enrichOne(prospectId, opts = {}) {
         logger.info('[Prospect] Domain failed identity check — flagging for manual review, skipping AI', { prospectId, websiteUrl, websiteSource, websiteMethod, reason: identityCheck.reason });
         enrichLog.website.identity_check_failed = true;
         const flags = calcIcpDowngradeFlags(websiteUrl, 'unconfirmed', true);
-        await db.query(
+        await persistUpdate(
           `UPDATE prospect_companies SET
              enrichment_status   = 'done',
              website_url         = $2,
@@ -2174,7 +2455,10 @@ async function enrichOne(prospectId, opts = {}) {
            WHERE id = $1`,
           [prospectId, websiteUrl, JSON.stringify(flags), JSON.stringify(enrichLog), websiteSource]
         );
-        return { status: 'needs_review', prospectId, reason: 'domain_unconfirmed' };
+        return {
+          status: 'needs_review', prospectId, reason: 'domain_unconfirmed',
+          ...(dryRun ? { dryRun: true, enrichment_log: enrichLog } : {}),
+        };
       }
 
       // Jeśli scraping nie zwrócił żadnej treści (timeout, 403, parking page itp.)
@@ -2185,7 +2469,7 @@ async function enrichOne(prospectId, opts = {}) {
         websiteStatus = websiteUrl ? 'blocked' : 'failed';
         enrichLog.website.scrape_failed = true;
         if (!linkedinText.trim() && !krsData) {
-          await db.query(
+          await persistUpdate(
             `UPDATE prospect_companies SET
                enrichment_status = 'no_website',
                website_url       = COALESCE($3, website_url),
@@ -2201,7 +2485,7 @@ async function enrichOne(prospectId, opts = {}) {
             [prospectId, JSON.stringify(enrichLog), websiteUrl, websiteStatus]
           );
           logger.info('[Prospect] Website scrape returned no content — stopping', { prospectId, websiteUrl });
-          return { status: 'no_website', prospectId };
+          return { status: 'no_website', prospectId, ...(dryRun ? { dryRun: true, enrichment_log: enrichLog } : {}) };
         }
         logger.info('[Prospect] Website scrape failed — continuing with KRS/LinkedIn data', { prospectId, websiteUrl, hasKrs: !!krsData, hasLinkedin: !!linkedinText.trim() });
       } else {
@@ -2209,8 +2493,11 @@ async function enrichOne(prospectId, opts = {}) {
       }
     }
 
-    // 4. AI analysis
-    const { result: analysis, provider: usedProvider } = await analyzeWithAi(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText);
+    // 4. AI analysis — dokładnie jedno wywołanie na firmę (decyzja 20.08: AI
+    // nie jest już wywoływane na etapie fast, patrz sekcja 3 wyżej — jeśli
+    // websiteUrl istnieje, w tym miejscu websiteText to już treść pełnego
+    // crawla albo pusta treść ze ścieżek bez strony/danych, nigdy sama treść fast).
+    const { result: analysis, provider: usedProvider, model: usedModel, usage: aiUsage } = await analyzeWithAi(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText);
 
     // Oddziały: tylko z KRS (twarde dane) — nowy prompt ICP nie zwraca już
     // branches_found (to była część starego travel-scoringu).
@@ -2236,12 +2523,20 @@ async function enrichOne(prospectId, opts = {}) {
 
     enrichLog.claude = {
       provider:     usedProvider,
-      model:        usedProvider === 'anthropic' ? ANTHROPIC_MODEL : DEEPSEEK_MODEL,
+      // Dokładny model z odpowiedzi API (nie z konfiguracji requestu) — np.
+      // DeepSeek zwraca "deepseek-v4-flash" mimo że w requeście wysłaliśmy
+      // model: "deepseek-chat" (alias). Fallback na stałą tylko gdyby usage/model
+      // nie przyszły w odpowiedzi.
+      model:        usedModel || (usedProvider === 'anthropic' ? ANTHROPIC_MODEL : DEEPSEEK_MODEL),
       icp_raw:      scoreResult.raw,
       icp_bonus:    bonusResult.bonus,
       icp_total:    totalScore,
       gate_status:  gateStatus,
       signal_reasoning: analysis?.signal_reasoning || null,
+      prompt_tokens:            aiUsage?.prompt_tokens ?? null,
+      completion_tokens:        aiUsage?.completion_tokens ?? null,
+      prompt_cache_hit_tokens:  aiUsage?.prompt_cache_hit_tokens ?? null,
+      prompt_cache_miss_tokens: aiUsage?.prompt_cache_miss_tokens ?? null,
     };
 
     // 5. Zapis do DB
@@ -2249,7 +2544,7 @@ async function enrichOne(prospectId, opts = {}) {
     const merged      = mergeContacts(aiContacts, scrapedContacts.emails, scrapedContacts.phones);
     const keyContacts = merged.length > 0 ? merged : null;
 
-    await db.query(
+    await persistUpdate(
       `UPDATE prospect_companies SET
         company_name           = COALESCE(company_name, $2),
         krs_number              = COALESCE($3, krs_number),
@@ -2314,9 +2609,20 @@ async function enrichOne(prospectId, opts = {}) {
       ]
     );
 
-    return { status: 'done', prospectId };
+    return {
+      status: 'done', prospectId,
+      ...(dryRun ? {
+        dryRun: true,
+        icp_score: totalScore,
+        icp_signals: scoreResult.breakdown,
+        icp_gates: analysis?.gates || null,
+        icp_gate_status: gateStatus,
+        ai_summary: analysis?.ai_summary || null,
+        enrichment_log: enrichLog,
+      } : {}),
+    };
   } catch (err) {
-    await db.query(
+    await persistUpdate(
       `UPDATE prospect_companies SET
         enrichment_status = 'error',
         enrichment_error  = $2,
