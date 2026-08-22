@@ -2694,8 +2694,9 @@ async function enrichOne(prospectId, opts = {}) {
                icp_gates            = NULL,
                icp_bonus_signals     = NULL,
                icp_gate_status        = 'needs_review',
-               enriched_at             = NOW(),
-               enrichment_log           = $2
+               ai_summary              = NULL,
+               enriched_at               = NOW(),
+               enrichment_log             = $2
              WHERE id = $1`,
             [prospectId, JSON.stringify(enrichLog)]
           );
@@ -2868,7 +2869,7 @@ async function enrichOne(prospectId, opts = {}) {
         const flags = calcIcpDowngradeFlags(websiteUrl, 'unconfirmed', true);
         await persistUpdate(
           `UPDATE prospect_companies SET
-             enrichment_status   = 'done',
+             enrichment_status   = 'needs_review',
              website_url         = $2,
              website_source      = COALESCE(website_source, $5),
              website_status      = 'unconfirmed',
@@ -2878,8 +2879,9 @@ async function enrichOne(prospectId, opts = {}) {
              icp_bonus_signals       = NULL,
              icp_gate_status          = 'needs_review',
              icp_downgrade_flags       = $3,
-             enriched_at                = NOW(),
-             enrichment_log               = $4
+             ai_summary                 = NULL,
+             enriched_at                  = NOW(),
+             enrichment_log                 = $4
            WHERE id = $1`,
           [prospectId, websiteUrl, JSON.stringify(flags), JSON.stringify(enrichLog), websiteSource]
         );
@@ -2907,8 +2909,9 @@ async function enrichOne(prospectId, opts = {}) {
                icp_gates            = NULL,
                icp_bonus_signals     = NULL,
                icp_gate_status        = 'needs_review',
-               enriched_at             = NOW(),
-               enrichment_log           = $2
+               ai_summary              = NULL,
+               enriched_at               = NOW(),
+               enrichment_log             = $2
              WHERE id = $1`,
             [prospectId, JSON.stringify(enrichLog), websiteUrl, websiteStatus]
           );
