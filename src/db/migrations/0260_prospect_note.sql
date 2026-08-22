@@ -1,0 +1,4 @@
+ALTER TABLE prospect_companies
+  ADD COLUMN IF NOT EXISTS note          TEXT,
+  ADD COLUMN IF NOT EXISTS note_author   VARCHAR(200),
+  ADD COLUMN IF NOT EXISTS note_updated_at TIMESTAMPTZ;

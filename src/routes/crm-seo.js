@@ -21,6 +21,8 @@ const socialService = require('../services/seoSocialService');
 const linkedinService = require('../services/socialPublish/linkedinService');
 const metaService = require('../services/socialPublish/metaService');
 const wordpressService = require('../services/socialPublish/wordpressService');
+const authorRotation = require('../services/seoAuthorRotationService');
+const { mondayOf, addDays, toDateStr } = require('../utils/isoWeek');
 const logger = require('../utils/logger');
 
 // ── OAuth callbacks — registered BEFORE the auth gate below on purpose.
@@ -837,6 +839,142 @@ router.patch('/tenant-settings/wordpress-publish-mode',
     try {
       await db.query(`UPDATE tenants SET wordpress_publish_mode = $1 WHERE id = $2`, [req.body.wordpress_publish_mode, req.user.tenant_id]);
       res.json({ wordpress_publish_mode: req.body.wordpress_publish_mode });
+    } catch (err) { next(err); }
+  },
+);
+
+// ── SEObot publishing calendar — per-tenant weekday auto-schedule pattern,
+// weekly drag&drop assignment, and the unassigned-article queue. Enabling
+// is_enabled is a tenant's explicit opt-in to auto-publish with NO manual
+// editorial review (confirmed with Adam 2026-08-22): the calendar scheduler
+// job (jobs/seo-calendar-scheduler.js) assigns a round-robin author and a
+// target date, then sets status straight to 'scheduled' — the existing
+// jobs/seo-scheduler.js publishes it exactly like a human-approved article.
+// This block never touches the existing manual generate→approve flow. ─────
+const CALENDAR_DAY_FIELDS = ['monday_count', 'tuesday_count', 'wednesday_count', 'thursday_count', 'friday_count', 'saturday_count', 'sunday_count'];
+
+router.get('/calendar/config', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(`SELECT * FROM tenant_seo_calendar_config WHERE tenant_id = $1`, [req.user.tenant_id]);
+    res.json(rows[0] || {
+      is_enabled: false, monday_count: 0, tuesday_count: 0, wednesday_count: 0,
+      thursday_count: 0, friday_count: 0, saturday_count: 0, sunday_count: 0, end_date: null,
+    });
+  } catch (err) { next(err); }
+});
+
+router.patch('/calendar/config',
+  requireSeoEditor,
+  [
+    body('is_enabled').optional().isBoolean(),
+    ...CALENDAR_DAY_FIELDS.map((f) => body(f).optional().isInt({ min: 0 })),
+    body('end_date').optional({ nullable: true }).isISO8601(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const fields = [...CALENDAR_DAY_FIELDS, 'is_enabled', 'end_date'].filter((f) => req.body[f] !== undefined);
+      if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
+      const values = fields.map((f) => req.body[f]);
+      const setClause = fields.map((f, i) => `${f} = $${i + 2}`).join(', ');
+      const { rows } = await db.query(
+        `INSERT INTO tenant_seo_calendar_config (tenant_id, ${fields.join(', ')})
+         VALUES ($1, ${fields.map((_, i) => `$${i + 2}`).join(', ')})
+         ON CONFLICT (tenant_id) DO UPDATE SET ${setClause}
+         RETURNING *`,
+        [req.user.tenant_id, ...values],
+      );
+      logger.info('SEO calendar config updated', { tenantId: req.user.tenant_id, updatedBy: req.user.id, fields });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// GET /calendar?week_start=YYYY-MM-DD — any date in the target week works,
+// the response always snaps to that week's Monday. is_locked mirrors the
+// exact rule PATCH /calendar/content/:id/assign enforces below: a week is
+// locked (read-only) once its Monday is on/before today's Monday.
+router.get('/calendar',
+  [query('week_start').isISO8601()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const weekStart = mondayOf(new Date(req.query.week_start));
+      const weekEnd = addDays(weekStart, 6);
+      const isLocked = weekStart <= mondayOf(new Date());
+
+      const { rows } = await db.query(
+        `SELECT id, title, slug, status, author_id, scheduled_at
+           FROM seo_content_pieces
+          WHERE tenant_id = $1 AND status IN ('scheduled', 'published') AND scheduled_at::date BETWEEN $2 AND $3
+          ORDER BY scheduled_at ASC`,
+        [req.user.tenant_id, toDateStr(weekStart), toDateStr(weekEnd)],
+      );
+
+      const days = [];
+      for (let i = 0; i < 7; i++) {
+        const dateStr = toDateStr(addDays(weekStart, i));
+        days.push({ date: dateStr, articles: rows.filter((r) => toDateStr(new Date(r.scheduled_at)) === dateStr) });
+      }
+      res.json({ week_start: toDateStr(weekStart), is_locked: isLocked, days });
+    } catch (err) { next(err); }
+  },
+);
+
+router.get('/calendar/unassigned', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, title, slug, status, author_id, created_at FROM seo_content_pieces
+        WHERE tenant_id = $1 AND status = 'queued' ORDER BY created_at ASC`,
+      [req.user.tenant_id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// PATCH /calendar/content/:id/assign — drag&drop target. target_date=null
+// unassigns back to the queue; a date moves it there, assigning a
+// round-robin author if it doesn't already have one. No server-side cap on
+// how many articles land on one day — a manual drag is allowed to exceed
+// the configured daily count (confirmed with Adam 2026-08-22); the only
+// thing this endpoint enforces is the current-week lock.
+router.patch('/calendar/content/:id/assign',
+  requireSeoEditor,
+  [param('id').isInt(), body('target_date').optional({ nullable: true }).isISO8601()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows: existing } = await db.query(
+        `SELECT id, status, author_id FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (!existing[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      if (!['queued', 'scheduled'].includes(existing[0].status)) {
+        return res.status(409).json({ error: 'Ten wpis nie jest częścią automatycznego kalendarza.' });
+      }
+
+      if (!req.body.target_date) {
+        const { rows } = await db.query(
+          `UPDATE seo_content_pieces SET status = 'queued', scheduled_at = NULL WHERE id = $1 RETURNING *`,
+          [req.params.id],
+        );
+        return res.json(rows[0]);
+      }
+
+      const targetDate = new Date(req.body.target_date);
+      if (mondayOf(targetDate) <= mondayOf(new Date())) {
+        return res.status(409).json({ error: 'Ten tydzień jest już zablokowany i trwa publikacja — nie można go edytować.' });
+      }
+
+      const authorId = existing[0].author_id ?? await authorRotation.nextAuthor(req.user.tenant_id);
+      const { rows } = await db.query(
+        `UPDATE seo_content_pieces
+            SET status = 'scheduled', scheduled_at = $2::date + TIME '09:00', author_id = $3
+          WHERE id = $1 RETURNING *`,
+        [req.params.id, toDateStr(targetDate), authorId],
+      );
+      logger.info('SEO calendar article reassigned', { contentId: req.params.id, targetDate: toDateStr(targetDate), reassignedBy: req.user.id });
+      res.json(rows[0]);
     } catch (err) { next(err); }
   },
 );
