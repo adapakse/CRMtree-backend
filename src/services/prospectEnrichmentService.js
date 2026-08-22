@@ -1471,6 +1471,42 @@ async function fetchInsecureFallback(url, timeoutMs = 10_000) {
   }
 }
 
+// Jedna, dodatkowa, KONTROLOWANA próba pobrania tego samego URL-a po http://
+// zamiast https:// — WYŁĄCZNIE gdy błąd certyfikatu (TLS_CERT_ERROR) i
+// fetchInsecureFallback (wciąż https, tylko z pominiętą walidacją certu) też
+// nie zwrócił użytecznej strony (case: Konmet/Nordbeton — HTTPS ma zepsuty
+// certyfikat i inną/brakującą treść nawet po zignorowaniu certu, ale ten sam
+// host po http:// odpowiada normalnie). Zmienia WYŁĄCZNIE protokół — hostname
+// i path zostają identyczne, żadnego zgadywania innej domeny (to rola
+// resolveDomainFallback, osobno, nigdy stąd wołana). Zwraca html przy
+// sukcesie, albo null gdy http też zawiedzie (np. serwer wymusza redirect
+// z powrotem na to samo zepsute https).
+async function fetchHttpFallback(url, timeoutMs) {
+  if (timeoutMs <= 0) return null;
+  let httpUrl;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return null;
+    parsed.protocol = 'http:';
+    httpUrl = parsed.toString();
+  } catch {
+    return null;
+  }
+  try {
+    const resp = await axios.get(httpUrl, {
+      timeout: timeoutMs, maxRedirects: 5, headers: CRAWL_REQUEST_HEADERS,
+      validateStatus: () => true,
+    });
+    const finalUrl = resp.request?.res?.responseUrl || httpUrl;
+    const ct = resp.headers['content-type'] || '';
+    if (resp.status >= 400 || !ct.includes('html')) return null;
+    if (typeof resp.data !== 'string' || resp.data.length < SUSPICIOUSLY_SHORT_HTML) return null;
+    return { html: resp.data, finalUrl, status: resp.status };
+  } catch {
+    return null; // http:// też nieosiągalny (albo redirect z powrotem na zepsute https) — zostaw oryginalny błąd
+  }
+}
+
 // Po ENOTFOUND na "www." (DNS bez rekordu dla www — apex bywa jedynym
 // skonfigurowanym hostem) próbujemy OD RAZU apex, zamiast dalej retry'ować
 // www (DNS się nie zmieni w ciągu kilku sekund). Jeśli apex też zawiedzie
@@ -1584,6 +1620,13 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
               url, originalError: err.message, status: insecure.status,
             });
             return { ...insecure, attempts: attempt + 2, tlsUnverified: true };
+          }
+          const httpFallback = await fetchHttpFallback(url, deadline - Date.now());
+          if (httpFallback) {
+            logger.warn('[Prospect] protocol_fallback: https_to_http — HTTPS failed on certificate, plain HTTP succeeded', {
+              url, httpUrl: httpFallback.finalUrl, originalError: err.message, status: httpFallback.status,
+            });
+            return { ...httpFallback, attempts: attempt + 3, protocolFallback: true };
           }
         }
         return { html: '', finalUrl: lastFinalUrl, status: null, attempts: attempt + 1, error: err.message };
@@ -1719,6 +1762,7 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
   let effectiveBase   = resume?.effectiveBase  ?? base;
   let homeSection     = resume?.homeSection    ?? '';
   let tlsUnverified   = resume?.tlsUnverified  ?? false;
+  let protocolFallback = resume?.protocolFallback ?? false;
 
   function collectContacts(html, $page) {
     const { emails, phones } = extractContactsFromHtml(html, $page);
@@ -1738,9 +1782,10 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     // (fetchPageForCrawl — retry+jitter, nigdy nie rzuca wyjątku) zamiast
     // jednorazowego fetchPage(), żeby przejściowe błędy (timeout, throttling)
     // dostały tę samą szansę na retry co reszta crawla (decyzja 20.08).
-    const { html, finalUrl, status: homeStatus, error: homeError, tlsUnverified: homeTlsUnverified } = await fetchPageForCrawl(base);
+    const { html, finalUrl, status: homeStatus, error: homeError, tlsUnverified: homeTlsUnverified, protocolFallback: homeProtocolFallback } = await fetchPageForCrawl(base);
     homepageHtml = typeof html === 'string' ? html : '';
     if (homeTlsUnverified) tlsUnverified = true;
+    if (homeProtocolFallback) protocolFallback = true;
 
     if (!homepageHtml) {
       // Błąd deterministyczny (TLS/DNS) — nie zniknie przy ponownej próbie
@@ -1966,7 +2011,7 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     state: {
       fetched, allEmails, allPhones, diagnostics, fetchedPages,
       identityTitle, identityH1, homepageHtml, effectiveBase, homeSection, baseHostname,
-      allLinks, level2Links, tlsUnverified,
+      allLinks, level2Links, tlsUnverified, protocolFallback,
     },
   };
 }
@@ -2012,7 +2057,7 @@ function dedupeRepeatedFragments(sections) {
 }
 
 function finalizeCrawl(state) {
-  const { homeSection, fetchedPages, diagnostics, allEmails, allPhones, identityTitle, identityH1, tlsUnverified } = state;
+  const { homeSection, fetchedPages, diagnostics, allEmails, allPhones, identityTitle, identityH1, tlsUnverified, protocolFallback } = state;
   const remainingBudget = Math.max(0, 12_000 - homeSection.length);
   const { selected, includedPaths } = selectWithinBudget(fetchedPages, remainingBudget);
 
@@ -2041,6 +2086,7 @@ function finalizeCrawl(state) {
     identity: { title: identityTitle, h1: identityH1 }, deterministicFailure: null,
     dedup: { chars_before: dedupCharsBefore, chars_after: dedupCharsAfter },
     tls_unverified: !!tlsUnverified,
+    protocol_fallback: protocolFallback ? 'https_to_http' : null,
   };
 }
 
@@ -2784,6 +2830,11 @@ async function enrichOne(prospectId, opts = {}) {
       // fetchInsecureFallback) — wyłącznie odzyskanie treści, checkDomainIdentity
       // niżej nadal decyduje o weryfikacji bez żadnej taryfy ulgowej.
       if (scraped.tls_unverified) enrichLog.website.tls_unverified = true;
+      // Homepage odzyskana po http:// zamiast https:// (fetchHttpFallback) —
+      // wyłącznie gdy błąd certyfikatu i insecure fallback też zawiodły
+      // (patrz komentarz przy fetchHttpFallback). checkDomainIdentity niżej
+      // nadal decyduje o weryfikacji bez żadnej taryfy ulgowej.
+      if (scraped.protocol_fallback) enrichLog.website.protocol_fallback = scraped.protocol_fallback;
       // Diagnostyka per-kandydat (decyzja 19.08) — żadna strona nie znika bez
       // śladu: url, próby, status HTTP, długości przed/po, czy weszła do
       // finalnej treści, i dokładny powód jeśli nie.
