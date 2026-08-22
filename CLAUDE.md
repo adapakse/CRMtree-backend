@@ -41,10 +41,97 @@ DB: PostgreSQL lokalny, baza `crmtree`, user `postgres`, hasło w `.env.local`
 - Port aplikacji: 3000 (domyślny) lub z env `PORT`
 - Azure ingress target port: 3000
 - Azure PostgreSQL wymaga `Allow access from Azure services` w Networking
-- DWH schema: tylko `dwh.partner` i `dwh.sales` (nie dm_partner/dm_sales)
+- DWH schema: per-tenant, patrz sekcja „Infrastruktura Azure i sekrety” niżej — poprzednia
+  wersja tej notatki (tylko `dwh.partner`/`dwh.sales`) była nieaktualna.
 
 ## Projekty NIE mylić
 - `worktrips-doc-backend` — osobna aplikacja worktrips
+
+---
+
+## Infrastruktura Azure i sekrety
+
+### Środowiska
+- **PROD**: Container Apps `crmtree-backend` / `crmtree-frontend` (resource group
+  `rg-crmtree-prod`), DB `crmtreedb` na `crmtree-db.postgres.database.azure.com`. Deploy
+  automatyczny z brancha `master` (GitHub Actions).
+- **INT**: `crmtree-backend-int` / `crmtree-frontend-int` (ten sam resource group, ten sam
+  serwer Postgres, osobna baza `crmtreedb_int`). Deploy z brancha `develop`. Ma
+  `NODE_ENV=development` — aktywuje `POST /api/auth/dev-login` i `GET /api/auth/saml` (dev
+  SSO bypass: lista userów tenanta, logowanie bez hasła). **Te trasy NIE istnieją na PROD**
+  (`NODE_ENV=production` → 404).
+- Subdomeny tenantów: `app.crmtree.pl` (uniwersalny login) / `{slug}.crmtree.pl`
+  (per-tenant), analogicznie `app.int.crmtree.pl` / `{slug}.int.crmtree.pl` na INT —
+  wildcard DNS + cert na obu, nowy tenant nie wymaga żadnej dodatkowej konfiguracji DNS.
+
+### Sekrety — wszystko w Azure Key Vault (`crmtree-vault`), nigdy w plikach ani w kodzie
+Container Apps (PROD i INT) referencują sekrety przez `secretRef` → Key Vault, przez
+system-assigned managed identity
+(`keyvaultref:https://crmtree-vault.vault.azure.net/secrets/<nazwa>,identityref:system`).
+**Nigdy nie wklejaj realnych wartości sekretów do repo, do tego pliku ani do commit
+message** — poniżej tylko nazwy, nie wartości.
+
+Aktualna lista (nazwa sekretu w Key Vault → zmienna env):
+- `db-password` → `DB_PASSWORD`
+- `jwt-secret` → `JWT_SECRET`
+- `google-client-secret` → `GOOGLE_CLIENT_SECRET`
+- `anthropic-api-key` → `ANTHROPIC_API_KEY`
+- `pexels-api-key` → `PEXELS_API_KEY`
+- `deepseek-api-key` → `DEEPSEEK_API_KEY` (zmienna gotowa, kod jeszcze z niej nie korzysta)
+- `serper-api-key` → `SERPER_API_KEY` (zmienna gotowa, kod jeszcze z niej nie korzysta)
+- `facebook-access-token` → `FACEBOOK_ACCESS_TOKEN` (zmienna gotowa, kod jeszcze z niej nie korzysta)
+- `gus-regon-key` → `GUS_REGON_KEY` (zmienna gotowa, kod jeszcze z niej nie korzysta)
+
+Celowy wyjątek: hasło do ACR (`crmtreeregistryazurecrio-crmtreeregistry`) zostaje jako
+zwykły sekret Container Appa, nie w Key Vault — to auto-zarządzane przez Azure poświadczenie
+do pullowania obrazów Dockera, nie sekret aplikacji.
+
+Lokalnie: prawdziwe wartości w `.env.local` (gitignored — `.env.*` w `.gitignore`). Do repo
+trafia tylko `.env.example` z placeholderami.
+
+### Dostęp do bazy Azure Postgres z lokalnego komputera
+Serwer ma firewall — trzeba dodać regułę dla swojego IP, potem posprzątać:
+```bash
+MYIP=$(curl -s https://api.ipify.org)
+az postgres flexible-server firewall-rule create --name crmtree-db --resource-group rg-crmtree-prod --rule-name <twoja-nazwa> --start-ip-address "$MYIP" --end-ip-address "$MYIP"
+# ... praca ...
+az postgres flexible-server firewall-rule delete --name crmtree-db --resource-group rg-crmtree-prod --rule-name <twoja-nazwa> --yes
+```
+Connection string: `host=crmtree-db.postgres.database.azure.com port=5432 dbname=<crmtreedb|crmtreedb_int> user=crmtreeadmin sslmode=require` (hasło: sekret `db-password` w Key Vault).
+
+### Pułapki poznane w praktyce (nieoczywiste z samego kodu)
+
+**Soft-delete tenanta nie zwalnia `name`/`slug`.** Unikalny constraint na `tenants.name`/
+`tenants.slug` NIE jest filtrowany po `deleted_at IS NULL` — próba odtworzenia tenanta pod
+tą samą nazwą zaraz po skasowaniu zawsze rzuca `23505`. `POST /admin/tenants` łapie ten
+wyjątek i zwraca czytelne 409 zamiast 500 (patrz `admin-tenants.js`). Jeśli będzie potrzeba
+realnego odtwarzania nazwy po skasowaniu, trzeba by zrobić partial unique index
+(`WHERE deleted_at IS NULL`) — świadomie jeszcze tego nie zrobiono.
+
+**Login musi być scopowany po hoście, nie tylko po e-mailu.** Ten sam e-mail może istnieć na
+wielu tenantach jednocześnie (realny przypadek w danych testowych). Każde miejsce, które
+robi `SELECT ... FROM users WHERE lower(email)=$1` (login, dev-login, `GET /saml` picker)
+MUSI dodatkowo filtrować po `tenant_id` rozpoznanym z subdomeny hosta — patrz
+`resolveHostTenantId()` w `routes/auth.js`, korzysta z `matchTenantSlug`/
+`resolveRequestHost` z `config/tenantHost.js`. Bez tego `LIMIT 1` bez `ORDER BY` zwraca
+nondeterministycznie losowy wiersz — realnie spowodowało to blokadę logowania („Tenant nie
+jest już dostępny”) dla części userów, dopóki nie zostało naprawione.
+
+**DWH: tabele są per-tenant, nazwa zależy od `dwh_schema_prefix`.** Kod (`crm-partners.js`,
+`crm-sales-data.js`) buduje nazwę tabeli dynamicznie: `dwh.${req.dwhPrefix}_partner` /
+`dwh.${req.dwhPrefix}_sales`, gdzie `req.dwhPrefix` = `tenants.dwh_schema_prefix` (ustawiane
+w `middleware/auth.js`, fallback `crmtree_gold`). **Każdy nowy tenant potrzebuje własnej
+pary tabel** (`dwh.<prefix>_partner`, `dwh.<prefix>_sales`, ta sama struktura co
+`dwh.crmtree_gold_partner`/`_sales`) — bez nich `GET /crm/partners` i cały moduł
+`/crm/sales-data` rzucają 500 (`relation "dwh.<prefix>_partner" does not exist`).
+`crm_partners.dwh_partner_id` (globalnie unikalny w całej tabeli, nie per tenant) łączy
+partnera CRM z jego wierszem w DWH — bez tego linku dane sprzedażowe w raportach nie
+przypiszą się do właściwego opiekuna.
+
+**`git remote origin` bywa martwy po forku z Worktrips.** Jeśli klonujesz to repo i widzisz
+w `git remote -v` adres `bastion.org.hotailors.com`, to relikt po forku — upewnij się, że
+`origin` faktycznie wskazuje na `github.com/adapakse/CRMtree-backend` (użyj
+`git remote set-url origin ...` jeśli nie).
 
 ---
 

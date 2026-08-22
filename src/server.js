@@ -12,6 +12,7 @@ const { startDailyScoresJob } = require("./jobs/daily-scores");
 const { startGscMetricsSyncJob } = require("./jobs/gsc-metrics-sync");
 const { startSeoSchedulerJob } = require("./jobs/seo-scheduler");
 const { startSeoContentRefreshJob } = require("./jobs/seo-content-refresh");
+const { startSeoCalendarSchedulerJob } = require("./jobs/seo-calendar-scheduler");
 const { startBillingRunJob } = require("./jobs/billing-run");
 
 async function start() {
@@ -45,6 +46,7 @@ async function start() {
     startGscMetricsSyncJob();
     startSeoSchedulerJob();
     startSeoContentRefreshJob();
+    startSeoCalendarSchedulerJob();
     startBillingRunJob();
   });
 

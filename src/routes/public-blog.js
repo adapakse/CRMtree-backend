@@ -9,7 +9,10 @@ const { query, param } = require('express-validator');
 const db = require('../config/database');
 const { validate } = require('../middleware/errorHandler');
 
-const CRMTREE_TENANT_ID = '4a299a1b-9e33-43d7-b649-ead5a17d61fc';
+// The production "comparme" tenant (slug: comparme) — our own working CRM
+// tenant (call center works real leads there), not a client. crmtree.pl/blog
+// is single-tenant by design (see file header) and always points at this one.
+const CRMTREE_TENANT_ID = '1e610ab7-1f34-427f-bd05-b4094b8077c7';
 
 // ── GET /api/public/blog ──────────────────────────────────────────
 router.get('/',
