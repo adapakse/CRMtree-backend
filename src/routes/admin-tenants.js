@@ -73,7 +73,7 @@ router.get('/', async (req, res, next) => {
     const { rows } = await db.query(`
       SELECT
         t.id, t.name, t.slug, t.email_domain, t.dwh_schema_prefix,
-        t.is_active, t.active_email_provider, t.created_at, t.updated_at,
+        t.is_active, t.active_email_provider, t.created_at, t.updated_at, t.seo_daily_article_limit,
         COUNT(DISTINCT u.id) FILTER (WHERE u.is_active = true) AS user_count,
         COUNT(DISTINCT u.id) AS total_users,
         COALESCE(
@@ -257,10 +257,11 @@ router.patch('/:id',
     body('email_domain').optional({ nullable: true }),
     body('dwh_schema_prefix').optional({ nullable: true }),
     body('is_active').optional().isBoolean(),
+    body('seo_daily_article_limit').optional().isInt({ min: 0 }),
   ], validate,
   async (req, res, next) => {
     try {
-      const allowed = ['name', 'email_domain', 'dwh_schema_prefix', 'is_active'];
+      const allowed = ['name', 'email_domain', 'dwh_schema_prefix', 'is_active', 'seo_daily_article_limit'];
       const sets = [];
       const vals = [req.params.id];
       let i = 2;
