@@ -61,6 +61,15 @@ const LINK_SCORES = [
   // 20.08 (Wagner-service "Sklep internetowy" i Kigema "zapytanie ofertowe"
   // nigdy nie trafiały do kandydatów, bo nie było dla nich żadnego wzorca).
   { pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout|zapytani\w*.?ofert|request.?for.?quot|\brfq\b/i, score: 8 },
+  // Gołe "B2B" w menu (link do portalu/subdomeny b2b.<domena>), "hurt" i
+  // "współpraca" — dodane po audycie 24.08 (7 rozbieżności AI vs. ręczna
+  // weryfikacja: MPL Power, Wodmax miały wprost link "B2B" do b2b.<domena>
+  // w menu głównym, Wama Gold anchor "Wyroby jubilerskie - hurt" — wszystkie
+  // scorowały 0, więc przegrywały o miejsce w top-12 z ogólnym "Kontakt"/
+  // "O nas" mimo realnego znaczenia biznesowego). "platforma" celowo
+  // ograniczona do bliskiego kontekstu b2b/zakupów/klientów, żeby nie łapać
+  // niezwiązanych trafień typu "platforma widokowa"/"platforma edukacyjna".
+  { pattern: /\bb2b\b|\bhurt\w*|wspolprac\w*|platforma.{0,20}\b(b2b|zakup\w*|klient\w*)\b/i, score: 8 },
   // Strony opisujące szczegółowy proces obsługi/certyfikacji/akredytacji —
   // dotąd nierozpoznawane żadnym wzorcem (case: Inova — "Certyfikacja
   // wyrobów", opis wstępnej rozmowy o wymaganiach/dokumentacji/opłatach,
@@ -334,6 +343,19 @@ const DETERMINISTIC_FETCH_ERROR = /certificate|altnames|ERR_TLS|CERT_HAS_EXPIRED
 // odrzucanymi wyłącznie przez błąd certyfikatu: altname niepasujący do
 // wildcardu hostingu (*.home.pl), wygasły certyfikat, niekompletny łańcuch).
 const TLS_CERT_ERROR = /certificate|altnames|ERR_TLS|CERT_HAS_EXPIRED|UNABLE_TO_VERIFY_LEAF|SELF_SIGNED/i;
+
+// no_website po nieudanym pobraniu jest uzasadnione TYLKO gdy wiemy z
+// pewnością, że domena nie istnieje (DNS) albo jest parkingiem — wszystko
+// inne (403/429/5xx, timeout, błąd certyfikatu) to needs_review, bo strona
+// realnie może działać (patrz: Kaufland, blokada bota na 403).
+function isConfirmedDeadDomain(deterministicFailure) {
+  if (!deterministicFailure) return false;
+  if (deterministicFailure.type === 'domain_parking') return true;
+  if (deterministicFailure.type === 'tls_dns') {
+    return !TLS_CERT_ERROR.test(deterministicFailure.reason || '');
+  }
+  return false;
+}
 
 // Agent z pominiętą walidacją certyfikatu — celowo NIE globalny (nie dotyka
 // process.env.NODE_TLS_REJECT_UNAUTHORIZED ani domyślnej konfiguracji axios).
@@ -1654,7 +1676,14 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
 // (Wagner-service: sklep wypychany przez ogólną treść oferty).
 const CONTENT_CATEGORIES = [
   { id: 'kontakt_oddzialy', reserved: 3000, pattern: /kontakt|contact|oddzia[lł]|placow|lokalizacj|biur[ao]|adres|gdzie.jestesmy/i },
-  { id: 'sklep_b2b',        reserved: 1500, pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout/i },
+  // Rozszerzone po audycie 24.08 o gołe "b2b", "hurt" i "współpraca" — te
+  // strony (np. subdomena b2b.<domena>, "/o-firmie/wspolpraca") były już
+  // pobierane (HTTP 200), ale kategoryzowały się jako 'oferta'/'o_nas_zespol'
+  // (dopasowanie po "o-firmie" w ścieżce) albo 'other' i przegrywały o
+  // budżet znaków z sąsiednimi stronami tej samej kategorii (Targor-Truck,
+  // W. Śliwiński — content_limit mimo trafienia w top rankingu linków).
+  // Bez zmiany rezerwacji (1500 zn.) i bez nowej kategorii.
+  { id: 'sklep_b2b',        reserved: 1500, pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout|\bb2b\b|hurt\w*|wsp[oó][lł]prac\w*|platforma.{0,20}\b(b2b|zakup\w*|klient\w*)\b/i },
   { id: 'oferta',           reserved: 2000, pattern: /oferta|us[lł]ug|produkt|rozwiazani|solution|service|zapytani\w*.?ofert|request.?for.?quot|\brfq\b|certyfikacj|akredytacj|procedura|zasady.wsp[oó]lpracy/i },
   { id: 'o_nas_zespol',     reserved: 3000, pattern: /o[.-]?nas|o[.-]?firmie|about|zesp[oó][lł]|team|kim.jestesmy|historia/i },
   { id: 'praca',            reserved: 2500, pattern: /praca|kariera|jobs|career|rekrutacj|dolacz|join/i },
@@ -2899,9 +2928,15 @@ async function enrichOne(prospectId, opts = {}) {
         websiteStatus = websiteUrl ? 'blocked' : 'failed';
         enrichLog.website.scrape_failed = true;
         if (!linkedinText.trim() && !krsData) {
+          // no_website tylko dla potwierdzonego parkingu/nieistniejącej domeny na
+          // niezaufanym źródle; ręcznie potwierdzona domena (manual_correction/
+          // trustedDomain) po błędzie pobrania ZAWSZE ląduje jako needs_review.
+          const finalStatus = (!trustedByHuman && isConfirmedDeadDomain(fastScraped.deterministicFailure))
+            ? 'no_website'
+            : 'needs_review';
           await persistUpdate(
             `UPDATE prospect_companies SET
-               enrichment_status = 'no_website',
+               enrichment_status = $5,
                website_url       = COALESCE($3, website_url),
                website_status    = $4,
                icp_score          = NULL,
@@ -2913,10 +2948,10 @@ async function enrichOne(prospectId, opts = {}) {
                enriched_at               = NOW(),
                enrichment_log             = $2
              WHERE id = $1`,
-            [prospectId, JSON.stringify(enrichLog), websiteUrl, websiteStatus]
+            [prospectId, JSON.stringify(enrichLog), websiteUrl, websiteStatus, finalStatus]
           );
-          logger.info('[Prospect] Website scrape returned no content — stopping', { prospectId, websiteUrl });
-          return { status: 'no_website', prospectId, ...(dryRun ? { dryRun: true, enrichment_log: enrichLog } : {}) };
+          logger.info('[Prospect] Website scrape returned no content — stopping', { prospectId, websiteUrl, finalStatus });
+          return { status: finalStatus, prospectId, ...(dryRun ? { dryRun: true, enrichment_log: enrichLog } : {}) };
         }
         logger.info('[Prospect] Website scrape failed — continuing with KRS/LinkedIn data', { prospectId, websiteUrl, hasKrs: !!krsData, hasLinkedin: !!linkedinText.trim() });
       } else {
