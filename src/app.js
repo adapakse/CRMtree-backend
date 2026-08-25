@@ -37,6 +37,7 @@ const crmEmail        = require('./routes/crm-email');
 const crmWhatsapp     = require('./routes/crm-whatsapp');
 const pbxRoutes       = require('./routes/pbx');
 const adminPbxRoutes  = require('./routes/admin-pbx');
+const smsRoutes       = require('./routes/sms');
 const publicBlogRoutes    = require('./routes/public-blog');
 const publicTenantsRoutes = require('./routes/public-tenants');
 
@@ -192,6 +193,7 @@ app.use('/api/crm/email',   crmEmail);
 app.use('/api/crm/whatsapp', crmWhatsapp);
 app.use('/api/pbx',          pbxRoutes);
 app.use('/api/admin/pbx',    adminPbxRoutes);
+app.use('/api/sms',          smsRoutes);
 
 app.use('/api/groups',          groupRoutes);
 app.use('/api/document-groups', documentGroupRoutes);
