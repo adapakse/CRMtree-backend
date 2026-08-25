@@ -539,7 +539,12 @@ async function analyzeOne(tenantId, nip) {
       // Bez hinta i bez daty: brak follow_up_date (follow_up_required=true, ale bez konkretnej daty)
     }
 
-    await db.query(
+    // Zapisz wynik tylko jeśli notes_text nie zmienił się od momentu, gdy
+    // zaczęliśmy tę analizę (DeepSeek trwa kilka sekund — w tym oknie mogła
+    // dojść nowa notatka z upsert-from-call). Bez tego "done" nadpisałoby
+    // status ustawiony przez nowszy upsert, gubiąc informację, że świeża
+    // notatka nigdy nie została faktycznie przeanalizowana.
+    const { rowCount } = await db.query(
       `UPDATE call_analysis_companies SET
          score              = $3,
          ai_summary         = $4,
@@ -551,7 +556,7 @@ async function analyzeOne(tenantId, nip) {
          analysis_error     = NULL,
          analyzed_at        = NOW(),
          updated_at         = NOW()
-       WHERE tenant_id = $1 AND nip = $2`,
+       WHERE tenant_id = $1 AND nip = $2 AND notes_text = $9`,
       [
         tenantId,
         nip,
@@ -561,8 +566,19 @@ async function analyzeOne(tenantId, nip) {
         JSON.stringify(Array.isArray(parsed.objections) ? parsed.objections : []),
         followUp,
         followUpDate,
+        notes_text,
       ]
     );
+
+    if (rowCount === 0) {
+      logger.info('[CallAnalysis] Notes changed during analysis, discarding stale result', { tenantId, nip });
+      await db.query(
+        `UPDATE call_analysis_companies SET analysis_status = 'pending', updated_at = NOW()
+         WHERE tenant_id = $1 AND nip = $2 AND analysis_status = 'analyzing'`,
+        [tenantId, nip]
+      );
+      return { status: 'stale' };
+    }
 
     // Utwórz zadanie follow-up na Lead/Partner (jeśli jest data i istnieje encja)
     if (followUpDate) {
@@ -611,8 +627,8 @@ async function runBatch(tenantId) {
       while (idx < nips.length) {
         const nip = nips[idx++];
         const result = await analyzeOne(tenantId, nip);
-        if (result?.status === 'done') batchProgress.done++;
-        else batchProgress.errors++;
+        if (result?.status === 'error') batchProgress.errors++;
+        else batchProgress.done++;
       }
     };
 
