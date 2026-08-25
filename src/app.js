@@ -35,6 +35,8 @@ const crmOutlook      = require('./routes/crm-outlook');
 const crmZoho         = require('./routes/crm-zoho');
 const crmEmail        = require('./routes/crm-email');
 const crmWhatsapp     = require('./routes/crm-whatsapp');
+const pbxRoutes       = require('./routes/pbx');
+const adminPbxRoutes  = require('./routes/admin-pbx');
 const publicBlogRoutes    = require('./routes/public-blog');
 const publicTenantsRoutes = require('./routes/public-tenants');
 
@@ -188,6 +190,8 @@ app.use('/api/crm/outlook', crmOutlook);
 app.use('/api/crm/zoho',    crmZoho);
 app.use('/api/crm/email',   crmEmail);
 app.use('/api/crm/whatsapp', crmWhatsapp);
+app.use('/api/pbx',          pbxRoutes);
+app.use('/api/admin/pbx',    adminPbxRoutes);
 
 app.use('/api/groups',          groupRoutes);
 app.use('/api/document-groups', documentGroupRoutes);
