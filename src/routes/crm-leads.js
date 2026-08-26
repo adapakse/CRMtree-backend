@@ -1051,11 +1051,11 @@ router.get('/:id',
           u.display_name AS assigned_to_name,
           u.email        AS assigned_to_email,
           COALESCE(
-            (SELECT json_agg(act ORDER BY act->>'activity_at' DESC NULLS LAST)
+            (SELECT json_agg(act ORDER BY COALESCE(act->>'activity_at', act->>'created_at') DESC)
              FROM (
                SELECT DISTINCT jsonb_build_object(
                  'id',a.id,'type',a.type,'title',a.title,'body',a.body,
-                 'activity_at',a.activity_at,'duration_min',a.duration_min,
+                 'activity_at',a.activity_at,'created_at',a.created_at,'duration_min',a.duration_min,
                  'participants',a.participants,'meeting_location',a.meeting_location,
                  'created_by',a.created_by,'created_by_name',au.display_name,
                  'assigned_to',a.assigned_to,'assigned_to_name',au2.display_name,
