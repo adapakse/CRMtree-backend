@@ -1295,7 +1295,7 @@ router.get('/:id/activities',
         LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
         LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
         WHERE a.lead_id = $1 AND a.tenant_id = $2
-        ORDER BY a.activity_at DESC
+        ORDER BY COALESCE(a.activity_at, a.created_at) DESC
       `, [id, req.tenantId]);
 
       res.json(rows);

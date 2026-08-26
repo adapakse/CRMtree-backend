@@ -870,7 +870,7 @@ router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
        LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
        LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
        WHERE a.partner_id = $1 AND a.tenant_id = $2
-       ORDER BY a.activity_at DESC`,
+       ORDER BY COALESCE(a.activity_at, a.created_at) DESC`,
       [crmId, req.tenantId]
     );
     res.json(r.rows);
