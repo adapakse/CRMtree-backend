@@ -137,7 +137,7 @@ router.get('/tasks', async (req, res, next) => {
         FROM crm_lead_activities a
         JOIN crm_leads l ON l.id = a.lead_id
         LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to) AND au.tenant_id = $1
-        WHERE a.tenant_id = $1 AND a.type != 'email' AND a.status != 'closed' ${taskScopeLeads}
+        WHERE a.tenant_id = $1 AND a.type IN ('meeting','task') AND a.status != 'closed' ${taskScopeLeads}
 
         UNION ALL
 
@@ -159,7 +159,7 @@ router.get('/tasks', async (req, res, next) => {
         FROM crm_partner_activities a
         JOIN crm_partners p ON p.id = a.partner_id
         LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id) AND au.tenant_id = $1
-        WHERE a.tenant_id = $1 AND a.type != 'email' AND a.status != 'closed' ${taskScopePartners}
+        WHERE a.tenant_id = $1 AND a.type IN ('meeting','task') AND a.status != 'closed' ${taskScopePartners}
 
         UNION ALL
 
