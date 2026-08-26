@@ -75,8 +75,16 @@ function addBusinessDays(date, n) {
   return d;
 }
 
+// Formatuje datę wg lokalnych składowych (getFullYear/getMonth/getDate), spójnie
+// z resztą tego pliku, która liczy na lokalnym czasie (setDate/getDay/setHours).
+// d.toISOString() konwertuje do UTC — na serwerze w Europe/Warsaw (UTC+1/+2)
+// to zawsze cofa północ lokalną o dzień wstecz (np. lokalna 2.09 00:00 →
+// UTC 1.09 22:00 → obcięte do "2026-09-01" zamiast "2026-09-02").
 function toDateStr(d) {
-  return d.toISOString().slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function subBusinessDays(date, n) {
@@ -168,6 +176,26 @@ function computeFollowUpDate(hint, today = new Date()) {
   todayDate.setHours(0, 0, 0, 0);
 
   let m;
+
+  // Jutro / dzisiaj / pojutrze — brakowało tego w worktrips (fallback tam
+  // lądował na "5 dni roboczych od rozmowy" zamiast realnie bliskiego terminu,
+  // np. "jutro" dawało follow-up za tydzień zamiast następnego dnia).
+  // Granice słowa przez \p{L} (Unicode), nie \b — zwykłe \b w JS opiera się na
+  // \w (tylko ASCII), więc łamie się na polskich znakach z ogonkiem: \b tuż
+  // po "ś" w "dziś" nigdy nie domykał granicy i cały wzorzec nie łapał.
+  if (/(?<![\p{L}\p{N}_])pojutrze(?![\p{L}\p{N}_])/u.test(h)) {
+    const d = new Date(todayDate);
+    d.setDate(d.getDate() + 2);
+    return toDateStr(nextBusinessDay(d));
+  }
+  if (/(?<![\p{L}\p{N}_])jutro(?![\p{L}\p{N}_])/u.test(h)) {
+    const d = new Date(todayDate);
+    d.setDate(d.getDate() + 1);
+    return toDateStr(nextBusinessDay(d));
+  }
+  if (/(?<![\p{L}\p{N}_])(dzisiaj|dziś)(?![\p{L}\p{N}_])/u.test(h)) {
+    return toDateStr(nextBusinessDay(todayDate));
+  }
 
   // Konkretna data DD.MM lub DD.MM.YYYY (sprawdź na początku)
   m = h.match(/(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?(?!\d)/);
@@ -364,12 +392,32 @@ function computeFollowUpDate(hint, today = new Date()) {
     }
   }
 
-  // Nazwy miesięcy → 3. dzień następnego wystąpienia tego miesiąca
   const monthNames = [
     [/stycz[eń]n?/, 1], [/lut[ey]/, 2], [/marc/, 3], [/kwiet/, 4],
     [/maj/, 5], [/czerw/, 6], [/lipi/, 7], [/sierp/, 8],
     [/wrze[sś]/, 9], [/pa[zź]dzier/, 10], [/listop/, 11], [/grudz/, 12],
   ];
+
+  // Konkretny dzień + nazwa miesiąca słownie ("27 września") — MUSI być przed
+  // samą "nazwą miesiąca" niżej, bo ta łapałaby też ten przypadek i gubiła
+  // podany dzień, lądując zawsze na 3. dniu miesiąca (realny bug, worktrips
+  // nigdy nie miał gałęzi na dzień+miesiąc słownie, tylko DD.MM cyfrowo albo
+  // sam miesiąc bez dnia).
+  m = h.match(/(\d{1,2})\s+([a-ząćęłńóśźż]+)/);
+  if (m) {
+    const day = parseInt(m[1], 10);
+    const monthWord = m[2];
+    const monthMatch = monthNames.find(([pat]) => pat.test(monthWord));
+    if (monthMatch && day >= 1 && day <= 31) {
+      const mon = monthMatch[1];
+      let year = todayDate.getFullYear();
+      let target = new Date(year, mon - 1, day);
+      if (target <= todayDate) target.setFullYear(target.getFullYear() + 1);
+      return toDateStr(nextBusinessDay(target));
+    }
+  }
+
+  // Nazwy miesięcy → 3. dzień następnego wystąpienia tego miesiąca
   for (const [pat, mon] of monthNames) {
     if (pat.test(h)) {
       const d = new Date(todayDate);
@@ -387,11 +435,15 @@ function computeFollowUpDate(hint, today = new Date()) {
 }
 
 // ── Activity creation on Lead/Partner ─────────────────────────────
-// CRMtree adaptation: crm_lead_activities/crm_partner_activities don't have
-// reminder_type/reminder_at/priority/status/assigned_to columns (worktrips has
-// them from a separate task/reminder subsystem CRMtree hasn't built yet — see
-// backlog "Alert o martwej szansie sprzedażowej"). Insert a plain type='task'
-// activity instead — still shows the right date, just no day-before reminder.
+// assigned_to = kto dzwonił, priority na sztywno 'medium' (jak w worktrips).
+// reminder_type NIE jest już na sztywno '1d_before' jak w worktrips —
+// dopisana reguła progowa (potwierdzona z Kacprem, niezależnie od worktrips):
+// termin ≤3 dni od dziś → przypomnienie tego samego dnia ('at_due'), dalszy
+// termin → dzień przed ('1d_before'). Sam mail przypominający wysyła
+// crmReminderService.js (job src/jobs/crm-reminders.js) — reminder_at tylko
+// zapisuje KIEDY powinien pójść.
+
+const NEAR_TERM_REMINDER_THRESHOLD_DAYS = 3;
 
 async function createFollowUpActivity(tenantId, nip, followUpDate, salespersonId, summary) {
   try {
@@ -409,17 +461,36 @@ async function createFollowUpActivity(tenantId, nip, followUpDate, salespersonId
     );
 
     const activityAt = `${followUpDate}T09:10:00Z`;
-    const title      = 'Follow-up telefoniczny';
-    const body       = summary || null;
+
+    const todayUTC = new Date();
+    todayUTC.setUTCHours(0, 0, 0, 0);
+    const followUpUTC = new Date(followUpDate + 'T00:00:00Z');
+    const daysUntil = Math.round((followUpUTC - todayUTC) / (24 * 3600 * 1000));
+
+    let reminderType, reminderAt;
+    if (daysUntil <= NEAR_TERM_REMINDER_THRESHOLD_DAYS) {
+      reminderType = 'at_due';
+      reminderAt   = activityAt;
+    } else {
+      reminderType = '1d_before';
+      const dayBeforeDate = new Date(followUpDate + 'T00:00:00Z');
+      dayBeforeDate.setUTCDate(dayBeforeDate.getUTCDate() - 1);
+      reminderAt = `${dayBeforeDate.toISOString().slice(0, 10)}T09:10:00Z`;
+    }
+
+    const title = 'Follow-up telefoniczny';
+    const body  = summary || null;
 
     if (partnerRows.length) {
       await db.query(
         `INSERT INTO crm_partner_activities
-           (partner_id, tenant_id, type, title, body, activity_at, created_by, call_analysis_nip)
-         VALUES ($1, $2, 'task', $3, $4, $5::timestamptz, $6::uuid, $7)`,
-        [partnerRows[0].id, tenantId, title, body, activityAt, salespersonId ?? null, digits]
+           (partner_id, tenant_id, type, title, body, activity_at, created_by,
+            assigned_to, reminder_type, reminder_at, priority, call_analysis_nip)
+         VALUES ($1, $2, 'task', $3, $4, $5::timestamptz, $6::uuid,
+                 $6::uuid, $7, $8::timestamptz, 'medium', $9)`,
+        [partnerRows[0].id, tenantId, title, body, activityAt, salespersonId ?? null, reminderType, reminderAt, digits]
       );
-      logger.info('[CallAnalysis] Follow-up task created on partner', { tenantId, nip: digits, followUpDate, partnerId: partnerRows[0].id });
+      logger.info('[CallAnalysis] Follow-up task created on partner', { tenantId, nip: digits, followUpDate, reminderType, partnerId: partnerRows[0].id });
       return;
     }
 
@@ -433,11 +504,13 @@ async function createFollowUpActivity(tenantId, nip, followUpDate, salespersonId
     if (leadRows.length) {
       await db.query(
         `INSERT INTO crm_lead_activities
-           (lead_id, tenant_id, type, title, body, activity_at, created_by, call_analysis_nip)
-         VALUES ($1, $2, 'task', $3, $4, $5::timestamptz, $6::uuid, $7)`,
-        [leadRows[0].id, tenantId, title, body, activityAt, salespersonId ?? null, digits]
+           (lead_id, tenant_id, type, title, body, activity_at, created_by,
+            assigned_to, reminder_type, reminder_at, priority, call_analysis_nip)
+         VALUES ($1, $2, 'task', $3, $4, $5::timestamptz, $6::uuid,
+                 $6::uuid, $7, $8::timestamptz, 'medium', $9)`,
+        [leadRows[0].id, tenantId, title, body, activityAt, salespersonId ?? null, reminderType, reminderAt, digits]
       );
-      logger.info('[CallAnalysis] Follow-up task created on lead', { tenantId, nip: digits, followUpDate, leadId: leadRows[0].id });
+      logger.info('[CallAnalysis] Follow-up task created on lead', { tenantId, nip: digits, followUpDate, reminderType, leadId: leadRows[0].id });
     }
   } catch (err) {
     logger.warn('[CallAnalysis] createFollowUpActivity error', { nip, error: err.message });
@@ -528,15 +601,19 @@ async function analyzeOne(tenantId, nip) {
     const dateHint  = parsed.follow_up_date_hint || null;
 
     // Oblicz datę follow-up używając daty ostatniej rozmowy jako punktu odniesienia.
-    // Fallback 5 dni roboczych tylko gdy jest hint ale nie udało się go sparsować.
+    // Fallback 5 dni roboczych gdy follow_up_required=true, ale albo AI nie dał
+    // hinta (np. rozmowa mówi "wyślę ofertę dzisiaj" — to zobowiązanie do
+    // wysłania czegoś, nie do oddzwonienia w konkretnym terminie, więc AI
+    // słusznie zostawia hint=null), albo hint był ale się nie sparsował.
+    // Bez tego fallbacku follow_up_required=true z hint=null nigdy nie tworzył
+    // żadnego zadania — cichy, niewidoczny błąd (AI mówi "to wymaga
+    // follow-upu", a nic się nie dzieje).
     let followUpDate = null;
     if (followUp) {
       followUpDate = computeFollowUpDate(dateHint, refDate);
-      // Fallback tylko gdy był hint (AI coś napisał) ale parsowanie nie dało wyniku
-      if (!followUpDate && dateHint) {
+      if (!followUpDate) {
         followUpDate = toDateStr(addBusinessDays(refDate, 5));
       }
-      // Bez hinta i bez daty: brak follow_up_date (follow_up_required=true, ale bez konkretnej daty)
     }
 
     // Zapisz wynik tylko jeśli notes_text nie zmienił się od momentu, gdy

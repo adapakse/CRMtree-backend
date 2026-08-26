@@ -865,9 +865,10 @@ router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
     const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.json([]);
     const r = await pool.query(
-      `SELECT a.*, u.display_name AS created_by_name
+      `SELECT a.*, u.display_name AS created_by_name, au.display_name AS assigned_to_name
        FROM crm_partner_activities a
-       LEFT JOIN users u ON u.id = a.created_by AND u.tenant_id = $2
+       LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
+       LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
        WHERE a.partner_id = $1 AND a.tenant_id = $2
        ORDER BY a.activity_at DESC`,
       [crmId, req.tenantId]

@@ -235,7 +235,6 @@ router.get('/users', async (req, res, next) => {
       FROM users
       WHERE is_active = true
         AND crm_role IN ('salesperson', 'sales_manager')
-        AND is_admin = false
         AND tenant_id = $1
       ORDER BY display_name
     `, [req.tenantId]);
@@ -1059,7 +1058,10 @@ router.get('/:id',
                  'status',a.status,'close_comment',a.close_comment,
                  'gmail_thread_id',a.gmail_thread_id,'gmail_message_id',a.gmail_message_id,
                  'email_provider',a.email_provider,
-                 'is_read',a.is_read
+                 'is_read',a.is_read,
+                 'reminder_type',a.reminder_type,'reminder_at',a.reminder_at,
+                 'reminder_sent',a.reminder_sent,'priority',a.priority,
+                 'call_analysis_nip',a.call_analysis_nip
                ) AS act
                FROM crm_lead_activities a
                LEFT JOIN users au  ON au.id  = a.created_by  AND au.tenant_id  = $2
@@ -1284,9 +1286,10 @@ router.get('/:id/activities',
       if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
       const { rows } = await db.query(`
-        SELECT a.*, u.display_name AS created_by_name
+        SELECT a.*, u.display_name AS created_by_name, au.display_name AS assigned_to_name
         FROM crm_lead_activities a
-        LEFT JOIN users u ON u.id = a.created_by AND u.tenant_id = $2
+        LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
+        LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
         WHERE a.lead_id = $1 AND a.tenant_id = $2
         ORDER BY a.activity_at DESC
       `, [id, req.tenantId]);

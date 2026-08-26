@@ -14,6 +14,7 @@ const { startSeoSchedulerJob } = require("./jobs/seo-scheduler");
 const { startSeoContentRefreshJob } = require("./jobs/seo-content-refresh");
 const { startSeoCalendarSchedulerJob } = require("./jobs/seo-calendar-scheduler");
 const { startBillingRunJob } = require("./jobs/billing-run");
+const { startCrmRemindersJob } = require("./jobs/crm-reminders");
 
 async function start() {
   // ─── Startup security checks ──────────────────────────────
@@ -48,6 +49,7 @@ async function start() {
     startSeoContentRefreshJob();
     startSeoCalendarSchedulerJob();
     startBillingRunJob();
+    startCrmRemindersJob();
   });
 
   // ─── Graceful shutdown ────────────────────────────────────
