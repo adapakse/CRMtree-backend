@@ -278,6 +278,13 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
                  WHERE partner_id = p.id AND tenant_id = p.tenant_id AND direction = 'inbound' AND is_read = false)::int AS unread_sms_count,
               (SELECT COUNT(*) FROM whatsapp_messages
                  WHERE partner_id = p.id AND tenant_id = p.tenant_id AND direction = 'incoming' AND is_read = false)::int AS unread_whatsapp_count,
+              (SELECT COUNT(*) FROM pbx_call_log c
+                 WHERE c.partner_id = p.id AND c.tenant_id = p.tenant_id AND c.status IN ('missed','not_answered')
+                   AND NOT EXISTS (
+                     SELECT 1 FROM pbx_call_log c2
+                     WHERE c2.partner_id = c.partner_id AND c2.tenant_id = c.tenant_id
+                       AND c2.status = 'answered' AND c2.started_at > c.started_at
+                   ))::int AS missed_call_count,
               (SELECT COUNT(*) FROM crm_partner_documents WHERE partner_id = p.id AND tenant_id = p.tenant_id)::int AS doc_count,
               p.churn_exempt,
               (SELECT churn_level FROM crm_partner_scores WHERE partner_id = p.id AND tenant_id = p.tenant_id LIMIT 1) AS churn_risk,
