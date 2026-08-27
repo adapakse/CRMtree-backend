@@ -122,7 +122,18 @@ router.get('/',
             (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
             (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id AND d.tenant_id = l.tenant_id) AS document_count,
             (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false)::int AS new_email_count,
-            (SELECT MAX(updated_at) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at
+            (SELECT MAX(updated_at) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at,
+            (SELECT COUNT(*) FROM sms_messages
+               WHERE lead_id = l.id AND tenant_id = l.tenant_id AND direction = 'inbound' AND is_read = false)::int AS unread_sms_count,
+            (SELECT COUNT(*) FROM whatsapp_messages
+               WHERE lead_id = l.id AND tenant_id = l.tenant_id AND direction = 'incoming' AND is_read = false)::int AS unread_whatsapp_count,
+            (SELECT COUNT(*) FROM pbx_call_log c
+               WHERE c.lead_id = l.id AND c.tenant_id = l.tenant_id AND c.status IN ('missed','not_answered')
+                 AND NOT EXISTS (
+                   SELECT 1 FROM pbx_call_log c2
+                   WHERE c2.lead_id = c.lead_id AND c2.tenant_id = c.tenant_id
+                     AND c2.status = 'answered' AND c2.started_at > c.started_at
+                 ))::int AS missed_call_count
           FROM crm_leads l
           LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
           LEFT JOIN crm_partners cp ON cp.lead_id = l.id

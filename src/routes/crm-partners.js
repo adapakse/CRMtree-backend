@@ -274,6 +274,10 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type = 'email' AND is_read = false)::int AS new_email_count,
               (SELECT MAX(updated_at) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at,
+              (SELECT COUNT(*) FROM sms_messages
+                 WHERE partner_id = p.id AND tenant_id = p.tenant_id AND direction = 'inbound' AND is_read = false)::int AS unread_sms_count,
+              (SELECT COUNT(*) FROM whatsapp_messages
+                 WHERE partner_id = p.id AND tenant_id = p.tenant_id AND direction = 'incoming' AND is_read = false)::int AS unread_whatsapp_count,
               (SELECT COUNT(*) FROM crm_partner_documents WHERE partner_id = p.id AND tenant_id = p.tenant_id)::int AS doc_count,
               p.churn_exempt,
               (SELECT churn_level FROM crm_partner_scores WHERE partner_id = p.id AND tenant_id = p.tenant_id LIMIT 1) AS churn_risk,
