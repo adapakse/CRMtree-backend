@@ -62,7 +62,7 @@ module.exports = {
 
   email: {
     from: optional("EMAIL_FROM", "noreply@worktrips.com"),
-    fromName: optional("EMAIL_FROM_NAME", "worktrips.doc"),
+    fromName: optional("EMAIL_FROM_NAME", "CRMtree"),
   },
 
   // ─── Google Workspace / Gmail API ─────────────────────────────────────────

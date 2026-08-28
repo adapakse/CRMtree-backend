@@ -274,6 +274,17 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
               (SELECT COUNT(*) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type = 'email' AND is_read = false)::int AS new_email_count,
               (SELECT MAX(updated_at) FROM crm_partner_activities WHERE partner_id = p.id AND tenant_id = p.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at,
+              (SELECT COUNT(*) FROM sms_messages
+                 WHERE partner_id = p.id AND tenant_id = p.tenant_id AND direction = 'inbound' AND is_read = false)::int AS unread_sms_count,
+              (SELECT COUNT(*) FROM whatsapp_messages
+                 WHERE partner_id = p.id AND tenant_id = p.tenant_id AND direction = 'incoming' AND is_read = false)::int AS unread_whatsapp_count,
+              (SELECT COUNT(*) FROM pbx_call_log c
+                 WHERE c.partner_id = p.id AND c.tenant_id = p.tenant_id AND c.status IN ('missed','not_answered')
+                   AND NOT EXISTS (
+                     SELECT 1 FROM pbx_call_log c2
+                     WHERE c2.partner_id = c.partner_id AND c2.tenant_id = c.tenant_id
+                       AND c2.status = 'answered' AND c2.started_at > c.started_at
+                   ))::int AS missed_call_count,
               (SELECT COUNT(*) FROM crm_partner_documents WHERE partner_id = p.id AND tenant_id = p.tenant_id)::int AS doc_count,
               p.churn_exempt,
               (SELECT churn_level FROM crm_partner_scores WHERE partner_id = p.id AND tenant_id = p.tenant_id LIMIT 1) AS churn_risk,
@@ -539,7 +550,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
        LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
        LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
        WHERE a.partner_id = $1 AND a.tenant_id = $2
-       ORDER BY a.activity_at DESC NULLS LAST`,
+       ORDER BY COALESCE(a.activity_at, a.created_at) DESC`,
       [crmId, req.tenantId]
     );
     partner.activities = actsQ.rows;
@@ -865,11 +876,12 @@ router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
     const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.json([]);
     const r = await pool.query(
-      `SELECT a.*, u.display_name AS created_by_name
+      `SELECT a.*, u.display_name AS created_by_name, au.display_name AS assigned_to_name
        FROM crm_partner_activities a
-       LEFT JOIN users u ON u.id = a.created_by AND u.tenant_id = $2
+       LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
+       LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
        WHERE a.partner_id = $1 AND a.tenant_id = $2
-       ORDER BY a.activity_at DESC`,
+       ORDER BY COALESCE(a.activity_at, a.created_at) DESC`,
       [crmId, req.tenantId]
     );
     res.json(r.rows);

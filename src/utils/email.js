@@ -143,7 +143,7 @@ async function sendMail({ to, subject, html, text }) {
 const BASE_URL = config.frontendUrl;
 
 /**
- * Bazowy wrapper HTML z brandingiem worktrips.doc
+ * Bazowy wrapper HTML z brandingiem CRMtree
  */
 function template(content) {
   return `<!DOCTYPE html>
@@ -155,9 +155,9 @@ function template(content) {
     body { margin:0; padding:0; background:#F4F4F5; font-family:'Segoe UI',Arial,sans-serif; }
     .wrap { max-width:560px; margin:32px auto; background:white; border-radius:12px;
             border:1px solid #E4E4E7; overflow:hidden; }
-    .header { background:#18181B; padding:20px 28px; display:flex; align-items:center; }
+    .header { background:#1F2933; padding:20px 28px; display:flex; align-items:center; }
     .logo { font-size:17px; font-weight:700; color:white; letter-spacing:-.3px; }
-    .logo span { color:#F26522; }
+    .logo span { color:#3BAA5D; }
     .body { padding:28px 28px 20px; color:#27272A; font-size:14px; line-height:1.6; }
     .body h2 { margin:0 0 12px; font-size:18px; color:#18181B; }
     .info-box { background:#FAFAFA; border:1px solid #E4E4E7; border-radius:8px;
@@ -165,7 +165,7 @@ function template(content) {
     .info-row { display:flex; gap:8px; padding:4px 0; }
     .info-label { color:#71717A; min-width:110px; }
     .info-val { color:#18181B; font-weight:500; }
-    .btn { display:inline-block; background:#F26522; color:white; text-decoration:none;
+    .btn { display:inline-block; background:#3BAA5D; color:white; text-decoration:none;
            padding:11px 22px; border-radius:8px; font-weight:600; font-size:13px;
            margin:16px 0 8px; }
     .badge { display:inline-block; padding:2px 8px; border-radius:12px;
@@ -182,12 +182,12 @@ function template(content) {
 <body>
   <div class="wrap">
     <div class="header">
-      <span class="logo">worktrips<span>.doc</span></span>
+      <span class="logo">CRM<span>tree</span></span>
     </div>
     <div class="body">${content}</div>
     <div class="footer">
-      Ta wiadomość została wygenerowana automatycznie przez system worktrips.doc.<br>
-      Nie odpowiadaj na tego maila — adres noreply@worktrips.com nie jest monitorowany.
+      Ta wiadomość została wygenerowana automatycznie przez system CRMtree.<br>
+      Nie odpowiadaj na tego maila — ta skrzynka nie jest monitorowana.
     </div>
   </div>
 </body>
@@ -220,7 +220,7 @@ async function sendTaskAssigned({
 
   await sendMail({
     to,
-    subject: `[worktrips.doc] Nowe zadanie: ${documentName}`,
+    subject: `[CRMtree] Nowe zadanie: ${documentName}`,
     html: template(`
       <h2>Masz nowe zadanie do wykonania</h2>
       <p>Cześć ${assigneeName},</p>
@@ -291,7 +291,7 @@ async function sendDocumentStatusChanged({
 
   await sendMail({
     to,
-    subject: `[worktrips.doc] Status dokumentu zmieniony: ${documentName}`,
+    subject: `[CRMtree] Status dokumentu zmieniony: ${documentName}`,
     html: template(`
       <h2>Status dokumentu został zmieniony</h2>
       <p>Cześć ${recipientName},</p>
@@ -346,7 +346,7 @@ async function sendTaskCompleted({
 
   await sendMail({
     to,
-    subject: `[worktrips.doc] Zadanie ukończone: ${documentName}`,
+    subject: `[CRMtree] Zadanie ukończone: ${documentName}`,
     html: template(`
       <h2>Zadanie zostało ukończone</h2>
       <p>Cześć ${ownerName},</p>
@@ -393,7 +393,7 @@ async function sendTaskRejected({
 
   await sendMail({
     to,
-    subject: `[worktrips.doc] Zadanie odrzucone: ${documentName}`,
+    subject: `[CRMtree] Zadanie odrzucone: ${documentName}`,
     html: template(`
       <h2>Zadanie zostało odrzucone</h2>
       <p>Cześć ${ownerName},</p>
@@ -439,7 +439,7 @@ async function sendDocumentSigned({
 
   await sendMail({
     to,
-    subject: `[worktrips.doc] Dokument podpisany: ${documentName}`,
+    subject: `[CRMtree] Dokument podpisany: ${documentName}`,
     html: template(`
       <h2>Dokument został podpisany</h2>
       <p>Cześć ${recipientName},</p>
@@ -478,11 +478,11 @@ async function sendUserInvitation({
 }) {
   await sendMail({
     to,
-    subject: "[worktrips.doc] Zaproszenie do systemu",
+    subject: "[CRMtree] Zaproszenie do systemu",
     html: template(`
-      <h2>Witaj w worktrips.doc!</h2>
+      <h2>Witaj w CRMtree!</h2>
       <p>Cześć ${displayName},</p>
-      <p>Użytkownik <strong>${invitedByName}</strong> dodał Cię do systemu zarządzania dokumentami <strong>worktrips.doc</strong>.</p>
+      <p>Użytkownik <strong>${invitedByName}</strong> dodał Cię do systemu <strong>CRMtree</strong>.</p>
       <p>Możesz zalogować się używając swojego konta Google Workspace (<strong>${to}</strong>) przez poniższy link:</p>
       <a href="${loginUrl || BASE_URL}" class="btn">Zaloguj się →</a>
       <p style="color:#71717A;font-size:12px;margin-top:16px">
@@ -516,7 +516,7 @@ async function sendCrmActivityAssigned({
 
   await sendMail({
     to,
-    subject: `[worktrips.doc] Nowe zadanie CRM: ${activityTitle}`,
+    subject: `[CRMtree] Nowe zadanie CRM: ${activityTitle}`,
     html: template(`
       <h2>Przypisano Ci nowe zadanie CRM</h2>
       <p>Cześć ${assigneeName},</p>
@@ -551,6 +551,80 @@ async function sendCrmActivityAssigned({
   });
 }
 
+/**
+ * Przypomnienie o nadchodzącym/zbliżającym się zadaniu CRM (lead lub partner).
+ * Port 1:1 z worktrips — wysyłane przez crmReminderService.js.
+ */
+async function sendActivityReminder({
+  to,
+  recipientName,
+  activityType,
+  activityTitle,
+  activityAt,
+  reminderType,   // 'at_due' | '1d_before' | '2d_before' | '3d_before' | 'custom'
+  sourceType,     // 'lead' | 'partner'
+  sourceId,
+  sourceName,
+}) {
+  if (!to) return;
+
+  const url = `${BASE_URL}/crm/${sourceType === 'partner' ? 'partners' : 'leads'}/${sourceId}`;
+
+  const TYPE_LABEL = {
+    call: 'Połączenie', email: 'Email', meeting: 'Spotkanie', note: 'Notatka',
+    task: 'Zadanie', doc_sent: 'Dokument', training: 'Szkolenie', qbr: 'QBR', opportunity: 'Szansa',
+  };
+  const REMINDER_LABEL = {
+    at_due:      'Termin wykonania',
+    '1d_before': '1 dzień przed terminem',
+    '2d_before': '2 dni przed terminem',
+    '3d_before': '3 dni przed terminem',
+    custom:      'Własna data przypomnienia',
+  };
+
+  const typeLabel     = TYPE_LABEL[activityType]    || activityType;
+  const reminderLabel = REMINDER_LABEL[reminderType] || '';
+  const fmtDate = (d) => d
+    ? new Date(d).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '—';
+
+  await sendMail({
+    to,
+    subject: `[CRMtree] ⏰ Przypomnienie: ${typeLabel} — ${activityTitle}`,
+    html: template(`
+      <h2>⏰ Przypomnienie o zadaniu</h2>
+      <p>Cześć ${recipientName || ''},</p>
+      <p>Masz nadchodzące zadanie wymagające uwagi:</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">${sourceType === 'partner' ? 'Partner' : 'Lead'}</span>
+          <span class="info-val">${sourceName}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Typ</span>
+          <span class="info-val"><span class="badge badge-orange">${typeLabel}</span></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Zadanie</span>
+          <span class="info-val"><strong>${activityTitle}</strong></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Termin</span>
+          <span class="info-val">${fmtDate(activityAt)}</span>
+        </div>
+        ${reminderLabel ? `<div class="info-row">
+          <span class="info-label">Przypomnienie</span>
+          <span class="info-val">${reminderLabel}</span>
+        </div>` : ''}
+      </div>
+      <a href="${url}" target="_blank" class="btn">Otwórz ${sourceType === 'partner' ? 'partnera' : 'leada'} →</a>
+      <p style="color:#71717A;font-size:12px;margin-top:12px">
+        Link otworzy się w nowym oknie przeglądarki. Jeśli jesteś zalogowany, nie będziesz musiał się ponownie logować.
+      </p>
+    `),
+  });
+}
+
 // ─── Eksport ──────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -562,4 +636,5 @@ module.exports = {
   sendDocumentSigned,
   sendUserInvitation,
   sendCrmActivityAssigned,
+  sendActivityReminder,
 };
