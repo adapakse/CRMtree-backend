@@ -468,6 +468,54 @@ function calcIcpDowngradeFlags(websiteUrl, websiteStatus, identityUnconfirmed = 
   return flags;
 }
 
+// Blacklista ICP: firmy pasujące do słów kluczowych (domyślnie hurtownie) nie
+// mieszczą się w ICP CRMtree — od icp_score odejmowana jest kara. Słowa i kara
+// są konfigurowalne per-tenant w app_settings (prospect.icp_blacklist_*); te
+// stałe to fallback, gdy brak wiersza dla tenanta (analogicznie do fallbacku
+// providera AI na 'deepseek').
+const ICP_BLACKLIST_DEFAULT_KEYWORDS = ['hurtow', 'sprzedaż hurtowa', 'handel hurtowy', 'dystrybucja hurtowa'];
+const ICP_BLACKLIST_DEFAULT_PENALTY = 15;
+
+async function loadIcpBlacklistSettings(tenantId) {
+  try {
+    const [kw, pen] = await Promise.all([
+      db.query(`SELECT value FROM app_settings WHERE key = 'prospect.icp_blacklist_keywords' AND tenant_id = $1`, [tenantId]),
+      db.query(`SELECT value FROM app_settings WHERE key = 'prospect.icp_blacklist_penalty'  AND tenant_id = $1`, [tenantId]),
+    ]);
+    let keywords = ICP_BLACKLIST_DEFAULT_KEYWORDS;
+    if (kw.rows[0]?.value) {
+      try {
+        const parsed = JSON.parse(kw.rows[0].value);
+        if (Array.isArray(parsed)) keywords = parsed;
+      } catch { /* zła wartość w ustawieniu — trzymaj się domyślnej listy */ }
+    }
+    const penaltyRaw = Number(pen.rows[0]?.value);
+    const penalty = Number.isFinite(penaltyRaw) && penaltyRaw >= 0 ? penaltyRaw : ICP_BLACKLIST_DEFAULT_PENALTY;
+    return { keywords, penalty };
+  } catch {
+    return { keywords: ICP_BLACKLIST_DEFAULT_KEYWORDS, penalty: ICP_BLACKLIST_DEFAULT_PENALTY };
+  }
+}
+
+// Zwraca listę trafionych słów kluczowych (lub null, gdy brak trafienia).
+// Szuka po nazwie firmy, branży, opisie PKD z importu oraz nazwach kodów PKD z GUS.
+function matchesIcpBlacklist(keywords, company, gusData) {
+  if (!Array.isArray(keywords) || !keywords.length) return null;
+  const haystack = [
+    company?.company_name,
+    company?.industry,
+    company?.pkd_description,
+    gusData?.pkdMain,
+    ...(Array.isArray(gusData?.pkdCodes) ? gusData.pkdCodes.map(c => c?.nazwa) : []),
+  ].filter(Boolean).join(' | ').toLowerCase();
+
+  const matched = keywords
+    .map(k => String(k || '').trim().toLowerCase())
+    .filter(k => k && haystack.includes(k));
+
+  return matched.length ? matched : null;
+}
+
 // ── 1. KRS API ─────────────────────────────────────────────────────
 
 async function fetchKRS(nip, krsNumberHint) {
@@ -2974,6 +3022,20 @@ async function enrichOne(prospectId, opts = {}) {
     const gateStatus    = icpGateStatus(analysis?.gates);
     const downgradeFlags = calcIcpDowngradeFlags(websiteUrl, websiteStatus);
 
+    // Blacklista ICP (np. hurtownie) — kara punktowa do icp_score, NIE zmienia
+    // gate_status. Słowa/kara z app_settings, fallback na stałe gdy brak wiersza.
+    const icpBlacklist     = await loadIcpBlacklistSettings(company.tenant_id);
+    const blacklistMatches = matchesIcpBlacklist(icpBlacklist.keywords, company, gusData);
+    const blacklistPenalty = blacklistMatches ? icpBlacklist.penalty : 0;
+    if (blacklistMatches) {
+      downgradeFlags.push({
+        id: 'icp_blacklist',
+        label: `Na blacklist ICP (${blacklistMatches.join(', ')}) — -${blacklistPenalty} pkt`,
+        points: -blacklistPenalty,
+        matched: blacklistMatches,
+      });
+    }
+
     // Bonus (WhatsApp/CRM wykryty) potrzebuje SUROWEGO HTML strony głównej
     // (script tagi) — scrapeWebsite() zwraca już oczyszczony tekst, więc to
     // osobne, dodatkowe pobranie. Błąd tego kroku nie może wywalić enrichmentu.
@@ -2985,7 +3047,7 @@ async function enrichOne(prospectId, opts = {}) {
       } catch { /* bonus to dodatek, nie krytyczne jeśli się nie uda */ }
     }
 
-    const totalScore = Math.min(100, scoreResult.raw + bonusResult.bonus);
+    const totalScore = Math.max(0, Math.min(100, scoreResult.raw + bonusResult.bonus - blacklistPenalty));
 
     enrichLog.claude = {
       provider:     usedProvider,
@@ -2996,6 +3058,8 @@ async function enrichOne(prospectId, opts = {}) {
       model:        usedModel || (usedProvider === 'anthropic' ? ANTHROPIC_MODEL : DEEPSEEK_MODEL),
       icp_raw:      scoreResult.raw,
       icp_bonus:    bonusResult.bonus,
+      icp_blacklist_penalty: blacklistPenalty,
+      icp_blacklist_matched: blacklistMatches || null,
       icp_total:    totalScore,
       gate_status:  gateStatus,
       signal_reasoning: analysis?.signal_reasoning || null,
@@ -3083,6 +3147,7 @@ async function enrichOne(prospectId, opts = {}) {
         icp_signals: scoreResult.breakdown,
         icp_gates: analysis?.gates || null,
         icp_gate_status: gateStatus,
+        icp_downgrade_flags: downgradeFlags,
         ai_summary: analysis?.ai_summary || null,
         enrichment_log: enrichLog,
       } : {}),
