@@ -122,7 +122,18 @@ router.get('/',
             (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
             (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id AND d.tenant_id = l.tenant_id) AS document_count,
             (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false)::int AS new_email_count,
-            (SELECT MAX(updated_at) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at
+            (SELECT MAX(updated_at) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at,
+            (SELECT COUNT(*) FROM sms_messages
+               WHERE lead_id = l.id AND tenant_id = l.tenant_id AND direction = 'inbound' AND is_read = false)::int AS unread_sms_count,
+            (SELECT COUNT(*) FROM whatsapp_messages
+               WHERE lead_id = l.id AND tenant_id = l.tenant_id AND direction = 'incoming' AND is_read = false)::int AS unread_whatsapp_count,
+            (SELECT COUNT(*) FROM pbx_call_log c
+               WHERE c.lead_id = l.id AND c.tenant_id = l.tenant_id AND c.status IN ('missed','not_answered')
+                 AND NOT EXISTS (
+                   SELECT 1 FROM pbx_call_log c2
+                   WHERE c2.lead_id = c.lead_id AND c2.tenant_id = c.tenant_id
+                     AND c2.status = 'answered' AND c2.started_at > c.started_at
+                 ))::int AS missed_call_count
           FROM crm_leads l
           LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
           LEFT JOIN crm_partners cp ON cp.lead_id = l.id
@@ -235,7 +246,6 @@ router.get('/users', async (req, res, next) => {
       FROM users
       WHERE is_active = true
         AND crm_role IN ('salesperson', 'sales_manager')
-        AND is_admin = false
         AND tenant_id = $1
       ORDER BY display_name
     `, [req.tenantId]);
@@ -410,7 +420,7 @@ router.get('/tasks', async (req, res, next) => {
 });
 
 // ── GET /api/crm/leads/calendar ────────────────────────────────────────────
-// Zwraca aktywności typu "meeting" dla kalendarza (leady + partnerzy)
+// Zwraca aktywności typu "meeting"/"task" (otwarte) dla kalendarza (leady + partnerzy)
 // query: date_from (YYYY-MM-DD), date_to, assigned_to (UUID, tylko manager)
 
 router.get('/calendar', async (req, res, next) => {
@@ -418,7 +428,11 @@ router.get('/calendar', async (req, res, next) => {
     const { date_from, date_to, assigned_to } = req.query;
 
     // ── Lead activities ──────────────────────────────────────────────────────
-    const conds  = ["a.type != 'email'", "a.activity_at IS NOT NULL"];
+    // Kalendarz pokazuje tylko meeting/task (nie call/note/email) i pomija
+    // zamknięte taski — inaczej połączenia/notatki z realną activity_at
+    // wisiałyby tu na stałe, a zamknięcie taska nie miałoby żadnego efektu
+    // (w przeciwieństwie do widoku "Zadania", który już filtruje po statusie).
+    const conds  = ["a.type IN ('meeting','task')", "a.activity_at IS NOT NULL", "(a.type != 'task' OR a.status != 'closed')"];
     const params = [req.tenantId];
     conds.push(`l.tenant_id = $1`);
 
@@ -461,7 +475,7 @@ router.get('/calendar', async (req, res, next) => {
     `, params);
 
     // ── Partner activities ───────────────────────────────────────────────────
-    const condsPart  = ["a.type != 'email'", "a.activity_at IS NOT NULL"];
+    const condsPart  = ["a.type IN ('meeting','task')", "a.activity_at IS NOT NULL", "(a.type != 'task' OR a.status != 'closed')"];
     const paramsPart = [req.tenantId];
     condsPart.push(`p.tenant_id = $1`);
 
@@ -1048,18 +1062,21 @@ router.get('/:id',
           u.display_name AS assigned_to_name,
           u.email        AS assigned_to_email,
           COALESCE(
-            (SELECT json_agg(act ORDER BY act->>'activity_at' DESC NULLS LAST)
+            (SELECT json_agg(act ORDER BY COALESCE(act->>'activity_at', act->>'created_at') DESC)
              FROM (
                SELECT DISTINCT jsonb_build_object(
                  'id',a.id,'type',a.type,'title',a.title,'body',a.body,
-                 'activity_at',a.activity_at,'duration_min',a.duration_min,
+                 'activity_at',a.activity_at,'created_at',a.created_at,'duration_min',a.duration_min,
                  'participants',a.participants,'meeting_location',a.meeting_location,
                  'created_by',a.created_by,'created_by_name',au.display_name,
                  'assigned_to',a.assigned_to,'assigned_to_name',au2.display_name,
                  'status',a.status,'close_comment',a.close_comment,
                  'gmail_thread_id',a.gmail_thread_id,'gmail_message_id',a.gmail_message_id,
                  'email_provider',a.email_provider,
-                 'is_read',a.is_read
+                 'is_read',a.is_read,
+                 'reminder_type',a.reminder_type,'reminder_at',a.reminder_at,
+                 'reminder_sent',a.reminder_sent,'priority',a.priority,
+                 'call_analysis_nip',a.call_analysis_nip
                ) AS act
                FROM crm_lead_activities a
                LEFT JOIN users au  ON au.id  = a.created_by  AND au.tenant_id  = $2
@@ -1284,11 +1301,12 @@ router.get('/:id/activities',
       if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
       const { rows } = await db.query(`
-        SELECT a.*, u.display_name AS created_by_name
+        SELECT a.*, u.display_name AS created_by_name, au.display_name AS assigned_to_name
         FROM crm_lead_activities a
-        LEFT JOIN users u ON u.id = a.created_by AND u.tenant_id = $2
+        LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
+        LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
         WHERE a.lead_id = $1 AND a.tenant_id = $2
-        ORDER BY a.activity_at DESC
+        ORDER BY COALESCE(a.activity_at, a.created_at) DESC
       `, [id, req.tenantId]);
 
       res.json(rows);

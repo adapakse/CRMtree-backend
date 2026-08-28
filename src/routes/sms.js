@@ -10,28 +10,14 @@
 // unlike WhatsApp's webhook-driven resolveIncomingSender().
 
 const router = require('express').Router();
-const axios  = require('axios');
 const { body, param } = require('express-validator');
 const db = require('../config/database');
 const { requireAuth }             = require('../middleware/auth');
 const { crmAuth, requireFeature } = require('../middleware/crm-rbac');
 const { validate }                = require('../middleware/errorHandler');
-
-const PBX_BASE = 'https://ub24as22.ip-pbx.eu/virtualPBX/api/';
+const { syncNumber }              = require('../services/smsSyncService');
 
 router.use(requireAuth, crmAuth, requireFeature('pbx'));
-
-// ip-pbx.eu rejects numbers without a country code (400) — CRM phone fields
-// are often stored as bare 9-digit Polish numbers. Same normalization rule
-// as pbx.service.ts's buildTarget() on the frontend (for SIP dialing).
-function normalizePolishPhone(raw) {
-  const trimmed = String(raw).trim();
-  const digits = trimmed.replace(/\D/g, '');
-  if (trimmed.startsWith('+')) return '+' + digits;
-  if (digits.startsWith('00') && digits.length > 11) return '+' + digits.slice(2);
-  if (digits.length === 9) return '+48' + digits;
-  return '+' + digits;
-}
 
 // Grouping/matching key — last 9 digits, ignores country-code prefix and
 // formatting differences (spaces, +, 00 vs +). Same approach as /pbx/phone-lookup.
@@ -91,37 +77,6 @@ function collectPartnerNumbers(partner) {
   return numbers;
 }
 
-// Pulls the full thread for one external number from ip-pbx.eu and upserts
-// each message into sms_messages (dedup via the partial unique index on
-// (owner_user_id, ip_pbx_message_id) — safe to call repeatedly).
-async function syncNumber({ userId, tenantId, creds, entityCol, entityId, number }) {
-  try {
-    const { data } = await axios.get(`${PBX_BASE}sms/correspondence`, {
-      params: {
-        company_side_type:  'direct',
-        company_side_value: creds.direct_phone,
-        external_number:    normalizePolishPhone(number),
-        limit: 200,
-        offset: 0,
-      },
-      headers: { Authorization: `Bearer ${creds.pat_token}` },
-      timeout: 10_000,
-    });
-
-    for (const m of (data.messages || [])) {
-      await db.query(`
-        INSERT INTO sms_messages
-          (tenant_id, owner_user_id, ${entityCol}, direction, from_phone, to_phone, body, status, ip_pbx_message_id, created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-        ON CONFLICT (owner_user_id, ip_pbx_message_id) WHERE ip_pbx_message_id IS NOT NULL DO NOTHING
-      `, [tenantId, userId, entityId, m.direction, m.from_value, m.to_value, m.body, m.status, m.id, m.created_at]);
-    }
-  } catch (err) {
-    console.warn('[SMS sync] failed for number', number, ':', err.response?.status, err.message);
-    // Best-effort — one failing number shouldn't block the rest of the thread.
-  }
-}
-
 async function buildThreadResponse(res, { tenantId, userId, entityCol, entityId, numbers }) {
   const creds = await getOwnCreds(userId);
   if (!creds?.pat_token) {
@@ -135,8 +90,14 @@ async function buildThreadResponse(res, { tenantId, userId, entityCol, entityId,
     await syncNumber({ userId, tenantId, creds, entityCol, entityId, number: n.number });
   }
 
+  await db.query(
+    `UPDATE sms_messages SET is_read = true
+     WHERE tenant_id = $1 AND ${entityCol} = $2 AND direction = 'inbound' AND is_read = false`,
+    [tenantId, entityId],
+  );
+
   const { rows } = await db.query(
-    `SELECT id, direction, from_phone, to_phone, body, status, created_at
+    `SELECT id, direction, from_phone, to_phone, body, status, created_at, is_read
      FROM sms_messages WHERE tenant_id = $1 AND ${entityCol} = $2 ORDER BY created_at ASC`,
     [tenantId, entityId],
   );
@@ -150,7 +111,7 @@ async function buildThreadResponse(res, { tenantId, userId, entityCol, entityId,
       .filter(r => last9(r.direction === 'outbound' ? r.to_phone : r.from_phone) === last9(n.number))
       .map(r => ({
         id: r.id, direction: r.direction, body: r.body, status: r.status,
-        created_at: r.created_at, from: r.from_phone, to: r.to_phone,
+        created_at: r.created_at, from: r.from_phone, to: r.to_phone, is_read: r.is_read,
       })),
   }));
 
