@@ -520,6 +520,7 @@ router.get('/authors', async (req, res, next) => {
 
 router.post('/authors',
   requireSeoEditor,
+  photoUpload.single('file'),
   [
     body('full_name').isString().trim().notEmpty(),
     body('job_title').optional({ nullable: true }).isString().trim(),
@@ -537,7 +538,29 @@ router.post('/authors',
         [req.user.tenant_id, req.body.full_name, req.body.job_title || null, req.body.bio || null,
          req.body.photo_url || null, req.body.linkedin_url || null],
       );
-      res.status(201).json(rows[0]);
+      let author = rows[0];
+
+      // Zdjęcie wgrane od razu przy tworzeniu — blob potrzebuje id autora, więc
+      // leci po insercie. Nieudany upload nie przerywa tworzenia: autor zostaje,
+      // zdjęcie można dodać w edycji.
+      if (req.file) {
+        try {
+          const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[req.file.mimetype] || 'jpg';
+          const blobPath = `seo-authors/${author.id}-${Date.now()}.${ext}`;
+          await storageService.uploadBuffer(blobPath, req.file.buffer, req.file.mimetype);
+          const { rows: updated } = await db.query(
+            `UPDATE seo_authors SET photo_url = $3
+              WHERE id = $1 AND tenant_id = $2
+              RETURNING id, full_name, job_title, bio, photo_url, linkedin_url, is_active`,
+            [author.id, req.user.tenant_id, blobPath],
+          );
+          if (updated[0]) author = updated[0];
+        } catch (photoErr) {
+          logger.warn('SEO author created, photo upload failed', { authorId: author.id, error: photoErr.message });
+        }
+      }
+
+      res.status(201).json(author);
     } catch (err) { next(err); }
   },
 );
