@@ -428,11 +428,11 @@ router.get('/calendar', async (req, res, next) => {
     const { date_from, date_to, assigned_to } = req.query;
 
     // ── Lead activities ──────────────────────────────────────────────────────
-    // Kalendarz pokazuje tylko meeting/task (nie call/note/email) i pomija
-    // zamknięte taski — inaczej połączenia/notatki z realną activity_at
-    // wisiałyby tu na stałe, a zamknięcie taska nie miałoby żadnego efektu
-    // (w przeciwieństwie do widoku "Zadania", który już filtruje po statusie).
-    const conds  = ["a.type IN ('meeting','task')", "a.activity_at IS NOT NULL", "(a.type != 'task' OR a.status != 'closed')"];
+    // Kalendarz pokazuje meeting/task/call (nie note/email) i pomija zamknięte
+    // taski. Połączenia są potrzebne do planowania telefonów (zgłoszenie
+    // Angeliki na WorkTrips 31.08); notatki (w tym auto-podsumowania AI)
+    // dalej odpadają jako type='note'.
+    const conds  = ["a.type IN ('meeting','task','call')", "a.activity_at IS NOT NULL", "(a.type != 'task' OR a.status != 'closed')"];
     const params = [req.tenantId];
     conds.push(`l.tenant_id = $1`);
 
@@ -475,7 +475,7 @@ router.get('/calendar', async (req, res, next) => {
     `, params);
 
     // ── Partner activities ───────────────────────────────────────────────────
-    const condsPart  = ["a.type IN ('meeting','task')", "a.activity_at IS NOT NULL", "(a.type != 'task' OR a.status != 'closed')"];
+    const condsPart  = ["a.type IN ('meeting','task','call')", "a.activity_at IS NOT NULL", "(a.type != 'task' OR a.status != 'closed')"];
     const paramsPart = [req.tenantId];
     condsPart.push(`p.tenant_id = $1`);
 
