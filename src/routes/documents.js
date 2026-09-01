@@ -562,7 +562,22 @@ router.patch(
         userAgent: req.auditContext?.userAgent,
       });
 
-      res.json(updated[0]);
+      // RETURNING * lacks the users/group joins the client needs to render the
+      // owner and group labels — without them the detail panel blanks the
+      // Owner field right after a save. Re-select with the same joins the GET
+      // and POST endpoints use.
+      const { rows: full } = await db.query(
+        `SELECT d.*,
+                gp.name AS group_name, gp.display_name AS group_display, gp.has_owner_restriction,
+                u.display_name AS owner_name, u.email AS owner_email
+           FROM documents d
+           LEFT JOIN group_profiles gp ON gp.id = d.group_id
+           LEFT JOIN users u           ON u.id  = d.owner_id
+          WHERE d.id = $1 AND d.tenant_id = $2`,
+        [req.params.id, req.tenantId],
+      );
+
+      res.json(full[0] ?? updated[0]);
     } catch (err) {
       next(err);
     }
