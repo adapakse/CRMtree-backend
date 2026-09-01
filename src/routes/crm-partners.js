@@ -890,6 +890,28 @@ router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
   }
 });
 
+// ── Helper: oblicz reminder_at z activity_at + reminder_type ──────────────────
+// Kopia z crm-leads.js (jak w worktrips — każda trasa ma własną).
+function computeReminderAt(activity_at, reminder_type, reminder_at_custom) {
+  if (!activity_at || !reminder_type || reminder_type === 'none') return null;
+  const due = new Date(activity_at);
+  if (isNaN(due.getTime())) return null;
+  if (reminder_type === 'custom') {
+    if (!reminder_at_custom) return null;
+    const c = new Date(reminder_at_custom);
+    return isNaN(c.getTime()) ? null : c.toISOString();
+  }
+  const d = new Date(due);
+  if      (reminder_type === 'at_due')     { /* w terminie */ }
+  else if (reminder_type === '30m_before') d.setMinutes(d.getMinutes() - 30);
+  else if (reminder_type === '1h_before')  d.setHours(d.getHours() - 1);
+  else if (reminder_type === '1d_before')  d.setDate(d.getDate() - 1);
+  else if (reminder_type === '2d_before')  d.setDate(d.getDate() - 2);
+  else if (reminder_type === '3d_before')  d.setDate(d.getDate() - 3);
+  else return null;
+  return d.toISOString();
+}
+
 // ── POST /crm/partners/:id/activities ─────────────────────────────────────────
 // Przy typie 'meeting' automatycznie tworzy event w Google Calendar.
 router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
@@ -900,6 +922,7 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
       type = "note", title, body,
       activity_at, duration_min, meeting_location, participants,
       assigned_to,
+      reminder_type, reminder_at: reminder_at_custom,
       // pola szansy sprzedaży
       opp_value, opp_currency, opp_status, opp_due_date,
       // Gmail thread
@@ -907,6 +930,9 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
     } = req.body;
 
     if (!title) return res.status(400).json({ error: "Pole title jest wymagane" });
+
+    const reminderTypeSafe = ['at_due','30m_before','1h_before','1d_before','2d_before','3d_before','custom'].includes(reminder_type) ? reminder_type : null;
+    const reminderAt = computeReminderAt(activity_at, reminderTypeSafe, reminder_at_custom);
 
     // Pobierz dane partnera do Calendar
     const partnerQ = await pool.query(
@@ -923,8 +949,9 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
         assigned_to,
         opp_value, opp_currency, opp_status, opp_due_date,
         gmail_thread_id, gmail_message_id,
-        created_by, status, tenant_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'new',$17)
+        created_by, status, tenant_id,
+        reminder_type, reminder_at, reminder_sent
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'new',$17,$18,$19,false)
       RETURNING *,
         (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $17) AS created_by_name,
         (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $17) AS assigned_to_name`,
@@ -940,6 +967,7 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
         gmail_thread_id || null, gmail_message_id || null,
         req.user.id,
         req.tenantId,
+        reminderTypeSafe, reminderAt || null,
       ]
     );
     const newAct = r.rows[0];
@@ -1062,20 +1090,29 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
     const opp_currency     = req.body.opp_currency     !== undefined ? req.body.opp_currency     : act.opp_currency;
     const opp_status       = req.body.opp_status       !== undefined ? req.body.opp_status       : act.opp_status;
     const opp_due_date     = req.body.opp_due_date     !== undefined ? req.body.opp_due_date     : act.opp_due_date;
+    const reminder_type      = req.body.reminder_type !== undefined ? req.body.reminder_type : act.reminder_type;
+    const reminder_at_custom = req.body.reminder_at   !== undefined ? req.body.reminder_at   : null;
+
+    const needsRecompute = req.body.activity_at !== undefined || req.body.reminder_type !== undefined || req.body.reminder_at !== undefined;
+    const reminderTypeSafe = ['at_due','30m_before','1h_before','1d_before','2d_before','3d_before','custom'].includes(reminder_type) ? reminder_type : null;
+    const reminder_at   = needsRecompute ? computeReminderAt(activity_at, reminderTypeSafe, reminder_at_custom) : act.reminder_at;
+    const reminder_sent = needsRecompute ? false : act.reminder_sent;
 
     const { rows } = await pool.query(`
       UPDATE crm_partner_activities
       SET type=$1, title=$2, body=$3, activity_at=$4, participants=$5, meeting_location=$6,
           assigned_to=$7, status=$8, close_comment=$9,
           opp_value=$10, opp_currency=$11, opp_status=$12, opp_due_date=$13,
+          reminder_type=$14, reminder_at=$15, reminder_sent=$16,
           updated_at=NOW()
-      WHERE id=$14 AND tenant_id=$15
+      WHERE id=$17 AND tenant_id=$18
       RETURNING *,
-        (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $15) AS created_by_name,
-        (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $15) AS assigned_to_name
+        (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $18) AS created_by_name,
+        (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $18) AS assigned_to_name
     `, [type, title, body||null, activity_at||null, participants||null, meeting_location||null,
         assigned_to||null, newStatus, close_comment||null,
         opp_value??null, opp_currency||'PLN', opp_status||null, opp_due_date||null,
+        reminderTypeSafe, reminder_at||null, reminder_sent,
         actId, req.tenantId]);
 
     const auditAction = newStatus === 'closed' && act.status !== 'closed'
