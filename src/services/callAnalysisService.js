@@ -39,14 +39,14 @@ Pole "follow_up_required" ustaw na true, gdy z notatek wynika, że handlowiec um
 - klient odłożył temat z intencją powrotu ("temat odłożony w czasie", "wrócimy gdy...")
 - jakakolwiek inna wzmianka o kontynuacji rozmowy w przyszłości
 
-Pole "follow_up_date_hint" ustaw na krótką frazę opisującą KIEDY nastąpi kolejny kontakt. Ważne zasady:
+Pole "follow_up_date_hint" ustaw na krótką frazę opisującą KIEDY nastąpi kolejny kontakt. Data rozmowy jest podana w notatkach jako [CALL_DATE:RRRR-MM-DD] — traktuj ją jako "dziś" przy wyliczaniu terminów względnych. Ważne zasady:
 1. SKANUJ OD KOŃCA ROZMOWY WSTECZ — znajdź ostatnią wypowiedź zawierającą ustalenie terminu (kiedy zadzwonić, kiedy się spotkać, kiedy wrócić do tematu). Ta fraza jest wiążąca. Grzecznościowe zakończenia rozmowy ("dziękuję", "do widzenia", "pozdrawiam") nie są frazami terminowymi i należy je pominąć. Wcześniejsze propozycje terminów, które zostały odrzucone lub zastąpione przez późniejsze, są nieważne.
 2. Szukaj ostatecznego porozumienia: ostatnie słowo klienta LUB ostatnie potwierdzenie handlowca ("dobrze, to za dwa tygodnie", "umówmy się na koniec miesiąca") to wynik końcowy.
 3. Jeśli w rozmowie pada sekwencja negocjacji (np. handlowiec: "przyszły tydzień" → klient: "nie mogę, proszę o dwa tygodnie" → brak odpowiedzi), bierz ostatni niezanegowany termin — tutaj "za dwa tygodnie".
-4. Wyraź termin w ustandaryzowanej formie "za X [dni/tygodnie/miesiące]" gdy tylko możliwe. Przykłady przekształceń: "proszę o dwa tygodnie" → "za dwa tygodnie", "po dwóch tygodniach" → "za dwa tygodnie", "nie w przyszłym tygodniu, pod koniec miesiąca" → "koniec miesiąca".
+4. Wyraź termin w ustandaryzowanej formie "za X [dni/tygodnie/miesiące]" gdy tylko możliwe. Przykłady przekształceń: "proszę o dwa tygodnie" → "za dwa tygodnie", "po dwóch tygodniach" → "za dwa tygodnie", "nie w przyszłym tygodniu, pod koniec miesiąca" → "koniec miesiąca". WYJĄTEK: gdy pada KONKRETNY DZIEŃ MIESIĄCA ("do 25-tego", "na 25.", "dwudziestego piątego") — zwróć go jako "DD <nazwa miesiąca w dopełniaczu>", np. "25 września". Miesiąc wybierz względem [CALL_DATE]: jeśli podany dzień już minął w bieżącym miesiącu, weź następny miesiąc. Konkretny dzień ma pierwszeństwo przed formą "za X tygodni".
 5. Zachowaj liczbę słowem gdy klient tak powiedział: "dwa tygodnie" → "za dwa tygodnie" (nie "za 2 tygodnie").
 6. Dla określeń okresu TYGODNIA użyj form kanonicznych: "na początku tygodnia" (poniedziałek), "połowa tygodnia" (środa), "koniec tygodnia" (piątek). Wariacje: "pod koniec tygodnia", "z końcem tygodnia", "w okolicy końca tygodnia" → "koniec tygodnia"; "z początkiem tygodnia", "w okolicy początku tygodnia" → "na początku tygodnia". Dla przyszłego tygodnia dodaj "przyszłego tygodnia" (np. "koniec przyszłego tygodnia"). Dla POŁOWY MIESIĄCA: "pierwsza połowa miesiąca" = przełom 1. i 2. tygodnia; "druga połowa miesiąca" = zaczyna się po 15. (od dnia 16). Wariacje: "w pierwszej połowie miesiąca" → "pierwsza połowa miesiąca", "w drugiej połowie miesiąca" → "druga połowa miesiąca". Gdy podano KONKRETNĄ NAZWĘ MIESIĄCA zamiast "miesiąca": "w drugiej połowie września" → "druga połowa września", "w pierwszej połowie marca" → "pierwsza połowa marca". Dodaj "przyszłego miesiąca" gdy mowa o następnym miesiącu. "Z końcem miesiąca" / "w okolicy końca miesiąca" / "pod koniec miesiąca" → "koniec miesiąca" (oznacza ostatnie dni miesiąca, 2 dni robocze przed końcem).
-Przykłady wyników: "za 2 tygodnie", "za dwa tygodnie", "w piątek", "koniec miesiąca", "koniec tygodnia", "połowa tygodnia", "na początku tygodnia", "pod koniec tygodnia", "z końcem tygodnia", "w marcu", "za 3 miesiące", "przyszły tydzień", "na początku przyszłego miesiąca", "połowa miesiąca", "połowa przyszłego miesiąca", "pierwsza połowa miesiąca", "pierwsza połowa przyszłego miesiąca", "druga połowa miesiąca", "druga połowa przyszłego miesiąca".
+Przykłady wyników: "za 2 tygodnie", "za dwa tygodnie", "w piątek", "25 września", "10 października", "koniec miesiąca", "koniec tygodnia", "połowa tygodnia", "na początku tygodnia", "pod koniec tygodnia", "z końcem tygodnia", "w marcu", "za 3 miesiące", "przyszły tydzień", "na początku przyszłego miesiąca", "połowa miesiąca", "połowa przyszłego miesiąca", "pierwsza połowa miesiąca", "pierwsza połowa przyszłego miesiąca", "druga połowa miesiąca", "druga połowa przyszłego miesiąca".
 Ustaw null gdy follow_up_required=false lub gdy brak jakiejkolwiek wzmianki o terminie.
 
 Zwróć WYŁĄCZNIE poprawny obiekt JSON w dokładnie takim formacie (bez markdown, bez tekstu przed/po):
@@ -498,8 +498,8 @@ async function createAnalysisNote(tenantId, nip, followUpDate, salespersonId, su
     if (partnerRows.length) {
       await db.query(
         `INSERT INTO crm_partner_activities
-           (partner_id, tenant_id, type, title, body, created_by, call_analysis_nip)
-         VALUES ($1, $2, 'note', $3, $4, $5::uuid, $6)`,
+           (partner_id, tenant_id, type, title, body, created_by, assigned_to, call_analysis_nip)
+         VALUES ($1, $2, 'note', $3, $4, $5::uuid, $5::uuid, $6)`,
         [partnerRows[0].id, tenantId, title, body, salespersonId ?? null, digits]
       );
       logger.info('[CallAnalysis] Analysis note created on partner', { tenantId, nip: digits, followUpDate, partnerId: partnerRows[0].id });
@@ -516,8 +516,8 @@ async function createAnalysisNote(tenantId, nip, followUpDate, salespersonId, su
     if (leadRows.length) {
       await db.query(
         `INSERT INTO crm_lead_activities
-           (lead_id, tenant_id, type, title, body, created_by, call_analysis_nip)
-         VALUES ($1, $2, 'note', $3, $4, $5::uuid, $6)`,
+           (lead_id, tenant_id, type, title, body, created_by, assigned_to, call_analysis_nip)
+         VALUES ($1, $2, 'note', $3, $4, $5::uuid, $5::uuid, $6)`,
         [leadRows[0].id, tenantId, title, body, salespersonId ?? null, digits]
       );
       logger.info('[CallAnalysis] Analysis note created on lead', { tenantId, nip: digits, followUpDate, leadId: leadRows[0].id });
