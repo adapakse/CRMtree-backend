@@ -571,7 +571,7 @@ async function analyzeOne(tenantId, nip) {
     );
 
     const { rows } = await db.query(
-      `SELECT notes_text, salesperson_id, salesperson_name, last_call_date FROM call_analysis_companies WHERE tenant_id = $1 AND nip = $2`,
+      `SELECT notes_text, salesperson_id, salesperson_name, imported_by, last_call_date FROM call_analysis_companies WHERE tenant_id = $1 AND nip = $2`,
       [tenantId, nip]
     );
 
@@ -583,7 +583,10 @@ async function analyzeOne(tenantId, nip) {
       return { status: 'error' };
     }
 
-    const { notes_text, salesperson_id, last_call_date } = rows[0];
+    const { notes_text, salesperson_id, imported_by, last_call_date } = rows[0];
+    // Właściciel notatki AI = osoba, która wykonała połączenie (salesperson_id),
+    // a gdy jej brak (np. firma z importu zbiorczego) — kto dodał wpis.
+    const noteOwnerId = salesperson_id || imported_by || null;
     // Punkt odniesienia dla dat: data ostatniej rozmowy (jeśli znana), w p.p. dziś.
     // Dzięki temu "pod koniec sierpnia" z rozmowy 11.08 → 27.08, nie data analizy.
     const refDate = last_call_date ? new Date(last_call_date) : new Date();
@@ -669,7 +672,7 @@ async function analyzeOne(tenantId, nip) {
 
     // Utwórz notatkę z podsumowaniem AI na Lead/Partner (jeśli jest data i istnieje encja)
     if (followUpDate) {
-      await createAnalysisNote(tenantId, nip, followUpDate, salesperson_id, parsed.summary || null);
+      await createAnalysisNote(tenantId, nip, followUpDate, noteOwnerId, parsed.summary || null);
     }
 
     logger.info('[CallAnalysis] Done', { tenantId, nip, score, followUpDate });

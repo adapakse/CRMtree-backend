@@ -245,7 +245,7 @@ router.get('/users', async (req, res, next) => {
       SELECT id, display_name, email, crm_role
       FROM users
       WHERE is_active = true
-        AND crm_role IN ('salesperson', 'sales_manager')
+        AND (crm_role IN ('salesperson', 'sales_manager') OR is_admin = true)
         AND tenant_id = $1
       ORDER BY display_name
     `, [req.tenantId]);
