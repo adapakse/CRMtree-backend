@@ -10,12 +10,13 @@
 // unlike WhatsApp's webhook-driven resolveIncomingSender().
 
 const router = require('express').Router();
+const axios = require('axios');
 const { body, param } = require('express-validator');
 const db = require('../config/database');
 const { requireAuth }             = require('../middleware/auth');
 const { crmAuth, requireFeature } = require('../middleware/crm-rbac');
 const { validate }                = require('../middleware/errorHandler');
-const { syncNumber }              = require('../services/smsSyncService');
+const { syncNumber, normalizePolishPhone, PBX_BASE } = require('../services/smsSyncService');
 
 router.use(requireAuth, crmAuth, requireFeature('pbx'));
 
