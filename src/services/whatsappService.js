@@ -422,8 +422,8 @@ async function resolveIncomingSender(tenantId, digits) {
 async function saveIncomingMessage({ tenantId, leadId, partnerId, fromPhone, toPhone, body, metaMessageId, rawPayload }) {
   await pool.query(
     `INSERT INTO whatsapp_messages
-       (tenant_id, lead_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, raw_payload)
-     VALUES ($1, $2, $3, 'incoming', $4, $5, $6, $7, 'received', $8)
+       (tenant_id, lead_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, raw_payload, is_read)
+     VALUES ($1, $2, $3, 'incoming', $4, $5, $6, $7, 'received', $8, false)
      ON CONFLICT (tenant_id, meta_message_id) WHERE meta_message_id IS NOT NULL DO NOTHING`,
     [tenantId, leadId, partnerId, fromPhone, toPhone, body, metaMessageId, JSON.stringify(rawPayload)],
   );

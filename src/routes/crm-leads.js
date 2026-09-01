@@ -122,7 +122,18 @@ router.get('/',
             (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
             (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id AND d.tenant_id = l.tenant_id) AS document_count,
             (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false)::int AS new_email_count,
-            (SELECT MAX(updated_at) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at
+            (SELECT MAX(updated_at) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false) AS last_reply_at,
+            (SELECT COUNT(*) FROM sms_messages
+               WHERE lead_id = l.id AND tenant_id = l.tenant_id AND direction = 'inbound' AND is_read = false)::int AS unread_sms_count,
+            (SELECT COUNT(*) FROM whatsapp_messages
+               WHERE lead_id = l.id AND tenant_id = l.tenant_id AND direction = 'incoming' AND is_read = false)::int AS unread_whatsapp_count,
+            (SELECT COUNT(*) FROM pbx_call_log c
+               WHERE c.lead_id = l.id AND c.tenant_id = l.tenant_id AND c.status IN ('missed','not_answered')
+                 AND NOT EXISTS (
+                   SELECT 1 FROM pbx_call_log c2
+                   WHERE c2.lead_id = c.lead_id AND c2.tenant_id = c.tenant_id
+                     AND c2.status = 'answered' AND c2.started_at > c.started_at
+                 ))::int AS missed_call_count
           FROM crm_leads l
           LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
           LEFT JOIN crm_partners cp ON cp.lead_id = l.id
@@ -159,7 +170,7 @@ router.post('/',
     body('probability').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
     body('close_date').optional({ nullable: true }).isDate(),
     body('industry').optional().trim(),
-    body('assigned_to').optional().isUUID(),
+    body('assigned_to').optional({ nullable: true, checkFalsy: true }).matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
     body('tags').optional().isArray(),
     body('notes').optional().trim(),
     body('hot').optional().isBoolean(),
@@ -235,7 +246,6 @@ router.get('/users', async (req, res, next) => {
       FROM users
       WHERE is_active = true
         AND crm_role IN ('salesperson', 'sales_manager')
-        AND is_admin = false
         AND tenant_id = $1
       ORDER BY display_name
     `, [req.tenantId]);
@@ -410,7 +420,7 @@ router.get('/tasks', async (req, res, next) => {
 });
 
 // ── GET /api/crm/leads/calendar ────────────────────────────────────────────
-// Zwraca aktywności typu "meeting" dla kalendarza (leady + partnerzy)
+// Zwraca aktywności typu "meeting"/"task" (otwarte) dla kalendarza (leady + partnerzy)
 // query: date_from (YYYY-MM-DD), date_to, assigned_to (UUID, tylko manager)
 
 router.get('/calendar', async (req, res, next) => {
@@ -418,7 +428,11 @@ router.get('/calendar', async (req, res, next) => {
     const { date_from, date_to, assigned_to } = req.query;
 
     // ── Lead activities ──────────────────────────────────────────────────────
-    const conds  = ["a.type != 'email'", "a.activity_at IS NOT NULL"];
+    // Kalendarz pokazuje meeting/task/call (nie note/email) i pomija zamknięte
+    // taski. Połączenia są potrzebne do planowania telefonów (zgłoszenie
+    // Angeliki na WorkTrips 31.08); notatki (w tym auto-podsumowania AI)
+    // dalej odpadają jako type='note'.
+    const conds  = ["a.type IN ('meeting','task','call')", "a.activity_at IS NOT NULL", "(a.type != 'task' OR a.status != 'closed')"];
     const params = [req.tenantId];
     conds.push(`l.tenant_id = $1`);
 
@@ -461,7 +475,7 @@ router.get('/calendar', async (req, res, next) => {
     `, params);
 
     // ── Partner activities ───────────────────────────────────────────────────
-    const condsPart  = ["a.type != 'email'", "a.activity_at IS NOT NULL"];
+    const condsPart  = ["a.type IN ('meeting','task','call')", "a.activity_at IS NOT NULL", "(a.type != 'task' OR a.status != 'closed')"];
     const paramsPart = [req.tenantId];
     condsPart.push(`p.tenant_id = $1`);
 
@@ -1048,18 +1062,21 @@ router.get('/:id',
           u.display_name AS assigned_to_name,
           u.email        AS assigned_to_email,
           COALESCE(
-            (SELECT json_agg(act ORDER BY act->>'activity_at' DESC NULLS LAST)
+            (SELECT json_agg(act ORDER BY COALESCE(act->>'activity_at', act->>'created_at') DESC)
              FROM (
                SELECT DISTINCT jsonb_build_object(
                  'id',a.id,'type',a.type,'title',a.title,'body',a.body,
-                 'activity_at',a.activity_at,'duration_min',a.duration_min,
+                 'activity_at',a.activity_at,'created_at',a.created_at,'duration_min',a.duration_min,
                  'participants',a.participants,'meeting_location',a.meeting_location,
                  'created_by',a.created_by,'created_by_name',au.display_name,
                  'assigned_to',a.assigned_to,'assigned_to_name',au2.display_name,
                  'status',a.status,'close_comment',a.close_comment,
                  'gmail_thread_id',a.gmail_thread_id,'gmail_message_id',a.gmail_message_id,
                  'email_provider',a.email_provider,
-                 'is_read',a.is_read
+                 'is_read',a.is_read,
+                 'reminder_type',a.reminder_type,'reminder_at',a.reminder_at,
+                 'reminder_sent',a.reminder_sent,'priority',a.priority,
+                 'call_analysis_nip',a.call_analysis_nip
                ) AS act
                FROM crm_lead_activities a
                LEFT JOIN users au  ON au.id  = a.created_by  AND au.tenant_id  = $2
@@ -1114,7 +1131,7 @@ router.patch('/:id',
     body('annual_turnover_currency').optional({ nullable: true }).isString(),
     body('online_pct').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
     body('probability').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
-    body('assigned_to').optional().isUUID(),
+    body('assigned_to').optional({ nullable: true, checkFalsy: true }).matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
     body('hot').optional().isBoolean(),
     body('first_contact_date').optional({ nullable: true }).isDate(),
   ],
@@ -1284,17 +1301,40 @@ router.get('/:id/activities',
       if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
       const { rows } = await db.query(`
-        SELECT a.*, u.display_name AS created_by_name
+        SELECT a.*, u.display_name AS created_by_name, au.display_name AS assigned_to_name
         FROM crm_lead_activities a
-        LEFT JOIN users u ON u.id = a.created_by AND u.tenant_id = $2
+        LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
+        LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
         WHERE a.lead_id = $1 AND a.tenant_id = $2
-        ORDER BY a.activity_at DESC
+        ORDER BY COALESCE(a.activity_at, a.created_at) DESC
       `, [id, req.tenantId]);
 
       res.json(rows);
     } catch (err) { next(err); }
   }
 );
+
+// ── Helper: oblicz reminder_at z activity_at + reminder_type ──────────────────
+// Port z worktrips. Zwraca null gdy brak terminu / brak typu / typ pusty.
+function computeReminderAt(activity_at, reminder_type, reminder_at_custom) {
+  if (!activity_at || !reminder_type || reminder_type === 'none') return null;
+  const due = new Date(activity_at);
+  if (isNaN(due.getTime())) return null;
+  if (reminder_type === 'custom') {
+    if (!reminder_at_custom) return null;
+    const c = new Date(reminder_at_custom);
+    return isNaN(c.getTime()) ? null : c.toISOString();
+  }
+  const d = new Date(due);
+  if      (reminder_type === 'at_due')     { /* w terminie */ }
+  else if (reminder_type === '30m_before') d.setMinutes(d.getMinutes() - 30);
+  else if (reminder_type === '1h_before')  d.setHours(d.getHours() - 1);
+  else if (reminder_type === '1d_before')  d.setDate(d.getDate() - 1);
+  else if (reminder_type === '2d_before')  d.setDate(d.getDate() - 2);
+  else if (reminder_type === '3d_before')  d.setDate(d.getDate() - 3);
+  else return null;
+  return d.toISOString();
+}
 
 router.post('/:id/activities',
   [
@@ -1306,25 +1346,31 @@ router.post('/:id/activities',
     body('duration_min').optional({ nullable: true }).isInt({ min: 0 }),
     body('participants').optional().trim(),
     body('meeting_location').optional({ nullable: true }).trim(),
-    body('assigned_to').optional({ nullable: true }).isUUID(),
+    body('assigned_to').optional({ nullable: true, checkFalsy: true }).matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
+    body('reminder_type').optional({ nullable: true, checkFalsy: true }).isIn(['at_due','30m_before','1h_before','1d_before','2d_before','3d_before','custom']),
+    body('reminder_at').optional({ nullable: true }).isISO8601(),
   ],
   validate,
   async (req, res, next) => {
     try {
       const id = parseInt(req.params.id);
-      const { type, title, body: bodyText, activity_at, duration_min, participants, meeting_location, assigned_to } = req.body;
+      const { type, title, body: bodyText, activity_at, duration_min, participants, meeting_location, assigned_to,
+              reminder_type, reminder_at: reminder_at_custom } = req.body;
+
+      const reminder_at = computeReminderAt(activity_at, reminder_type, reminder_at_custom);
 
       const { rows } = await db.query(`
         INSERT INTO crm_lead_activities
-          (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, assigned_to, created_by, status, tenant_id)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new',$11)
+          (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, assigned_to, created_by, status, tenant_id, reminder_type, reminder_at, reminder_sent)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new',$11,$12,$13,false)
         RETURNING *,
           (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $11) AS created_by_name,
           (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $11) AS assigned_to_name
       `, [id, type, title, bodyText||null,
           activity_at||null,
           duration_min||null, participants||null, meeting_location||null,
-          assigned_to||null, req.user.id, req.tenantId]);
+          assigned_to||null, req.user.id, req.tenantId,
+          reminder_type||null, reminder_at||null]);
 
       await db.query('UPDATE crm_leads SET updated_at=now() WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]);
       await audit.log({
@@ -1395,6 +1441,8 @@ router.patch('/:id/activities/:actId',
     body('assigned_to').optional({ nullable: true }),
     body('status').optional().isIn(['new','open','closed']),
     body('close_comment').optional({ nullable: true }).trim(),
+    body('reminder_type').optional({ nullable: true, checkFalsy: true }).isIn(['at_due','30m_before','1h_before','1d_before','2d_before','3d_before','custom']),
+    body('reminder_at').optional({ nullable: true }).isISO8601(),
   ],
   validate,
   async (req, res, next) => {
@@ -1422,17 +1470,26 @@ router.patch('/:id/activities/:actId',
       const meeting_location = req.body.meeting_location !== undefined ? req.body.meeting_location : act.meeting_location;
       const assigned_to      = req.body.assigned_to      !== undefined ? req.body.assigned_to      : act.assigned_to;
       const close_comment    = req.body.close_comment    !== undefined ? req.body.close_comment    : act.close_comment;
+      const reminder_type      = req.body.reminder_type !== undefined ? req.body.reminder_type : act.reminder_type;
+      const reminder_at_custom = req.body.reminder_at   !== undefined ? req.body.reminder_at   : null;
+
+      // Przelicz reminder_at gdy zmienił się termin lub typ przypomnienia; reset reminder_sent.
+      const needsRecompute = req.body.activity_at !== undefined || req.body.reminder_type !== undefined || req.body.reminder_at !== undefined;
+      const reminder_at   = needsRecompute ? computeReminderAt(activity_at, reminder_type, reminder_at_custom) : act.reminder_at;
+      const reminder_sent = needsRecompute ? false : act.reminder_sent;
 
       const { rows } = await db.query(`
         UPDATE crm_lead_activities
         SET type=$1, title=$2, body=$3, activity_at=$4, participants=$5, meeting_location=$6,
-            assigned_to=$7, status=$8, close_comment=$9, updated_at=now()
-        WHERE id=$10 AND tenant_id=$11
+            assigned_to=$7, status=$8, close_comment=$9,
+            reminder_type=$10, reminder_at=$11, reminder_sent=$12, updated_at=now()
+        WHERE id=$13 AND tenant_id=$14
         RETURNING *,
-          (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $11) AS created_by_name,
-          (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $11) AS assigned_to_name
+          (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $14) AS created_by_name,
+          (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $14) AS assigned_to_name
       `, [type, title, body||null, activity_at||null, participants||null, meeting_location||null,
-          assigned_to||null, newStatus, close_comment||null, actId, req.tenantId]);
+          assigned_to||null, newStatus, close_comment||null,
+          reminder_type||null, reminder_at||null, reminder_sent, actId, req.tenantId]);
 
       const auditAction = newStatus === 'closed' && act.status !== 'closed'
         ? 'crm_activity_close'

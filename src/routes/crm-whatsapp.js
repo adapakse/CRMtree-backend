@@ -246,8 +246,8 @@ router.post('/send/lead/:leadId',
 
       const { rows: msgRows } = await db.query(
         `INSERT INTO whatsapp_messages
-           (tenant_id, lead_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by)
-         VALUES ($1, $2, 'outgoing', $3, $4, $5, $6, 'sent', $7)
+           (tenant_id, lead_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by, is_read)
+         VALUES ($1, $2, 'outgoing', $3, $4, $5, $6, 'sent', $7, true)
          RETURNING id`,
         [req.tenantId, lead.id, fromPhone, toPhone, req.body.message, messageId, req.user.id],
       );
@@ -285,8 +285,8 @@ router.post('/send/partner/:partnerId',
 
       const { rows: msgRows } = await db.query(
         `INSERT INTO whatsapp_messages
-           (tenant_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by)
-         VALUES ($1, $2, 'outgoing', $3, $4, $5, $6, 'sent', $7)
+           (tenant_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by, is_read)
+         VALUES ($1, $2, 'outgoing', $3, $4, $5, $6, 'sent', $7, true)
          RETURNING id`,
         [req.tenantId, partner.id, fromPhone, toPhone, req.body.message, messageId, req.user.id],
       );
@@ -311,8 +311,14 @@ router.get('/history/lead/:leadId',
       );
       if (!leadRows.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
+      await db.query(
+        `UPDATE whatsapp_messages SET is_read = true
+         WHERE lead_id = $1 AND tenant_id = $2 AND direction = 'incoming' AND is_read = false`,
+        [leadId, req.tenantId],
+      );
+
       const { rows } = await db.query(
-        `SELECT m.id, m.created_at, m.direction, m.from_phone, m.to_phone, m.body, m.status,
+        `SELECT m.id, m.created_at, m.direction, m.from_phone, m.to_phone, m.body, m.status, m.is_read,
                 u.display_name AS created_by_name
          FROM whatsapp_messages m
          LEFT JOIN users u ON u.id = m.created_by
@@ -329,6 +335,7 @@ router.get('/history/lead/:leadId',
         to_phone: r.to_phone,
         message: r.body,
         status: r.status,
+        is_read: r.is_read,
         created_by_name: r.created_by_name || null,
       })));
     } catch (err) { next(err); }
@@ -343,8 +350,14 @@ router.get('/history/partner/:partnerId',
       const partner = await resolvePartnerForWhatsapp(req.params.partnerId, req.tenantId);
       if (!partner) return res.status(404).json({ error: 'Partner nie znaleziony' });
 
+      await db.query(
+        `UPDATE whatsapp_messages SET is_read = true
+         WHERE partner_id = $1 AND tenant_id = $2 AND direction = 'incoming' AND is_read = false`,
+        [partner.id, req.tenantId],
+      );
+
       const { rows } = await db.query(
-        `SELECT m.id, m.created_at, m.direction, m.from_phone, m.to_phone, m.body, m.status,
+        `SELECT m.id, m.created_at, m.direction, m.from_phone, m.to_phone, m.body, m.status, m.is_read,
                 u.display_name AS created_by_name
          FROM whatsapp_messages m
          LEFT JOIN users u ON u.id = m.created_by
@@ -361,6 +374,7 @@ router.get('/history/partner/:partnerId',
         to_phone: r.to_phone,
         message: r.body,
         status: r.status,
+        is_read: r.is_read,
         created_by_name: r.created_by_name || null,
       })));
     } catch (err) { next(err); }
