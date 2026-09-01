@@ -168,6 +168,17 @@ const NUM_PAT = '(\\d+|jeden|jedna|dwa|dwie|trzy|cztery|pi[eę][cć]|sze[sś][c�
 // Opcjonalny prefiks: "za", "o", "po" (proszę za / proszę o / za)
 const PRE = '(?:za|o|po)\\s+';
 
+// Nazwy dni tygodnia → numer dnia (1=pon … 5=pt). Kolejność bez znaczenia,
+// dopasowanie po fragmencie. Współdzielone przez gałąź "dzień + kwalifikator
+// tygodnia" i przez pętlę "sama nazwa dnia" niżej.
+const DAY_NAMES = [
+  ['poniedzia', 1],
+  ['wtorek', 2], ['wt\\.', 2],
+  ['[śs]rod', 3],
+  ['czwartek', 4], ['czwartku', 4],
+  ['pi[aą]tek', 5], ['pi[aą]tku', 5],
+];
+
 function computeFollowUpDate(hint, today = new Date()) {
   if (!hint || typeof hint !== 'string') return null;
   const h = hint.toLowerCase().trim();
@@ -218,6 +229,29 @@ function computeFollowUpDate(hint, today = new Date()) {
       const d = new Date(todayDate);
       d.setDate(d.getDate() + n);
       return toDateStr(nextBusinessDay(d));
+    }
+  }
+
+  // Nazwa dnia + kwalifikator tygodnia ("za tydzień w czwartek", "za 2 tygodnie
+  // we wtorek", "w przyszły czwartek", "następny piątek") → ten dzień w tygodniu
+  // przesuniętym o wskazaną liczbę tygodni. MUSI być przed gałęzią "za X
+  // tygodni" (inaczej łapie sam offset i gubi dzień) oraz przed pętlą samych
+  // nazw dni (która ignoruje "przyszły"/"za tydzień").
+  const dayHit = DAY_NAMES.find(([pat]) => new RegExp(pat).test(h));
+  if (dayHit) {
+    let weekShift = null;
+    const wm = h.match(new RegExp(`(?:${PRE})?${NUM_PAT}\\s+tygodni`));
+    if (wm)                                      weekShift = parsePolishNum(wm[1]) ?? 1;
+    else if (/(?:za|o|po)\s+tydzień/.test(h))    weekShift = 1;
+    else if (/przyszł|następn/.test(h))          weekShift = 1;
+
+    if (weekShift !== null) {
+      const dow = dayHit[1]; // 1=pon … 5=pt
+      const monday = new Date(todayDate);
+      const back = monday.getDay() === 0 ? 6 : monday.getDay() - 1; // do poniedziałku bieżącego tygodnia
+      monday.setDate(monday.getDate() - back + weekShift * 7);
+      monday.setDate(monday.getDate() + (dow - 1));
+      return toDateStr(monday);
     }
   }
 
@@ -375,13 +409,9 @@ function computeFollowUpDate(hint, today = new Date()) {
     return toDateStr(subBusinessDays(lastBD, 2));
   }
 
-  // Nazwy dni tygodnia → najbliższe wystąpienie (jeśli dziś = ten dzień, następny tydzień)
-  const dayNames = [
-    ['poniedzia', 1], ['wtorek', 2], ['wtorek', 2], ['wt.', 2],
-    ['[śs]rod', 3], ['czwartek', 4], ['czwartku', 4],
-    ['pi[aą]tek', 5], ['pi[aą]tku', 5],
-  ];
-  for (const [pat, dow] of dayNames) {
+  // Sama nazwa dnia (bez kwalifikatora tygodnia — ten przypadek obsłużony wyżej)
+  // → najbliższe wystąpienie (jeśli dziś = ten dzień, następny tydzień)
+  for (const [pat, dow] of DAY_NAMES) {
     if (new RegExp(pat).test(h)) {
       const d = new Date(todayDate);
       const currentDow = d.getDay();
@@ -710,4 +740,4 @@ function isBatchRunning() {
 
 function getSystemPrompt() { return SYSTEM_PROMPT; }
 
-module.exports = { runBatch, getBatchProgress, isBatchRunning, analyzeOne, getSystemPrompt };
+module.exports = { runBatch, getBatchProgress, isBatchRunning, analyzeOne, getSystemPrompt, computeFollowUpDate };
