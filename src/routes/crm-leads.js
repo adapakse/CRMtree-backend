@@ -10,7 +10,7 @@ const audit  = require('../services/auditService');
 const logger = require('../utils/logger');
 const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
-const { crmAuth, loadCrmScope, crmScope, requireCrmManager, assertOwnership } = require('../middleware/crm-rbac');
+const { crmAuth, loadCrmScope, crmScope, requireCrmManager, assertOwnership, canOperateForOwner } = require('../middleware/crm-rbac');
 const testAccountSvc = require('../services/testAccountService');
 const email          = require('../utils/email');
 const { autoSaveLeadContacts } = require('../services/gmailProcessor');
@@ -1106,7 +1106,8 @@ router.get('/:id',
         if (req.user.crm_role === 'sales_manager') {
           can_edit = !req.crmScopeUserIds || req.crmScopeUserIds.includes(lead.assigned_to);
         } else {
-          can_edit = lead.assigned_to === req.user.id;
+          // own lead, or a lead of someone I'm actively substituting
+          can_edit = canOperateForOwner(req, lead.assigned_to);
         }
       }
 
@@ -1455,8 +1456,16 @@ router.patch('/:id/activities/:actId',
       );
       if (!existing.length) return res.status(404).json({ error: 'Aktywność nie znaleziona' });
       const act = existing[0];
-      const isAssigned = act.assigned_to === req.user.id;
-      if (act.created_by !== req.user.id && !req.isCrmManager && !isAssigned) {
+      const { rows: parentLead } = await db.query(
+        'SELECT assigned_to FROM crm_leads WHERE id=$1 AND tenant_id=$2', [leadId, req.tenantId]
+      );
+      const canOperate =
+        act.created_by === req.user.id ||
+        req.isCrmManager ||
+        canOperateForOwner(req, act.assigned_to) ||
+        canOperateForOwner(req, act.created_by) ||
+        canOperateForOwner(req, parentLead[0]?.assigned_to ?? null);
+      if (!canOperate) {
         return res.status(403).json({ error: 'Brak uprawnień do edycji tej aktywności' });
       }
 
@@ -1521,7 +1530,16 @@ router.delete('/:id/activities/:actId',
         [actId, leadId, req.tenantId]
       );
       if (!existing.length) return res.status(404).json({ error: 'Aktywność nie znaleziona' });
-      if (existing[0].created_by !== req.user.id && !req.isCrmManager) {
+      const { rows: parentLead } = await db.query(
+        'SELECT assigned_to FROM crm_leads WHERE id=$1 AND tenant_id=$2', [leadId, req.tenantId]
+      );
+      const canOperate =
+        existing[0].created_by === req.user.id ||
+        req.isCrmManager ||
+        canOperateForOwner(req, existing[0].created_by) ||
+        canOperateForOwner(req, existing[0].assigned_to) ||
+        canOperateForOwner(req, parentLead[0]?.assigned_to ?? null);
+      if (!canOperate) {
         return res.status(403).json({ error: 'Brak uprawnień' });
       }
       await db.query('DELETE FROM crm_lead_activities WHERE id=$1 AND tenant_id=$2', [actId, req.tenantId]);

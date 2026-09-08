@@ -6,7 +6,7 @@ const express  = require("express");
 const router   = express.Router();
 const { pool } = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
-const { crmAuth, loadCrmScope } = require("../middleware/crm-rbac");
+const { crmAuth, loadCrmScope, canOperateForOwner } = require("../middleware/crm-rbac");
 const calendarService = require("../services/calendarService");
 const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
@@ -227,7 +227,11 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
         params.push(req.crmScopeUserIds); where.push(`p.manager_id = ANY($${params.length}::uuid[])`);
       } else { where.push('1=0'); }
     } else {
-      params.push(req.user.id); where.push(`p.manager_id = $${params.length}`);
+      // own partners, plus partners of anyone this user is actively substituting
+      const scopeIds = (req.crmScopeUserIds && req.crmScopeUserIds.length)
+        ? req.crmScopeUserIds
+        : [req.user.id];
+      params.push(scopeIds); where.push(`p.manager_id = ANY($${params.length}::uuid[])`);
     }
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -1070,9 +1074,17 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
     if (!existing.length) return res.status(404).json({ error: 'Aktywność nie znaleziona' });
     const act = existing[0];
 
-    const isManager  = req.user.is_admin || req.user.crm_role === 'sales_manager';
-    const isAssigned = act.assigned_to === req.user.id;
-    if (act.created_by !== req.user.id && !isManager && !isAssigned) {
+    const { rows: parentPartner } = await pool.query(
+      'SELECT manager_id FROM crm_partners WHERE id=$1 AND tenant_id=$2',
+      [partnerId, req.tenantId]
+    );
+    const canOperate =
+      act.created_by === req.user.id ||
+      req.isCrmManager ||
+      canOperateForOwner(req, act.assigned_to) ||
+      canOperateForOwner(req, act.created_by) ||
+      canOperateForOwner(req, parentPartner[0]?.manager_id ?? null);
+    if (!canOperate) {
       return res.status(403).json({ error: 'Brak uprawnień do edycji tej aktywności' });
     }
 
@@ -1140,13 +1152,21 @@ router.delete("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =
     if (!crmId) return res.status(404).json({ error: "Partner nie znaleziony" });
     const u = req.user;
     const actQ = await pool.query(
-      "SELECT created_by FROM crm_partner_activities WHERE id = $1 AND partner_id = $2 AND tenant_id = $3",
+      "SELECT created_by, assigned_to FROM crm_partner_activities WHERE id = $1 AND partner_id = $2 AND tenant_id = $3",
       [req.params.actId, crmId, req.tenantId]
     );
     if (!actQ.rows.length) return res.status(404).json({ error: "Nie znaleziono" });
-    const isOwner = actQ.rows[0].created_by === u.id;
-    const isMgr   = u.is_admin || u.crm_role === "sales_manager";
-    if (!isOwner && !isMgr) return res.status(403).json({ error: "Brak uprawnień" });
+    const { rows: parentPartner } = await pool.query(
+      "SELECT manager_id FROM crm_partners WHERE id = $1 AND tenant_id = $2",
+      [crmId, req.tenantId]
+    );
+    const canOperate =
+      actQ.rows[0].created_by === u.id ||
+      req.isCrmManager ||
+      canOperateForOwner(req, actQ.rows[0].created_by) ||
+      canOperateForOwner(req, actQ.rows[0].assigned_to) ||
+      canOperateForOwner(req, parentPartner[0]?.manager_id ?? null);
+    if (!canOperate) return res.status(403).json({ error: "Brak uprawnień" });
 
     await pool.query(
       "DELETE FROM crm_partner_activities WHERE id = $1 AND partner_id = $2 AND tenant_id = $3",

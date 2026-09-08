@@ -36,17 +36,49 @@ function crmAuth(req, res, next) {
 }
 
 /**
+ * Returns the user_id list of people the current user is actively substituting
+ * TODAY within their tenant (crm_absences: non-cancelled, CURRENT_DATE inside the
+ * inclusive window). One person can hold several concurrent substitutions — all
+ * are unioned. Day-level granularity (DATE + server CURRENT_DATE).
+ */
+async function loadActiveSubstituteForIds(userId, tenantId) {
+  if (!userId || !tenantId) return [];
+  try {
+    const { rows } = await db.query(
+      `SELECT DISTINCT absent_user_id
+         FROM crm_absences
+        WHERE substitute_user_id = $1
+          AND tenant_id = $2
+          AND cancelled_at IS NULL
+          AND CURRENT_DATE BETWEEN starts_on AND ends_on`,
+      [userId, tenantId],
+    );
+    return rows.map(r => r.absent_user_id);
+  } catch {
+    // Table may not exist yet (env without migration 0281) — treat as no substitutions.
+    return [];
+  }
+}
+
+/**
  * Async middleware: ładuje zakres widoczności CRM dla bieżącego usera.
  *
  * Ustawia:
- *   req.crmScopeUserIds  - null (admin, bez ograniczeń) | uuid[] (manager: users w grupach)
- *   req.crmGroupIds      - uuid[] grup managera | null
+ *   req.crmScopeUserIds     - null (admin, bez ograniczeń) | uuid[]
+ *                             (salesperson: [self, ...substituted-for];
+ *                              manager: [users w grupach, ...substituted-for])
+ *   req.crmSubstituteForIds - uuid[] osób, które user aktywnie zastępuje (może być pusta)
+ *   req.crmGroupIds         - uuid[] grup managera | null
+ *
+ * Aktywne zastępstwo rozszerza scope 1:1 z uprawnieniami przypisanego handlowca —
+ * ten sam mechanizm obsługuje odczyt (scopeFilter) i zapis (assertOwnership).
  *
  * Dla sales_manager bez żadnej grupy zwraca 403 z komunikatem dla użytkownika.
  * Musi być wywoływany po crmAuth.
  */
 async function loadCrmScope(req, res, next) {
   try {
+    req.crmSubstituteForIds = [];
     if (!req.user) return next();
 
     // Czytaj ustawienie crm_global_read z bazy (raz per request)
@@ -73,8 +105,16 @@ async function loadCrmScope(req, res, next) {
       return next();
     }
 
+    const subIds = await loadActiveSubstituteForIds(req.user.id, req.user.tenant_id);
+    req.crmSubstituteForIds = subIds;
+    const withSubs = (baseIds) => {
+      const out = baseIds.slice();
+      for (const id of subIds) if (!out.includes(id)) out.push(id);
+      return out;
+    };
+
     if (req.user.crm_role === 'salesperson') {
-      req.crmScopeUserIds = [req.user.id];
+      req.crmScopeUserIds = withSubs([req.user.id]);
       req.crmGroupIds     = null;
       return next();
     }
@@ -108,7 +148,7 @@ async function loadCrmScope(req, res, next) {
         [groupIds],
       );
 
-      req.crmScopeUserIds = userRows.map(r => r.user_id);
+      req.crmScopeUserIds = withSubs(userRows.map(r => r.user_id));
       return next();
     }
 
@@ -160,32 +200,38 @@ function requireCrmManager(req, res, next) {
 /**
  * Sprawdza czy bieżący user może EDYTOWAĆ dany rekord.
  *
- * - admin          → zawsze tak
- * - sales_manager  → tylko gdy właściciel rekordu należy do grupy managera
- * - salesperson    → tylko własne rekordy
+ * - admin     → zawsze tak
+ * - pozostali → właściciel rekordu musi mieścić się w req.crmScopeUserIds:
+ *               własny rekord, rekord handlowca z grupy managera, albo rekord
+ *               osoby, którą user aktywnie zastępuje (loadCrmScope rozszerza scope).
  *
  * Rzuca błąd 403 przy braku uprawnień.
  */
 function assertOwnership(record, req, ownerProp = 'assigned_to') {
   if (req.user.is_admin) return;
 
-  if (req.user.crm_role === 'sales_manager') {
-    if (req.crmScopeUserIds && !req.crmScopeUserIds.includes(record[ownerProp])) {
-      const err = new Error(
-        'Nie możesz edytować tego rekordu — handlowiec nie należy do Twojej grupy.',
-      );
-      err.status = 403;
-      throw err;
-    }
+  const ownerId = record[ownerProp];
+  if (Array.isArray(req.crmScopeUserIds) && req.crmScopeUserIds.includes(ownerId)) {
     return;
   }
 
-  // salesperson
-  if (record[ownerProp] !== req.user.id) {
-    const err = new Error('Brak dostępu do tego rekordu.');
-    err.status = 403;
-    throw err;
-  }
+  const err = new Error(
+    req.user.crm_role === 'sales_manager'
+      ? 'Nie możesz edytować tego rekordu — handlowiec nie należy do Twojej grupy.'
+      : 'Brak dostępu do tego rekordu.',
+  );
+  err.status = 403;
+  throw err;
+}
+
+/**
+ * Czy bieżący user może operować na rekordach należących do ownerId
+ * (własne / grupa managera / aktywne zastępstwo). Admin — zawsze.
+ * Pomocnik do miejsc, które nie używają assertOwnership (np. aktywności).
+ */
+function canOperateForOwner(req, ownerId) {
+  if (req.user?.is_admin) return true;
+  return Array.isArray(req.crmScopeUserIds) && req.crmScopeUserIds.includes(ownerId);
 }
 
 /**
@@ -209,4 +255,4 @@ function requireFeature(feature) {
   };
 }
 
-module.exports = { crmAuth, loadCrmScope, requireCrmManager, crmScope, assertOwnership, requireFeature };
+module.exports = { crmAuth, loadCrmScope, requireCrmManager, crmScope, assertOwnership, canOperateForOwner, requireFeature };
