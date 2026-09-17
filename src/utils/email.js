@@ -143,6 +143,23 @@ async function sendMail({ to, subject, html, text }) {
 const BASE_URL = config.frontendUrl;
 
 /**
+ * Escape user-entered text before inserting it into email HTML.
+ * htmlText() additionally keeps line breaks as <br>.
+ */
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function htmlText(value) {
+  return escapeHtml(value).replace(/\r?\n/g, "<br>");
+}
+
+/**
  * Bazowy wrapper HTML z brandingiem CRMtree
  */
 function template(content) {
@@ -627,6 +644,74 @@ async function sendActivityReminder({
 
 // ─── Eksport ──────────────────────────────────────────────────────────────────
 
+/**
+ * Informational notification: you have been named as a substitute for an absence.
+ * No acceptance step — pure information.
+ */
+async function sendSubstitutionAssigned({
+  to,
+  substituteName,
+  absentName,
+  assignerName,
+  startsOn,
+  endsOn,
+  reason,   // 'vacation' | 'sick_leave' | 'other'
+  note,
+}) {
+  if (!to) return;
+
+  const REASON_LABEL = {
+    vacation:   'Urlop',
+    sick_leave: 'Zwolnienie lekarskie (L4)',
+    other:      'Inna nieobecność',
+  };
+  const reasonLabel = REASON_LABEL[reason] || REASON_LABEL.other;
+  const fmt = (d) => d
+    ? new Date(d).toLocaleDateString('pl-PL', { day: '2-digit', month: '2-digit', year: 'numeric' })
+    : '—';
+  const url = `${BASE_URL}/crm/leads`;
+
+  // via module.exports so it can be spied on in tests
+  await module.exports.sendMail({
+    to,
+    subject: `[CRMtree] Zastępstwo za ${absentName} (${fmt(startsOn)}–${fmt(endsOn)})`,
+    html: template(`
+      <h2>Wskazano Cię jako zastępcę</h2>
+      <p>Cześć ${substituteName},</p>
+      <p>Użytkownik <strong>${assignerName}</strong> wyznaczył Cię na zastępcę
+         <strong>${absentName}</strong> na czas nieobecności. Na czas jej trwania
+         uzyskujesz taki sam dostęp do leadów i partnerów tej osoby, jaki ma jej
+         przypisany handlowiec.</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">Osoba nieobecna</span>
+          <span class="info-val">${absentName}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Powód</span>
+          <span class="info-val"><span class="badge badge-orange">${reasonLabel}</span></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Od</span>
+          <span class="info-val">${fmt(startsOn)}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Do (włącznie)</span>
+          <span class="info-val">${fmt(endsOn)}</span>
+        </div>
+        ${note ? `<div class="info-row">
+          <span class="info-label">Notatka</span>
+          <span class="info-val">${htmlText(note)}</span>
+        </div>` : ''}
+      </div>
+      <a href="${url}" class="btn">Otwórz CRM →</a>
+      <p style="color:#71717A;font-size:12px;margin-top:12px">
+        To powiadomienie ma charakter informacyjny — nie wymaga potwierdzenia.
+      </p>
+    `),
+  });
+}
+
 module.exports = {
   sendMail,
   sendTaskAssigned,
@@ -637,4 +722,5 @@ module.exports = {
   sendUserInvitation,
   sendCrmActivityAssigned,
   sendActivityReminder,
+  sendSubstitutionAssigned,
 };
