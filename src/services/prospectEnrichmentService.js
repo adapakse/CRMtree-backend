@@ -428,6 +428,27 @@ function icpGateStatus(gates) {
   return 'needs_review';
 }
 
+// Punkty za bramki (decyzja 2026-09-17): 10 pkt za KAŻDĄ bramkę ze statusem
+// "pass" — wcześniej bramki tylko kwalifikowały/dyskwalifikowały (icpGateStatus)
+// i nie wpływały na icp_score. "fail"/"unknown" = 0 pkt za tę bramkę (bez
+// dodatkowej kary — kara za brak kwalifikacji to już samo disqualified/needs_review).
+const ICP_GATE_POINTS = 10;
+const ICP_GATE_DEFS = [
+  { id: 'b2b', label: 'Sprzedaż B2B (nie do konsumenta)' },
+  { id: 'company_size', label: 'Minimum 15 pracowników' },
+];
+const ICP_MAX_GATE_SCORE = ICP_GATE_DEFS.length * ICP_GATE_POINTS; // 20
+
+function calcIcpGatePoints(gates) {
+  let points = 0;
+  const breakdown = ICP_GATE_DEFS.map(def => {
+    const hit = gates?.[def.id] === 'pass';
+    if (hit) points += ICP_GATE_POINTS;
+    return { id: def.id, label: def.label, points: ICP_GATE_POINTS, hit };
+  });
+  return { points, breakdown };
+}
+
 // Kalkuluje icp_score deterministycznie z sygnałów zwróconych przez AI —
 // nie ufamy score'owi liczonemu przez sam model, tak jak poprzednio.
 function calcIcpScore(signals) {
@@ -2770,6 +2791,7 @@ async function enrichOne(prospectId, opts = {}) {
                icp_signals         = NULL,
                icp_gates            = NULL,
                icp_bonus_signals     = NULL,
+               icp_gate_points        = NULL,
                icp_gate_status        = 'needs_review',
                ai_summary              = NULL,
                enriched_at               = NOW(),
@@ -2954,6 +2976,7 @@ async function enrichOne(prospectId, opts = {}) {
              icp_signals           = NULL,
              icp_gates              = NULL,
              icp_bonus_signals       = NULL,
+             icp_gate_points          = NULL,
              icp_gate_status          = 'needs_review',
              icp_downgrade_flags       = $3,
              ai_summary                 = NULL,
@@ -2991,6 +3014,7 @@ async function enrichOne(prospectId, opts = {}) {
                icp_signals         = NULL,
                icp_gates            = NULL,
                icp_bonus_signals     = NULL,
+               icp_gate_points        = NULL,
                icp_gate_status        = 'needs_review',
                ai_summary              = NULL,
                enriched_at               = NOW(),
@@ -3020,6 +3044,7 @@ async function enrichOne(prospectId, opts = {}) {
 
     const scoreResult   = calcIcpScore(analysis?.icp_signals);
     const gateStatus    = icpGateStatus(analysis?.gates);
+    const gatePointsResult = calcIcpGatePoints(analysis?.gates);
     const downgradeFlags = calcIcpDowngradeFlags(websiteUrl, websiteStatus);
 
     // Blacklista ICP (np. hurtownie) — kara punktowa do icp_score, NIE zmienia
@@ -3047,7 +3072,7 @@ async function enrichOne(prospectId, opts = {}) {
       } catch { /* bonus to dodatek, nie krytyczne jeśli się nie uda */ }
     }
 
-    const totalScore = Math.max(0, Math.min(100, scoreResult.raw + bonusResult.bonus - blacklistPenalty));
+    const totalScore = Math.max(0, Math.min(100, scoreResult.raw + bonusResult.bonus + gatePointsResult.points - blacklistPenalty));
 
     enrichLog.claude = {
       provider:     usedProvider,
@@ -3058,6 +3083,7 @@ async function enrichOne(prospectId, opts = {}) {
       model:        usedModel || (usedProvider === 'anthropic' ? ANTHROPIC_MODEL : DEEPSEEK_MODEL),
       icp_raw:      scoreResult.raw,
       icp_bonus:    bonusResult.bonus,
+      icp_gate_points: gatePointsResult.points,
       icp_blacklist_penalty: blacklistPenalty,
       icp_blacklist_matched: blacklistMatches || null,
       icp_total:    totalScore,
@@ -3103,6 +3129,7 @@ async function enrichOne(prospectId, opts = {}) {
         website_status            = COALESCE($25, website_status),
         gus_regon                 = COALESCE($26, gus_regon),
         gus_pkd_main              = COALESCE($27, gus_pkd_main),
+        icp_gate_points           = $29,
         enriched_at               = NOW(),
         enrichment_status         = 'done',
         enrichment_error          = NULL
@@ -3136,6 +3163,7 @@ async function enrichOne(prospectId, opts = {}) {
         gusData?.regon || null,
         gusData?.pkdMain || null,
         websiteSource || null,
+        JSON.stringify(gatePointsResult.breakdown),
       ]
     );
 
@@ -3147,6 +3175,7 @@ async function enrichOne(prospectId, opts = {}) {
         icp_signals: scoreResult.breakdown,
         icp_gates: analysis?.gates || null,
         icp_gate_status: gateStatus,
+        icp_gate_points: gatePointsResult.breakdown,
         icp_downgrade_flags: downgradeFlags,
         ai_summary: analysis?.ai_summary || null,
         enrichment_log: enrichLog,
