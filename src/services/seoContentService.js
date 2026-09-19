@@ -97,8 +97,15 @@ const ArticleSchema = z.object({
   internal_link_suggestions: z
     .array(z.object({ target_slug: z.string(), anchor_text: z.string() }))
     .max(6),
-  cta: z.object({ text: z.string(), url: z.string() }),
+  // No `url` field here on purpose — the marketing site has no demo/contact/pricing
+  // page for the model to link to, only /login exists. Letting the model invent one
+  // (it consistently guessed "/demo", a common SaaS convention that doesn't exist on
+  // this site) produced a dead CTA link on every published article. The real target
+  // is hardcoded in CTA_URL below and used by renderBody() instead.
+  cta: z.object({ text: z.string() }),
 });
+
+const CTA_URL = '/login';
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -187,7 +194,7 @@ function renderBody(article) {
     parts.push(article.internal_link_suggestions.map((l) => `- [${l.anchor_text}](/blog/${l.target_slug})`).join('\n'));
   }
   if (article.cta?.text) {
-    parts.push(`[${article.cta.text}](${article.cta.url})`);
+    parts.push(`[${article.cta.text}](${CTA_URL})`);
   }
   return parts.join('\n\n');
 }
