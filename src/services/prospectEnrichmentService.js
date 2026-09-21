@@ -38,29 +38,58 @@ const LINK_SCORES = [
   { pattern: /kontakt|contact/i, score: 9 },
   // Handlowcy / przedstawiciele handlowi / opiekunowie regionalni — sygnał field_sales + key contacts
   // Przykład: /kontakt/handlowcy/, /przedstawiciele-regionalni/, /dzial-handlowy/
-  { pattern: /handlowc[yi]|handlow[yi]c|dzial.handlow|siec.handlow|przedstawiciel|sprzedaz.regionalna|sales.rep|account.manager|opiekun.klienta|opiekun.region|regionaln[yi].opiek/i, score: 9 },
+  // Poprawka 19.09: "handlowc[yi]"/"handlow[yi]c" był błędnym zawężeniem (nie
+  // łapał np. "handlowca", "handlowiec", "handlowych") — goły rdzeń "handlow"
+  // łapie WSZYSTKIE odmiany przez samo dopasowanie podciągu, bez wyliczanki.
+  // Poprawka 19.09 (druga tura, po regresji Berlinerluft): goły rdzeń "handlow"
+  // łapał też "Ogólne Warunki Handlowe" (regulamin, nie dowód sprzedażowy) i
+  // wypychał prawdziwą stronę zespołu z budżetu. excludeIfLegalDocument=true
+  // — patrz LEGAL_DOCUMENT_PATTERN i scoreLinkRelevance().
+  { pattern: /handlow|dzial.handlow|siec.handlow|sprzedaz|przedstawiciel|opiekun.klienta|opiekun.region|regionaln\w*.opiek|sales.rep|account.manager/i, score: 9, excludeIfLegalDocument: true },
   // Serwis techniczny w terenie / serwisanci — sygnał field_service + key contacts
   { pattern: /serwisanc|serwis.techniczny|serwis.terenowy|ekipa.serwis|technicy.terenow/i, score: 8 },
   // Firma, opis działalności — "poznaj nas" też tutaj (Medicover, Luxmed)
   { pattern: /o.nas|o.firmie|about|historia|kim.jestesmy|who.we.are|przedstawiamy|poznaj/i, score: 8 },
-  // Usługi — sygnał podróży
-  { pattern: /uslugi|usługi|services|oferta|rozwiazania|solutions|produkty|products/i, score: 7 },
-  // Oddziały i lokalizacje — klasyczne i healthcare-specific
-  { pattern: /oddzialy|oddziały|lokalizacje|locations|biura|offices|gdzie.jestesmy|placowk|placówk|klinik|centra|przychodn|apteki|salon[yi]|punkt.obs/i, score: 9 },
+  // Usługi/oferta/wycena/konsultacja/doradztwo — sygnały custom_quote_process
+  // i consultation_demo_needs_analysis. Poprawka 19.09: "oferta" jako dosłowna
+  // forma nie łapała "oferty"/"ofertowy" (różna końcówka = różny podciąg) —
+  // zamienione na rdzeń "ofert". Dodane wycena/konsultacja/doradztwo/dobór,
+  // wcześniej nigdzie nie rozpoznawane mimo że to główne słowa kluczowe tych
+  // dwóch sygnałów. "usługi" z polskim "ł" usunięte jako martwy kod — ten
+  // wariant nigdy nie trafiał (anchor jest odakcentowywany przed dopasowaniem).
+  { pattern: /uslug|services|ofert|rozwiazani|wycen|konsultacj|doradztw|dob[oó]r|solution|produkt|products/i, score: 7 },
+  // Oddziały i lokalizacje — klasyczne i healthcare-specific. Poprawka 19.09:
+  // "oddziały"/"placówk" z polskimi znakami to martwy kod (anchor jest
+  // odakcentowywany PRZED dopasowaniem, patrz deaccent() — te warianty z ą/ł/ó
+  // nigdy się nie mogły dopasować). Rdzenie "oddzia"/"lokalizacj" łapią
+  // wszystkie odmiany przez sam podciąg.
+  { pattern: /oddzia|lokalizacj|locations|biur[ao]|offices|gdzie.jestesmy|placowk|klinik|centra|przychodn|apteki|salon[yi]|punkt.obs/i, score: 9 },
   // Wyszukiwarki lokalizacji ("Znajdź placówkę", "Wyszukaj centrum") — silny sygnał wielu lokalizacji
   { pattern: /znajdz|wyszukaj/i, score: 7 },
   // Kariera — ogłoszenia o pracę
   { pattern: /kariera|praca|jobs|careers|rekrutacja|dolacz|join/i, score: 6 },
-  // Dodane po audycie menu na 100 firmach (19.08) — "partnerzy" to bezpośredni
-  // dowód sygnału ICP "Sieć partnerów / dealerów", dziś w ogóle nierozpoznawany.
-  { pattern: /partner[zy]|dealer|dystrybutor|distributor/i, score: 8 },
-  // "realizacje"/"referencje" — dowody projektowe, wspierają sygnały przetargów
-  // i złożonej sprzedaży (case studies, referencje od klientów/instytucji).
-  { pattern: /realizacj|referencj|case.stud/i, score: 6 },
+  // Sieć partnerów/dealerów — USUNIĘTE STĄD 19.09 (druga tura, po regresji
+  // Arpol): płaski wzorzec "partner|dealer|dystrybu" o stałym score 8 łapał
+  // RÓWNIEŻ artykuły/newsy o wydarzeniach branżowych osób trzecich ("Genetec
+  // Partner Day", "Bosch Partner Day") na równi z prawdziwym dowodem własnej
+  // sieci dealerskiej — 5 niemal identycznie ocenionych stron konkurowało o
+  // to samo 1-2 miejsca budżetu kategorii "partnerzy". Zastąpione dwupoziomową
+  // logiką w scoreLinkRelevance() (PARTNER_STRONG_PATH/PHRASE vs
+  // PARTNER_WEAK_PATTERN) — dedykowana strona sieci dostaje wysoki score,
+  // gołe wystąpienie słowa "partner" w artykule dostaje niski.
+  // "realizacje"/"referencje"/"przetargi" — dowody projektowe i sygnał
+  // tender_bidding_department. Poprawka 19.09 (audyt retrievalu): to był
+  // najniżej scorowany wzorzec w całej tabeli (6 pkt) i JEDYNY sygnał ICP bez
+  // własnego słowa kluczowego "przetarg" — podniesione do 8 i dodane
+  // "przetarg"/"zamówienia publiczne", żeby realnie konkurowały o top-12
+  // zamiast przegrywać z każdą inną kategorią.
+  { pattern: /realizacj|referencj|case.stud|przetarg|zam[oó]wien\w*.publiczn/i, score: 8 },
   // Sklep/e-commerce B2B i zapytania ofertowe (RFQ) — dodane po korektach
   // 20.08 (Wagner-service "Sklep internetowy" i Kigema "zapytanie ofertowe"
   // nigdy nie trafiały do kandydatów, bo nie było dla nich żadnego wzorca).
-  { pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout|zapytani\w*.?ofert|request.?for.?quot|\brfq\b/i, score: 8 },
+  // Dodane 19.09: "strefa klienta"/"panel klienta" — częste polskie
+  // odpowiedniki "portalu B2B", dotąd nierozpoznawane.
+  { pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|strefa.?klient|panel.?klient|koszyk|checkout|zapytani\w*.?ofert|request.?for.?quot|\brfq\b/i, score: 8 },
   // Gołe "B2B" w menu (link do portalu/subdomeny b2b.<domena>), "hurt" i
   // "współpraca" — dodane po audycie 24.08 (7 rozbieżności AI vs. ręczna
   // weryfikacja: MPL Power, Wodmax miały wprost link "B2B" do b2b.<domena>
@@ -190,9 +219,9 @@ function extractContactBlockText(text) {
 // dla guessFallbackDomains identyczna błędna propozycja domeny (case: Fortech
 // i Zetpri-Rembud, oba na przedsiebiorstwo.com.pl).
 const GENERIC_NAME_WORDS = new Set([
-  'przedsiebiorstwo', 'osrodek', 'rozlewnia', 'centrum', 'zaklad', 'zaklady',
+  'przedsiebiorstwo', 'firma', 'osrodek', 'rozlewnia', 'centrum', 'zaklad', 'zaklady',
   'grupa', 'biuro', 'instytut', 'spolka',
-  'innowacyjno', 'wdrozeniowe', 'inzynieryjno', 'budowlane', 'badan', 'certyfikacji',
+  'badan', 'certyfikacji',
   'wod', 'mineralnych',
   // Kolejne opisowe człony po "przedsiębiorstwo" — filtr musi przejść PRZEZ
   // WSZYSTKIE z nich, nie tylko pierwsze słowo, żeby dotrzeć do właściwej
@@ -201,7 +230,7 @@ const GENERIC_NAME_WORDS = new Set([
   // nie "kopalnia"; "Przedsiębiorstwo Robót Instalacyjnych 'insbud'" — bez
   // 'robot'/'instalacyjne(-ych)' zostawało "robót"/"instalacyjnych", nie
   // "insbud" — oba potwierdzone empirycznie, patrz test 21.08 na tych firmach)
-  'wielobranzowe', 'robot', 'instalacyjne', 'instalacyjnych',
+  'robot',
   // Człony częste w nazwach spółek-córek/grup kapitałowych — same w sobie nie
   // odróżniają marki (case: Ameri-pol Trading, Epam Systems (Poland))
   'trading', 'systems', 'polska', 'poland', 'holding', 'group', 'international',
@@ -211,13 +240,46 @@ const GENERIC_NAME_WORDS = new Set([
   'i', 'z', 'w', 'na', 'do', 'dla', 'oraz', 'a',
 ]);
 
+// Rdzenie polskich przymiotników opisujących RODZAJ działalności (nie markę),
+// dopasowywane po PREFIKSIE zamiast dokładnym słowem — polska fleksja daje
+// wiele końcówek tego samego rdzenia (-y/-e/-a/-o/-ych/-ej/-ymi...), a
+// GENERIC_NAME_WORDS jako zbiór dokładnych słów wymagałby wymieniania każdej
+// z osobna. Luka tego typu naprawdę wystąpiła (audyt INT, 18.09): "Przedsiębiorstwo
+// PRODUKCYJNO-HANDLOWE 'Mirex'" miało na liście tylko formy dla "instalacyjne"/
+// "wielobranżowe" — "produkcyjno"/"handlowe" nigdy nie były filtrowane, więc
+// nameTokensMatch wybierał "produkcyjno" jako "najbardziej charakterystyczne
+// słowo" zamiast "mirex", i odrzucał poprawną domenę mimo trafienia adresowego
+// 1:1. Rozwiązanie ogólne (rdzenie, nie pojedynczy wyjątek), bo ten sam wzorzec
+// ("X-handlowe", "X-usługowe" itd.) jest bardzo częsty w polskich nazwach spółek.
+const GENERIC_NAME_STEMS = [
+  'produkcyjn',   // produkcyjne/produkcyjna/produkcyjno/produkcyjnych
+  'handlow',      // handlowe/handlowa/handlowo/handlowych
+  'uslugow',      // usługowe/usługowa/usługowo/usługowych
+  'budowlan',     // budowlane/budowlana/budowlano/budowlanych
+  'transportow',  // transportowe/transportowa/transportowo
+  'spedycyjn',    // spedycyjna/spedycyjne/spedycyjnych
+  'montazow',     // montażowe/montażowa/montażowych
+  'projektow',    // projektowe/projektowa/projektowo
+  'remontow',     // remontowe/remontowa/remontowo
+  'inzynieryjn',  // inżynieryjno/inżynieryjne/inżynieryjna
+  'wdrozeniow',   // wdrożeniowe/wdrożeniowa/wdrożeniowych
+  'innowacyjn',   // innowacyjno/innowacyjne/innowacyjna
+  'wielobranz',   // wielobranżowe/wielobranżowa/wielobranżowych
+  'instalacyjn',  // instalacyjne/instalacyjnych/instalacyjna
+];
+
+function isGenericNameWord(word) {
+  return GENERIC_NAME_WORDS.has(word) || GENERIC_NAME_STEMS.some(stem => word.startsWith(stem));
+}
+
 // Dopasowuje najbardziej charakterystyczne słowo nazwy firmy (pierwsze PO
-// odfiltrowaniu GENERIC_NAME_WORDS) do title/h1 strony — ten sam wzorzec co
-// guessDomainsFromName()/guessFallbackDomains() używają do zgadywania domen.
+// odfiltrowaniu GENERIC_NAME_WORDS/GENERIC_NAME_STEMS) do title/h1 strony —
+// ten sam wzorzec co guessDomainsFromName()/guessFallbackDomains() używają
+// do zgadywania domen.
 function nameTokensMatch(companyName, titleText) {
   if (!companyName || !titleText) return false;
   const norm  = normalizeName(companyName);
-  const words = norm.split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !GENERIC_NAME_WORDS.has(w));
+  const words = norm.split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !isGenericNameWord(w));
   if (!words.length) return false;
   const firstWord  = words[0];
   const titleNorm  = normalizeName(titleText);
@@ -253,15 +315,28 @@ function identitySecondarySignal(text, { krsData, gusData }) {
   // IMW Inżynieria Maszyn Wałcz→deckert.de — tam nie ma żadnego lokalnego
   // dopasowania obok obcego, więc weto zostaje).
   const negative = foreignHit && !(postcodeHit || streetHit);
-  return { positive: !!(postcodeHit || streetHit), negative, postcodeHit, streetHit, foreignHit };
+  // Silne dopasowanie adresowe (audyt INT, 18.09): kod pocztowy ORAZ ulica
+  // TRAFIONE JEDNOCZEŚNIE, niezależnie od nazwy — wystarcza samo, bez nameHit.
+  // Powód: nameHit zawodzi po rebrandingu/zmianie nazwy spółki (case: "Musi
+  // Novum" → "Hunters Novum" na stronie, "Novum" w rekordzie CRM — tytuł
+  // strony nie dzieli już żadnego tokenu z nazwą rejestrową), a dwa NIEZALEŻNE
+  // trafienia adresowe naraz (nie jedno, jak w słabym dowodzie niżej) to
+  // dowód praktycznie tak mocny jak NIP — przypadkowa strona nie będzie miała
+  // akurat TEJ ulicy I TEGO kodu pocztowego wpisanych razem w treści.
+  // Pojedyncze trafienie (samo postcode LUB sama ulica) NIE kwalifikuje się
+  // tutaj — zostaje w słabym dowodzie niżej, wciąż wymagającym nameHit.
+  const strong = postcodeHit && streetHit;
+  return { positive: !!(postcodeHit || streetHit), negative, strong, postcodeHit, streetHit, foreignHit };
 }
 
 // Decyduje czy domena (zgadnięta/wyszukana LUB ręcznie podana z CSV, gdy
 // wywołana z tego kontekstu) faktycznie należy do analizowanej firmy.
 //
-// Mocny dowód (wystarcza sam): NIP, KRS lub REGON znalezione w treści strony.
-// Słaby dowód (wymaga OBU): nazwa w title/h1 ORAZ dokładny element adresu
-// (ulica/kod pocztowy) z danych rejestrowych KRS lub GUS. Samo miasto nie wystarcza.
+// Mocny dowód (wystarcza sam): NIP, KRS lub REGON znalezione w treści strony,
+// LUB kod pocztowy + ulica z KRS/GUS trafione JEDNOCZEŚNIE (niezależnie od
+// nazwy — patrz identitySecondarySignal/strong).
+// Słaby dowód (wymaga OBU): nazwa w title/h1 ORAZ pojedynczy element adresu
+// (ulica LUB kod pocztowy) z danych rejestrowych KRS lub GUS. Samo miasto nie wystarcza.
 function checkDomainIdentity({ nip, text, title, company, krsData, gusData }) {
   const nipMatch   = nipFoundInText(nip, text);
   const krsMatch   = krsFoundInText(krsData?.krsNumber, text);
@@ -297,8 +372,194 @@ function checkDomainIdentity({ nip, text, title, company, krsData, gusData }) {
   if (krsMatch)   return { verified: true, reason: 'krs_match', evidence };
   if (regonMatch) return { verified: true, reason: 'regon_match', evidence };
   if (secondary.negative) return { verified: false, reason: 'foreign_address_conflict', nameHit, secondary, evidence };
+  // Silny dowód adresowy (postcode + ulica jednocześnie) wystarcza sam, bez
+  // nameHit — patrz komentarz przy identitySecondarySignal/strong. Sprawdzany
+  // PRZED słabym dowodem, żeby nie zależeć od kolejności.
+  if (secondary.strong) return { verified: true, reason: 'strong_registry_address', nameHit, secondary, evidence };
   if (nameHit && secondary.positive) return { verified: true, reason: 'name_plus_registry_address', nameHit, secondary, evidence };
   return { verified: false, reason: 'insufficient_evidence', nameHit, secondary, evidence };
+}
+
+// ── Identity fallback: dane prawne firmy poza homepage (20.09, case Alior Bank) ──
+// checkDomainIdentity() na treści z fast-scanu nie widzi stopki ani całych
+// podstron: extractText() zwraca tylko <main> i tnie do 6000 znaków (limit
+// budżetu dla AI), a fast-scan pobiera tylko 4 najlepiej punktowane linki, wśród
+// których rzadko jest strona z danymi rejestrowymi. Alior: NIP, REGON, ulica i
+// kod pocztowy są w HTML /kontakt (18 tys. znaków), ale poza pierwszymi 6000.
+// Zanim domena trafi do needs_review/domain_unconfirmed, sprawdzamy więc (bez
+// pełnego crawla): PEŁNY tekst homepage z już pobranego HTML + maksymalnie
+// IDENTITY_FALLBACK_MAX_PAGES stron o znaczeniu prawnym/kontaktowym.
+//
+// PRECYZJA (nie poluzowujemy identity checka): fallback zatwierdza domenę
+// WYŁĄCZNIE po mocnym dowodzie znalezionym na JEDNEJ stronie tej samej domeny:
+// NIP, KRS lub REGON, albo kod pocztowy + ulica jednocześnie. Słaba reguła
+// "nazwa w title + pojedynczy element adresu" NIE działa w fallbacku (na dużych
+// stronach kod pocztowy trafia się przypadkiem). Sama nazwa/podobieństwo domeny
+// nigdy nie wystarcza; konflikt zagranicznego adresu nadal blokuje.
+const IDENTITY_TEXT_MAX_CHARS = 300_000;
+const IDENTITY_FALLBACK_MAX_PAGES = 5;
+const IDENTITY_FALLBACK_MAX_DISCOVERED = 3;
+const IDENTITY_FALLBACK_STRICT_REASONS = new Set(['nip_match', 'krs_match', 'regon_match', 'strong_registry_address']);
+
+// Kolejność = prawdopodobieństwo, że strona ma pełne dane rejestrowe.
+const IDENTITY_PAGE_RANKS = [
+  /dane[-_.]?(spolki|rejestrowe|firmy)|informacje[-_.]?prawne|nota[-_.]?prawna|impressum|stopka|company[-_.]?(details|data)|legal[-_.]?(notice|info)/i,
+  /polityka[-_.]?prywatnosci|privacy|rodo|regulamin|terms/i,
+  /kontakt|contact/i,
+  /o[-_.]?nas|o[-_.]?firmie|o[-_.]?spolce|about/i,
+];
+const IDENTITY_DEFAULT_PATHS = ['/kontakt', '/o-firmie', '/o-nas', '/polityka-prywatnosci', '/regulamin'];
+
+// PEŁNY tekst strony do sprawdzania tożsamości: bez ograniczenia do <main>, bez
+// cięcia do 6000 znaków, z JSON-LD (structured data). To NIE jest tekst dla AI.
+function extractIdentityText(html) {
+  if (!html) return '';
+  const $ = cheerio.load(html);
+  const jsonLd = [];
+  $('script[type="application/ld+json"]').each((_, el) => {
+    const raw = $(el).contents().text();
+    if (raw) jsonLd.push(raw);
+  });
+  $('script, style, noscript, iframe').remove();
+  const body = $('body').text() || $.root().text();
+  return `${body} ${jsonLd.join(' ')}`.replace(/\s+/g, ' ').trim().slice(0, IDENTITY_TEXT_MAX_CHARS);
+}
+
+function sameSiteHost(urlA, urlB) {
+  try {
+    const host = u => new URL(u).hostname.toLowerCase().replace(/^www\./, '');
+    return host(urlA) === host(urlB);
+  } catch {
+    return false;
+  }
+}
+
+// Wybiera do sprawdzenia kilka stron: najpierw odkryte linki o znaczeniu
+// prawnym/kontaktowym (max 3, wg rangi), potem standardowe ścieżki (m.in.
+// /kontakt), łącznie max IDENTITY_FALLBACK_MAX_PAGES. Zwraca pełne URL-e.
+function pickIdentityFallbackUrls(links, baseUrl, { maxPages = IDENTITY_FALLBACK_MAX_PAGES, maxDiscovered = IDENTITY_FALLBACK_MAX_DISCOVERED } = {}) {
+  const normPath = p => (String(p || '').toLowerCase().replace(/\/+$/, '') || '/');
+  const chosen = new Map();
+  const ranked = [];
+  for (const l of (links || [])) {
+    if (!l || !l.path || l.path === '/') continue;
+    const rank = IDENTITY_PAGE_RANKS.findIndex(re => re.test(`${l.path} ${deaccent(l.anchor || '')}`));
+    if (rank === -1) continue;
+    ranked.push({ l, rank, depth: l.path.split('/').filter(Boolean).length });
+  }
+  ranked.sort((a, b) => a.rank - b.rank || a.depth - b.depth || a.l.path.length - b.l.path.length);
+  for (const { l } of ranked) {
+    if (chosen.size >= maxDiscovered) break;
+    const key = normPath(l.path);
+    if (chosen.has(key)) continue;
+    try { chosen.set(key, l.fullHref || new URL(l.path, baseUrl).toString()); } catch { /* zły link — pomiń */ }
+  }
+  for (const p of IDENTITY_DEFAULT_PATHS) {
+    if (chosen.size >= maxPages) break;
+    const key = normPath(p);
+    if (chosen.has(key)) continue;
+    try { chosen.set(key, new URL(p, baseUrl).toString()); } catch { /* zła baza — pomiń */ }
+  }
+  return [...chosen.values()];
+}
+
+// Pełna nazwa prawna (bez formy prawnej) w tekście — wyłącznie DIAGNOSTYKA;
+// o zatwierdzeniu domeny nie decyduje.
+function legalNameInText(companyName, text) {
+  const core = deaccent(String(companyName || '').toLowerCase())
+    .replace(/\s+(sp\.?\s*z\s*o\.?\s*o\.?|s\.?\s*a\.?|sp\.?\s*k\.?|sp\.?\s*j\.?|spolka\b.*)$/i, '')
+    .trim();
+  return core.length >= 5 && deaccent(String(text || '').toLowerCase()).includes(core);
+}
+
+// CZYSTA funkcja decyzyjna fallbacku — testowalna bez sieci. Każde źródło
+// (homepage / podstrona) oceniane OSOBNO regułami checkDomainIdentity, żeby
+// cyfry z końca jednego tekstu nie łączyły się z początkiem innego w fałszywy
+// NIP. Zatwierdza tylko strict reasons (patrz IDENTITY_FALLBACK_STRICT_REASONS).
+function evaluateIdentityFallback({ company, krsData, gusData, title, sources }) {
+  const perSource = [];
+  let decided = null;
+  let foreignSource = null;
+  let weakOnly = false;
+  for (const src of (sources || [])) {
+    const check = checkDomainIdentity({ nip: company.nip, text: src.text, title, company, krsData, gusData });
+    const ev = check.evidence || {};
+    perSource.push({
+      source: src.label, chars: (src.text || '').length, reason: check.reason,
+      hits: {
+        nip: !!ev.nip_match, regon: !!ev.regon_match, krs: !!ev.krs_match,
+        postcode: !!ev.postcode_hit, street: !!ev.street_hit,
+        foreign_conflict: !!ev.foreign_conflict,
+        legal_name: legalNameInText(company.company_name, src.text),
+      },
+    });
+    if (!decided && check.verified && IDENTITY_FALLBACK_STRICT_REASONS.has(check.reason)) {
+      decided = { source: src.label, reason: check.reason, evidence: check.evidence };
+    } else if (check.verified) {
+      weakOnly = true; // np. name_plus_registry_address — w fallbacku NIE wystarcza
+    }
+    if (!foreignSource && check.reason === 'foreign_address_conflict') foreignSource = src.label;
+  }
+  if (decided) {
+    return { verified: true, reason: decided.reason, decided_by: `${decided.reason}@${decided.source}`, evidence: decided.evidence, sources: perSource };
+  }
+  const reason = foreignSource ? 'foreign_address_conflict' : 'insufficient_evidence';
+  return {
+    verified: false, reason,
+    decided_by: foreignSource ? `foreign_address_conflict@${foreignSource}` : (weakOnly ? 'weak_evidence_not_accepted_in_fallback' : 'no_strict_evidence'),
+    evidence: null, sources: perSource,
+  };
+}
+
+// Część sieciowa: homepage z już pobranego HTML (0 requestów) + do 5 podstron
+// równolegle (fetchPage, timeout 10 s, bez retry). Odrzuca strony, które po
+// przekierowaniu wylądowały na INNYM hoście (obce dane nie mogą potwierdzać).
+async function runIdentityFallback({ company, krsData, gusData, crawlState, title }) {
+  const base = crawlState?.effectiveBase;
+  if (!base) {
+    return { attempted: false, verified: false, reason: 'no_crawl_state', decided_by: 'no_crawl_state', evidence: null, sources: [], pages_checked: [] };
+  }
+  const sources = [];
+  if (crawlState.homepageHtml) sources.push({ label: 'homepage', text: extractIdentityText(crawlState.homepageHtml) });
+
+  const links = crawlState.allLinks && typeof crawlState.allLinks.values === 'function' ? Array.from(crawlState.allLinks.values()) : [];
+  const urls = pickIdentityFallbackUrls(links, base);
+  const fetched = await Promise.all(urls.map(async url => {
+    try {
+      const { html, finalUrl } = await fetchPage(url);
+      if (!html) return { url, status: 'empty' };
+      if (!sameSiteHost(finalUrl, base)) return { url, status: 'other_host', final_host: (() => { try { return new URL(finalUrl).hostname; } catch { return null; } })() };
+      return { url, status: 'ok', text: extractIdentityText(html) };
+    } catch (e) {
+      return { url, status: 'error', error: String(e.message || e).slice(0, 80) };
+    }
+  }));
+
+  const pagesChecked = [];
+  for (const f of fetched) {
+    pagesChecked.push({ url: f.url, status: f.status, chars: f.text ? f.text.length : 0, ...(f.final_host ? { final_host: f.final_host } : {}), ...(f.error ? { error: f.error } : {}) });
+    if (f.status === 'ok') sources.push({ label: f.url, text: f.text });
+  }
+  const verdict = evaluateIdentityFallback({ company, krsData, gusData, title, sources });
+  return { attempted: true, ...verdict, pages_checked: pagesChecked };
+}
+
+// Zaufanie do domeny jest WYŁĄCZNIE jednorazowe, per KONKRETNE wywołanie
+// enrichOne (opts.trustedDomain) — NIGDY z trwale zapisanej w bazie kolumny
+// website_source. Bug potwierdzony na INT 18.09: 'manual_correction' ustawione
+// raz (nawet przez samo otwarcie i zatwierdzenie dialogu "Re-process" w UI BEZ
+// faktycznej zmiany URL-a — pole tam jest z góry wypełnione bieżącym adresem)
+// omijało checkDomainIdentity() bezterminowo, także przy każdym kolejnym,
+// niepowiązanym re-processie tego samego rekordu (case: IMW Inżynieria Maszyn
+// Wałcz→deckert.de, M+B Birke→birke.com, Mirol→mirol.com, Minos→placeholder
+// hostingowy — wszystkie cztery kończyły jako "Wzbogacone" mimo
+// identity_check.verified=false). website_source w bazie zostaje jako
+// informacyjna etykieta pochodzenia URL-a (do wyświetlenia w UI), ale nie
+// steruje już tym, czy identity-check jest respektowany — o zaufaniu decyduje
+// wyłącznie to, czy TEN request faktycznie przyniósł nowy, ręcznie podany URL
+// (patrz POST /:id/re-process w admin-prospects.js, zmienna websiteChanged).
+function isDomainTrustedForThisRun(opts) {
+  return opts?.trustedDomain === true;
 }
 
 // Wykrywa strony-parkingi/domeny-na-sprzedaż — te zwracają HTTP 200 (więc nie
@@ -323,6 +584,24 @@ function isDomainMarketplaceHost(hostname) {
 
 function isDomainParkingPage(html) {
   return !!html && DOMAIN_PARKING_HINTS.test(html.slice(0, 20_000));
+}
+
+// Strona-wyzwanie anty-bot (JS fingerprinting + auto-reload), nie treść firmy —
+// case 18.09 (audyt sygnałów ICP, dachcentrum.pl): tytuł "Proszę czekać…" +
+// setTimeout(...).location.reload() w <script>, żadnej rzeczywistej treści bez
+// wykonania JS. Bez tego checka extractText() (fallback meta) brał tytuł
+// "Proszę czekać…" jako jedyny "tekst strony" i wysyłał go do AI jako realną
+// treść — sygnały ICP fałszywie wychodziły "false" bo strona wyglądała na pustą,
+// zamiast poprawnie trafić do needs_review z jawnym powodem. Nie renderujemy JS
+// (brak headless browsera w tym serwisie) — to tylko wykrycie i jawne oznaczenie
+// przypadku, nie obejście blokady.
+const BOT_CHALLENGE_TITLE_HINTS = /prosz[eę] czeka[cć]|please wait|just a moment|checking your browser|weryfikacj[eę] [zż][aą]dania|verifying you are human/i;
+const BOT_CHALLENGE_SCRIPT_HINTS = /settimeout\s*\(\s*function\s*\(\s*\)\s*\{\s*window\.location\.reload/i;
+
+function isBotChallengePage(html) {
+  if (!html) return false;
+  const head = html.slice(0, 5_000);
+  return BOT_CHALLENGE_TITLE_HINTS.test(head) && BOT_CHALLENGE_SCRIPT_HINTS.test(html);
 }
 
 // Błędy fetcha uznawane za DETERMINISTYCZNE — nie znikną przy ponownej próbie
@@ -382,8 +661,10 @@ function parseKrsDate(dateStr) {
 // Wagi: wysoka 10 pkt, średnia 5 pkt. Rozszerzone o 8 z 11 sygnałów artefaktu —
 // sygnały 9-11 (rekrutacja/raportowanie/call center) wymagają portali z ofertami
 // pracy (Pracuj.pl), nie są jeszcze podpięte, patrz pamięć projektu.
+// Wyjątek 18.09: dzial_handlowy podniesiony do 15 pkt (decyzja biznesowa), żeby
+// maksymalny możliwy score wynosił równo 100 zamiast 95.
 const ICP_SIGNALS = [
-  { id: 'dzial_handlowy',        label: 'Dział handlowy',                                    tier: 'wysoka', points: 10, promptKey: 'field_sales_team' },
+  { id: 'dzial_handlowy',        label: 'Dział handlowy',                                    tier: 'wysoka', points: 15, promptKey: 'field_sales_team' },
   { id: 'zlozony_proces_sprzedazy', label: 'Złożony proces sprzedaży / indywidualna wycena',  tier: 'wysoka', points: 10, promptKey: 'custom_quote_process' },
   { id: 'konsultacja_demo',      label: 'Konsultacja, demo lub analiza potrzeb',              tier: 'wysoka', points: 10, promptKey: 'consultation_demo_needs_analysis' },
   { id: 'opieka_nad_klientem',   label: 'Dedykowana opieka nad klientem B2B',                 tier: 'wysoka', points: 10, promptKey: 'dedicated_customer_care_b2b' },
@@ -398,7 +679,7 @@ const ICP_SIGNALS = [
     requiresAnyOf: ['dzial_handlowy', 'opieka_nad_klientem'],
   },
 ];
-const ICP_MAX_RAW_SCORE = ICP_SIGNALS.reduce((sum, s) => sum + s.points, 0); // 65
+const ICP_MAX_RAW_SCORE = ICP_SIGNALS.reduce((sum, s) => sum + s.points, 0); // 70
 
 // Bonusowe punkty (decyzja 19.08, potwierdzone na spotkaniu: 5 pkt za każdy) —
 // wykrywane regexem po SUROWYM HTML strony głównej (script tagi), nie po
@@ -438,6 +719,86 @@ const ICP_GATE_DEFS = [
   { id: 'company_size', label: 'Minimum 15 pracowników' },
 ];
 const ICP_MAX_GATE_SCORE = ICP_GATE_DEFS.length * ICP_GATE_POINTS; // 20
+
+// company_size to TWARDA bramka liczona w backendzie z employment_count (dane z
+// importu) — NIGDY z odpowiedzi AI. Powód (audyt Alior Bank, 20.09): rekord bez
+// employment_count dostawał od modelu company_size="pass" 3/3 razy mimo
+// instrukcji w prompcie, żeby przy braku danych zwrócić "unknown".
+// Brak lub niepoprawna liczba => "unknown" (nie zgadujemy), a nie "fail".
+const COMPANY_SIZE_MIN_EMPLOYEES = 15;
+
+// Zatrudnienie z importu bywa ZAKRESEM ("10-19 osób", "250+"), nie liczbą.
+// Parsujemy je do przedziału {min, max} i NIGDY nie zgadujemy wartości ze środka
+// ani nie traktujemy dolnej granicy jako dokładnej liczby. Dokładna liczba to
+// przedział zdegenerowany {n, n}. Zwraca null, gdy wartości nie da się
+// jednoznacznie sparsować (brak, tekst, liczba ujemna, odwrócony zakres).
+function parseEmploymentBounds(value) {
+  if (value === null || value === undefined || typeof value === 'boolean') return null;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 0 ? { min: value, max: value } : null;
+  }
+  if (typeof value !== 'string') return null;
+
+  const s = value.trim().toLowerCase()
+    .replace(/\s*(os[oó]b\w*|pracownik\w*|etat\w*)\s*$/, '')
+    .trim();
+  if (!s) return null;
+
+  const N = '(\\d[\\d\\s.,]*)';
+  const toNum = t => Number(String(t).replace(/[\s.,]/g, ''));
+  let m;
+
+  if (new RegExp(`^${N}$`).test(s)) {
+    const n = toNum(s);
+    return Number.isFinite(n) ? { min: n, max: n } : null;
+  }
+  if ((m = s.match(new RegExp(`^(?:od\\s+)?${N}\\s*(?:-|–|—|do)\\s*${N}$`)))) {
+    const min = toNum(m[1]);
+    const max = toNum(m[2]);
+    return Number.isFinite(min) && Number.isFinite(max) && min <= max ? { min, max } : null;
+  }
+  if ((m = s.match(new RegExp(`^${N}\\s*\\+$`))) || (m = s.match(new RegExp(`^(?:od|min\\.?|minimum)\\s+${N}$`)))) {
+    const min = toNum(m[1]);
+    return Number.isFinite(min) ? { min, max: Infinity } : null;
+  }
+  if ((m = s.match(new RegExp(`^(?:powy[żz]ej|ponad)\\s+${N}$`)))) {
+    const min = toNum(m[1]) + 1;
+    return Number.isFinite(min) ? { min, max: Infinity } : null;
+  }
+  if ((m = s.match(new RegExp(`^(?:do|max\\.?|maksymalnie)\\s+${N}$`)))) {
+    const max = toNum(m[1]);
+    return Number.isFinite(max) ? { min: 0, max } : null;
+  }
+  if ((m = s.match(new RegExp(`^poni[żz]ej\\s+${N}$`)))) {
+    const max = toNum(m[1]) - 1;
+    return Number.isFinite(max) && max >= 0 ? { min: 0, max } : null;
+  }
+  return null;
+}
+
+// Reguła progu 15 (na przedziale, nie na punkcie):
+//   cały przedział < 15           → fail    (np. 1-9, 14)
+//   cały przedział >= 15          → pass    (np. 20-49, 250+, 15)
+//   przedział przecina próg       → unknown (np. 10-19 — nie zgadujemy)
+//   brak / nieparsowalne          → unknown
+// employmentRange (surowy tekst z importu) ma pierwszeństwo, bo employment_count
+// to tylko jego dolna granica; gdy zakresu brak lub jest nieparsowalny, liczymy
+// z employment_count jako z dokładnej liczby (rekordy sprzed zapisu zakresu).
+function calcCompanySizeGate(employmentCount, employmentRange) {
+  const bounds = parseEmploymentBounds(employmentRange) || parseEmploymentBounds(employmentCount);
+  if (!bounds) return 'unknown';
+  if (bounds.max < COMPANY_SIZE_MIN_EMPLOYEES) return 'fail';
+  if (bounds.min >= COMPANY_SIZE_MIN_EMPLOYEES) return 'pass';
+  return 'unknown';
+}
+
+// Składa finalny obiekt icp_gates: b2b zostaje dokładnie tak, jak zwróciło AI,
+// natomiast company_size jest ZAWSZE nadpisywane wartością deterministyczną —
+// niezależnie od tego, czy AI w ogóle zwróciło to pole i jaką ma wartość.
+function buildIcpGates(aiGates, employmentCount, employmentRange) {
+  const base = aiGates && typeof aiGates === 'object' && !Array.isArray(aiGates) ? aiGates : {};
+  return { ...base, company_size: calcCompanySizeGate(employmentCount, employmentRange) };
+}
 
 function calcIcpGatePoints(gates) {
   let points = 0;
@@ -516,6 +877,61 @@ async function loadIcpBlacklistSettings(tenantId) {
   } catch {
     return { keywords: ICP_BLACKLIST_DEFAULT_KEYWORDS, penalty: ICP_BLACKLIST_DEFAULT_PENALTY };
   }
+}
+
+// Cały algorytm naliczania icp_score jako dane — pokazywane wprost w zakładce
+// "Zasady naliczania punktów" w Inspekcji (decyzja 18.09, audyt Prospektów:
+// dotąd admin widział TYLKO wynik i evidence z AI, nigdzie w UI nie było
+// samej definicji wag/formuły/blacklisty). Buduje JSON BEZPOŚREDNIO z tych
+// samych stałych (ICP_SIGNALS/ICP_GATE_DEFS/ICP_BONUS_SIGNALS) i tej samej
+// funkcji (loadIcpBlacklistSettings) których używają calcIcpScore/
+// calcIcpGatePoints/calcIcpBonus/matchesIcpBlacklist — nie jest to osobno
+// utrzymywana kopia, więc nie może się rozjechać z tym co faktycznie liczy
+// enrichOne(). Blacklista jest per-tenant, stąd tenantId jest wymagany.
+async function getIcpScoringRules(tenantId) {
+  const blacklist = await loadIcpBlacklistSettings(tenantId);
+  const bonusMaxPoints = ICP_BONUS_SIGNALS.reduce((sum, b) => sum + b.points, 0);
+
+  return {
+    formula: 'icp_score = clamp(0, 100, suma_sygnałów + suma_bonusów + punkty_bramek − kara_blacklisty)',
+    gates: {
+      points_per_pass: ICP_GATE_POINTS,
+      max_points: ICP_MAX_GATE_SCORE,
+      note: 'Bramka "fail" dyskwalifikuje firmę niezależnie od score (icp_gate_status). "unknown" nie dyskwalifikuje, trafia do needs_review. ' +
+        'company_size: minimum 15 pracowników, liczone deterministycznie w backendzie na podstawie danych employment_count/employment_range z importu (AI go nie ustala); ' +
+        'brak danych, nieczytelna wartość lub zakres przecinający próg 15 (np. 10-19) = unknown. Zakres w całości poniżej 15 (np. 1-9) = fail, w całości od 15 wzwyż (np. 20-49, 250+) = pass. ' +
+        'b2b: oceniane przez AI na podstawie treści strony.',
+      definitions: ICP_GATE_DEFS.map(g => ({
+        id: g.id, label: g.label, points_if_pass: ICP_GATE_POINTS,
+        ...(g.id === 'company_size'
+          ? { source: 'backend: employment_count/employment_range (deterministycznie, bez AI)', threshold: COMPANY_SIZE_MIN_EMPLOYEES }
+          : { source: 'AI: treść strony WWW' }),
+      })),
+    },
+    signals: {
+      max_points: ICP_MAX_RAW_SCORE,
+      note: 'AI zwraca wyłącznie true/false per sygnał (nigdy punktów) — punkty przypisuje deterministycznie backend, patrz calcIcpScore().',
+      definitions: ICP_SIGNALS.map(s => ({
+        id: s.id,
+        label: s.label,
+        tier: s.tier,
+        points: s.points,
+        prompt_key: s.promptKey,
+        requires_any_of: s.requiresAnyOf || null,
+      })),
+    },
+    bonus_signals: {
+      max_points: bonusMaxPoints,
+      note: 'Wykrywane regexem po surowym HTML strony głównej — nie wołają AI.',
+      definitions: ICP_BONUS_SIGNALS.map(b => ({ id: b.id, label: b.label, points: b.points })),
+    },
+    blacklist: {
+      keywords: blacklist.keywords,
+      penalty: blacklist.penalty,
+      checked_sources: ['company_name', 'industry', 'pkd_description', 'gusData.pkdMain', 'gusData.pkdCodes[].nazwa'],
+    },
+    max_possible_score: ICP_MAX_RAW_SCORE + ICP_MAX_GATE_SCORE + bonusMaxPoints,
+  };
 }
 
 // Zwraca listę trafionych słów kluczowych (lub null, gdy brak trafienia).
@@ -810,7 +1226,7 @@ const FALLBACK_TIME_BUDGET_MS  = 8_000;
 // sensu ponownie próbować URL-a, który identity-check już odrzucił.
 function guessFallbackDomains(name, excludeUrls = []) {
   const norm  = normalizeName(name || '');
-  const words = norm.split(/[^a-z0-9]+/).filter(Boolean).filter(w => !GENERIC_NAME_WORDS.has(w));
+  const words = norm.split(/[^a-z0-9]+/).filter(Boolean).filter(w => !isGenericNameWord(w));
   if (!words.length) return [];
 
   const significant = words.slice(0, 2);
@@ -1268,13 +1684,50 @@ function deaccent(str) {
     .replace(/[śŚ]/g, 's').replace(/[źŹżŻ]/g, 'z');
 }
 
+// Dokumenty prawne (regulaminy/polityki/warunki handlowe) — NIE mogą podbijać
+// score przez wzorzec "dział handlowy" (poprawka 19.09, druga tura, case
+// Berlinerluft: "Ogólne Warunki Handlowe" łapały się na goły rdzeń "handlow"
+// i zajmowały miejsce w top-12 kosztem prawdziwej strony zespołu sprzedaży).
+// Strona NADAL może zostać pobrana, jeśli pasuje do INNEGO wzorca — wykluczamy
+// tylko boost z jednego konkretnego wzorca (patrz excludeIfLegalDocument w
+// LINK_SCORES), nie całą stronę z crawla. categorizePage() dodatkowo kieruje
+// takie strony do kategorii 'legal_excluded' z zerowym budżetem, więc nawet
+// jeśli zostaną pobrane (np. dla identity-check), nie wejdą do materiału
+// klasyfikacyjnego wysyłanego do AI — patrz CONTENT_CATEGORIES.
+const LEGAL_DOCUMENT_PATTERN = /warunki|regulamin|polityka|\brodo\b|cookie|privacy|terms.{0,15}(conditions|service)|prywatnosc/i;
+
+// Sieć partnerów/dealerów — DWA POZIOMY zamiast jednego płaskiego wzorca
+// (poprawka 19.09, druga tura, case Arpol: goły rdzeń "partner" łapał też
+// artykuły o wydarzeniach branżowych OSÓB TRZECICH — "Genetec Partner Day",
+// "Bosch Partner Day" — Arpol jest tam gościem cudzego wydarzenia, nie opisuje
+// WŁASNEJ sieci dealerskiej. 5 takich stron o niemal identycznym score
+// konkurowało z jedynym prawdziwym dowodem o te same 1-2 miejsca budżetu).
+// STRONG: dedykowana, krótka ścieżka sieci partnerskiej ("/partnerzy",
+// "/zostan-partnerem") LUB fraza jednoznacznie opisująca WŁASNYCH partnerów
+// handlowych/sieć dealerską (np. "spotkanie partnerów handlowych ARPOL").
+const PARTNER_STRONG_PATH   = /^\/?(partnerzy|dealerzy|dystrybutorzy|siec\w*[-.]?partnersk\w*|zostan[-.]?partnerem|zostan[-.]?dealerem|zostan[-.]?dystrybutorem|program[-.]?partnerski|dla[-.]?partnerow|dla[-.]?dealerow|dla[-.]?dystrybutorow)\b/i;
+const PARTNER_STRONG_PHRASE = /spotkanie\w*.{0,20}partner|partner\w*.{0,10}handlow|siec\w*.{0,10}dealer|siec\w*.{0,10}partner/i;
+// WEAK: gołe wystąpienie "partner"/"dealer"/"dystrybutor" gdziekolwiek indziej
+// (typowo artykuł/relacja z wydarzenia osoby trzeciej) — realny, ale znacznie
+// słabszy dowód, nie może automatycznie wygrywać z dedykowaną stroną.
+const PARTNER_WEAK_PATTERN  = /partner|dealer|dystrybu|distributor/i;
+
 // Ocenia trafność linka dla naszych celów enrichmentu
 function scoreLinkRelevance(path, anchor) {
   // Normalizuj anchor — usuń diakrytyki żeby "Zarząd" pasował do wzorca /zarzad/
   const combined = `${path} ${deaccent(anchor)}`;
+  const isLegalDocument = LEGAL_DOCUMENT_PATTERN.test(combined);
+
   let score = 0;
-  for (const { pattern, score: s } of LINK_SCORES) {
+  for (const { pattern, score: s, excludeIfLegalDocument } of LINK_SCORES) {
+    if (excludeIfLegalDocument && isLegalDocument) continue;
     if (pattern.test(combined)) score = Math.max(score, s);
+  }
+
+  if (PARTNER_STRONG_PATH.test(path) || PARTNER_STRONG_PHRASE.test(combined)) {
+    score = Math.max(score, 9);
+  } else if (PARTNER_WEAK_PATTERN.test(combined)) {
+    score = Math.max(score, 4);
   }
   const depth = path.split('/').filter(Boolean).length;
   if (depth === 1) score += 1;
@@ -1743,20 +2196,46 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
 // pozostały budżet. "sklep_b2b" zostaje PRZED "oferta" (bez zmian względem
 // poprzedniej kolejności) — to zachowuje wcześniejszą poprawkę 20.08
 // (Wagner-service: sklep wypychany przez ogólną treść oferty).
+// Poprawka 19.09 (audyt retrievalu, ETAP 3 — polskie warianty/odmiany jako
+// podstawa rankingu i kategoryzacji, EN jako uzupełnienie):
+// - "placow" nigdy nie łapał "placówka" (różnica w "ó", ta funkcja NIE
+//   odakcentowuje anchora, w przeciwieństwie do scoreLinkRelevance/deaccent())
+//   — poprawione na "plac[oó]wk".
+// - "oferta" jako dosłowna forma nie łapał "oferty"/"ofertowy" — zamienione
+//   na rdzeń "ofert". Dodane wycena/konsultacja/doradztwo/dobór — główne
+//   słowa kluczowe custom_quote_process i consultation_demo_needs_analysis,
+//   dotąd nigdzie nierozpoznawane przy kategoryzacji.
+// - "dystrybutor" → "dystrybu" żeby złapać też "dystrybucyjny"/"dystrybucja".
+// - nowa kategoria 'realizacje_przetargi' — dotąd strony /realizacje,
+//   /referencje, /przetargi w ogóle nie miały własnej kategorii i lądowały w
+//   'other' na resztkach budżetu (patrz audyt ETAP 1: tender_bidding_department
+//   był jedynym sygnałem bez dedykowanej kategorii i z najniższym link score
+//   w całej tabeli). Skromna rezerwacja (1000 zn.), niższy priorytet niż
+//   kontakt/oferta/zespół, ale WYŻSZY niż nic (wcześniej: zero gwarancji).
+// Poprawka 19.09 (druga tura): dokumenty prawne (regulaminy/polityki/warunki
+// handlowe) dostają WŁASNĄ kategorię z zerowym budżetem — MUSI być pierwsza
+// na liście, bo categorizePage() zwraca pierwsze pasujące dopasowanie. Strona
+// może zostać pobrana (np. jeśli pasuje też do innego wzorca), ale nigdy nie
+// wejdzie do materiału klasyfikacyjnego wysyłanego do AI — patrz
+// LEGAL_DOCUMENT_PATTERN w scoreLinkRelevance(). Nie usuwamy jej z crawla w
+// ogóle (np. na potrzeby identity-check nadal może zostać pobrana), tylko z
+// budżetu sygnałów sprzedażowych.
 const CONTENT_CATEGORIES = [
-  { id: 'kontakt_oddzialy', reserved: 3000, pattern: /kontakt|contact|oddzia[lł]|placow|lokalizacj|biur[ao]|adres|gdzie.jestesmy/i },
+  { id: 'legal_excluded',       reserved: 0,    pattern: LEGAL_DOCUMENT_PATTERN },
+  { id: 'kontakt_oddzialy',     reserved: 3000, pattern: /kontakt|contact|oddzia[lł]|plac[oó]wk|lokalizacj|biur[ao]|adres|gdzie.jestesmy/i },
   // Rozszerzone po audycie 24.08 o gołe "b2b", "hurt" i "współpraca" — te
   // strony (np. subdomena b2b.<domena>, "/o-firmie/wspolpraca") były już
   // pobierane (HTTP 200), ale kategoryzowały się jako 'oferta'/'o_nas_zespol'
   // (dopasowanie po "o-firmie" w ścieżce) albo 'other' i przegrywały o
   // budżet znaków z sąsiednimi stronami tej samej kategorii (Targor-Truck,
   // W. Śliwiński — content_limit mimo trafienia w top rankingu linków).
-  // Bez zmiany rezerwacji (1500 zn.) i bez nowej kategorii.
-  { id: 'sklep_b2b',        reserved: 1500, pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout|\bb2b\b|hurt\w*|wsp[oó][lł]prac\w*|platforma.{0,20}\b(b2b|zakup\w*|klient\w*)\b/i },
-  { id: 'oferta',           reserved: 2000, pattern: /oferta|us[lł]ug|produkt|rozwiazani|solution|service|zapytani\w*.?ofert|request.?for.?quot|\brfq\b|certyfikacj|akredytacj|procedura|zasady.wsp[oó]lpracy/i },
-  { id: 'o_nas_zespol',     reserved: 3000, pattern: /o[.-]?nas|o[.-]?firmie|about|zesp[oó][lł]|team|kim.jestesmy|historia/i },
-  { id: 'praca',            reserved: 2500, pattern: /praca|kariera|jobs|career|rekrutacj|dolacz|join/i },
-  { id: 'partnerzy',        reserved: 1500, pattern: /partner|dealer|dystrybutor|distributor/i },
+  // Dodane 19.09: "strefa klienta"/"panel klienta".
+  { id: 'sklep_b2b',            reserved: 1500, pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|strefa.?klient|panel.?klient|koszyk|checkout|\bb2b\b|hurt\w*|wsp[oó][lł]prac\w*|platforma.{0,20}\b(b2b|zakup\w*|klient\w*)\b/i },
+  { id: 'oferta',               reserved: 2000, pattern: /ofert|us[lł]ug|produkt|rozwiazani|wycen|konsultacj|doradztw|dob[oó]r|solution|service|zapytani\w*.?ofert|request.?for.?quot|\brfq\b|certyfikacj|akredytacj|procedura|zasady.wsp[oó]lpracy/i },
+  { id: 'o_nas_zespol',         reserved: 3000, pattern: /o[.-]?nas|o[.-]?firmie|about|zesp[oó][lł]|team|kim.jestesmy|historia/i },
+  { id: 'realizacje_przetargi', reserved: 1000, pattern: /realizacj|referencj|case.stud|przetarg|zam[oó]wien\w*.publiczn/i },
+  { id: 'praca',                reserved: 2500, pattern: /praca|kariera|jobs|career|rekrutacj|dolacz|join/i },
+  { id: 'partnerzy',            reserved: 1500, pattern: /partner|dealer|dystrybu|distributor/i },
 ];
 const PER_PAGE_CHAR_CAP = 3000;
 
@@ -1765,17 +2244,79 @@ const PER_PAGE_CHAR_CAP = 3000;
 // selectWithinBudget()), zamiast polegać wyłącznie na randze linku.
 const SIGNAL_KEYWORDS = /dzia[lł] handlow|dedykowan|opiekun|key account|klient\w* kluczow|indywidualn\w* wycen|zapytaj o ofert|um[oó]w demo|konsultacj|zosta[nń] partnerem|sie[cć] dealer|realizacj|referencj|przetarg|zam[oó]wien\w* publiczn|sklep|shop|e-?commerce|portal.?b2b|konto.?klient|koszyk|checkout|zapytani\w*.?ofert|request.?for.?quot|\brfq\b/i;
 
+// Tie-break ogólny (19.09, trzecia tura, case Berlinerluft): przy remisie
+// score w OBRĘBIE tej samej kategorii, strony z realną treścią informacyjną
+// o osobach/zespole/dziale sprzedaży mają wygrywać z czystymi formularzami
+// kontaktowymi — formularz sam w sobie rzadko niesie dowód sygnału ICP, a
+// zajmował budżet kategorii przed właściwą stroną z osobami (np.
+// /osobykontaktowe vs /berlinerluftformularzkontaktowy, oba score=10).
+// Celowo NIE dotyka score/kategoryzacji/limitu 12k — to wyłącznie kolejność
+// wyboru w ramach już przydzielonego budżetu kategorii. Zwykłe /kontakt NIE
+// jest tu obniżane (bonus=0), bo może zawierać wartościowe dane.
+const PEOPLE_TEAM_PATH_PATTERN = /osob\w*kontakt\w*|zespol|\bteam\b|pracownic|dzial[-.]?sprzedaz|przedstawiciel/i;
+const CONTACT_FORM_PATH_PATTERN = /formularz[-.]?kontakt|contact[-.]?form/i;
+
+function pageRankTieBreakBonus(path) {
+  if (PEOPLE_TEAM_PATH_PATTERN.test(path)) return 1;
+  if (CONTACT_FORM_PATH_PATTERN.test(path)) return -1;
+  return 0;
+}
+
 function categorizePage(path, anchor) {
   const hay = `${path} ${anchor || ''}`.toLowerCase();
   for (const cat of CONTENT_CATEGORIES) if (cat.pattern.test(hay)) return cat.id;
   return 'other';
 }
 
+// Limit różnorodności przy wyborze KANDYDATÓW do pobrania (poprawka 19.09,
+// druga tura, case Arpol) — wcześniej top-N było czystym sortowaniem po
+// score, więc jedna kategoria (np. "partnerzy" z 5 stronami o score 9-10)
+// mogła zająć 5 z 12 miejsc, zostawiając mniej miejsca na strony INNYCH
+// kategorii, których w ogóle mogliśmy nie odkryć/wybrać. Dwuprzebiegowy
+// wybór: najpierw max `maxPerCategory` z KAŻDEJ kategorii (w kolejności wg
+// malejącego score globalnego), potem reszta miejsc wg czystego score bez
+// ograniczeń — więc jeśli jedna kategoria naprawdę dominuje treścią firmy,
+// nadal dostanie dodatkowe miejsca, ale dopiero PO zapewnieniu, że inne
+// kategorie miały szansę wejść.
+const MAX_PER_CATEGORY_FIRST_PASS = 2;
+
+function selectDiverseCandidates(candidatesWithScore, limit) {
+  const withCategory = candidatesWithScore.map(c => ({ ...c, category: categorizePage(c.path, c.anchor) }));
+  const byScoreDesc = [...withCategory].sort((a, b) => b.score - a.score);
+
+  const selected = [];
+  const perCategoryCount = new Map();
+
+  for (const c of byScoreDesc) {
+    if (selected.length >= limit) break;
+    const count = perCategoryCount.get(c.category) || 0;
+    if (count < MAX_PER_CATEGORY_FIRST_PASS) {
+      selected.push(c);
+      perCategoryCount.set(c.category, count + 1);
+    }
+  }
+  if (selected.length < limit) {
+    for (const c of byScoreDesc) {
+      if (selected.length >= limit) break;
+      if (!selected.includes(c)) selected.push(c);
+    }
+  }
+  return selected;
+}
+
 // Rozdziela zebrane strony na budżet znaków: najpierw rezerwacja per
 // kategoria (w kolejności priorytetu), potem reszta budżetu dla nadwyżki
 // (np. newsy) wg rangi linku. Zwraca finalnie wybrane strony (przycięte do
-// limitu) + zbiór ścieżek, które się zmieściły — reszta trafia do
-// diagnostyki jako reason:'content_limit'.
+// limitu) + zbiór ścieżek, które się zmieściły + `outcomes` (ETAP 4,
+// audytowalność 19.09) — per-ścieżka { included_chars, reason }, gdzie reason
+// dla WYKLUCZONYCH stron rozróżnia PRECYZYJNIE:
+//   'category_budget_exhausted' — własna kategoria strony już wyczerpała
+//     swoją rezerwację (cat.reserved), zanim doszła kolej na tę stronę;
+//   'global_12k_truncation' — kategoria miała jeszcze miejsce, ale globalny
+//     limit 12k (a właściwie totalLimit = 12000 - homepage) już się skończył.
+// Wcześniej obie sytuacje trafiały do tego samego reason:'content_limit' —
+// nie dało się odróżnić "za mało miejsca w tej kategorii" od "strona główna
+// + wcześniejsze kategorie zjadły wszystko".
 function selectWithinBudget(pages, totalLimit) {
   const byCategory = new Map();
   for (const cat of CONTENT_CATEGORIES) byCategory.set(cat.id, []);
@@ -1784,6 +2325,9 @@ function selectWithinBudget(pages, totalLimit) {
 
   for (const [, list] of byCategory) {
     list.sort((a, b) => {
+      const aBonus = pageRankTieBreakBonus(a.path);
+      const bBonus = pageRankTieBreakBonus(b.path);
+      if (aBonus !== bBonus) return bBonus - aBonus;
       const aKw = SIGNAL_KEYWORDS.test(a.text) ? 1 : 0;
       const bKw = SIGNAL_KEYWORDS.test(b.text) ? 1 : 0;
       if (aKw !== bKw) return bKw - aKw;
@@ -1793,36 +2337,59 @@ function selectWithinBudget(pages, totalLimit) {
 
   const selected = [];
   const includedPaths = new Set();
+  const outcomes = new Map(); // path -> { included_chars, reason }
   let used = 0;
 
   for (const cat of CONTENT_CATEGORIES) {
     let catUsed = 0;
     for (const p of byCategory.get(cat.id)) {
-      if (catUsed >= cat.reserved || used >= totalLimit) break;
+      if (catUsed >= cat.reserved) {
+        outcomes.set(p.path, { included_chars: 0, reason: 'category_budget_exhausted' });
+        continue;
+      }
+      if (used >= totalLimit) {
+        outcomes.set(p.path, { included_chars: 0, reason: 'global_12k_truncation' });
+        continue;
+      }
       const room = Math.min(p.text.length, cat.reserved - catUsed, totalLimit - used);
-      if (room <= 0) break;
+      if (room <= 0) {
+        outcomes.set(p.path, { included_chars: 0, reason: 'global_12k_truncation' });
+        continue;
+      }
       selected.push({ ...p, text: p.text.slice(0, room) });
       includedPaths.add(p.path);
+      outcomes.set(p.path, { included_chars: room, reason: 'included' });
       catUsed += room;
       used += room;
     }
   }
 
+  // Kategorie z reserved:0 (np. legal_excluded) są celowo wykluczone z budżetu
+  // klasyfikacji sygnałów — nie mogą "przeciekać" do niego przez fazę leftoverów
+  // opartą tylko na globalnym score, bo to zniweczyłoby wykluczenie.
+  const zeroReservedCategories = new Set(CONTENT_CATEGORIES.filter(c => c.reserved === 0).map(c => c.id));
   const leftovers = pages
-    .filter(p => !includedPaths.has(p.path))
+    .filter(p => !includedPaths.has(p.path) && !zeroReservedCategories.has(p.category))
     .map(p => ({ ...p, text: p.text.slice(0, PER_PAGE_CHAR_CAP) }))
     .sort((a, b) => b.score - a.score);
 
   for (const p of leftovers) {
-    if (used >= totalLimit) break;
+    if (used >= totalLimit) {
+      outcomes.set(p.path, { included_chars: 0, reason: 'global_12k_truncation' });
+      continue;
+    }
     const room = Math.min(p.text.length, totalLimit - used);
-    if (room <= 0) break;
+    if (room <= 0) {
+      outcomes.set(p.path, { included_chars: 0, reason: 'global_12k_truncation' });
+      continue;
+    }
     selected.push({ ...p, text: p.text.slice(0, room) });
     includedPaths.add(p.path);
+    outcomes.set(p.path, { included_chars: room, reason: 'included' });
     used += room;
   }
 
-  return { selected, includedPaths, used };
+  return { selected, includedPaths, used, outcomes };
 }
 
 // Główna funkcja scrapingu — dynamiczna mapa strony
@@ -1941,6 +2508,10 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     if (homeText.length > 100) {
       homeSection = `[/ — strona główna]\n${homeText}`;
       logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: homeText.length, included: true, reason: 'included' });
+    } else if (isBotChallengePage(homepageHtml)) {
+      // Nie wpuszczaj tytułu strony-wyzwania ("Proszę czekać…") do promptu jako
+      // rzekomej treści firmy — patrz komentarz przy isBotChallengePage().
+      logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: 0, included: false, reason: 'bot_challenge_suspected' });
     } else {
       const $meta = cheerio.load(homepageHtml);
       const title       = $meta('title').text().trim();
@@ -2003,10 +2574,10 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
   }
 
   const level1Limit = fast ? FAST_LEVEL1_LIMIT : FULL_LEVEL1_LIMIT;
-  const candidates = Array.from(allLinks.values())
-    .filter(l => l.score > 0 && l.path !== '/')
-    .sort((a, b) => b.score - a.score)
-    .slice(0, level1Limit);
+  const candidates = selectDiverseCandidates(
+    Array.from(allLinks.values()).filter(l => l.score > 0 && l.path !== '/'),
+    level1Limit,
+  );
 
   logger.info('[Prospect] Site map discovered', {
     base,
@@ -2024,15 +2595,16 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
   const level2Links = resume?.level2Links ?? new Map();
 
   async function fetchLevel1Candidate({ fullHref, path, anchor, score }) {
+    const category = categorizePage(path, anchor);
     if (fetched.has(fullHref)) {
-      logDiag({ url: fullHref, attempt: 0, http_status: null, raw_length: 0, extracted_length: 0, included: false, reason: 'duplicate' });
+      logDiag({ url: fullHref, path, score, category, attempt: 0, http_status: null, raw_length: 0, extracted_length: 0, included: false, reason: 'duplicate' });
       return;
     }
     fetched.add(fullHref);
 
     const { html, status, attempts, error } = await fetchPageForCrawl(fullHref);
     if (error || !html) {
-      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: status === 404 ? 'not_found' : 'fetch_error' });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: status === 404 ? 'not_found' : 'fetch_error' });
       await sleepJittered(400);
       return;
     }
@@ -2042,10 +2614,10 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     const text  = extractText($page);
     if (text.length > 100) {
       const label = anchor ? `${path} — ${anchor}` : path;
-      fetchedPages.push({ path, anchor, score, text, label, category: categorizePage(path, anchor) });
-      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: true, reason: 'included' });
+      fetchedPages.push({ path, anchor, score, text, label, category });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: true, reason: 'included' });
     } else {
-      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short' });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short' });
     }
 
     // Tryb szybki nie rozwija się do poziomu 2 — pomiń zbieranie kandydatów.
@@ -2064,9 +2636,7 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
 
   // ── Krok 4: Pobierz strony poziomu 2 (maks. 6) — pomijane w trybie ──
   // szybkim (patrz enrichOne — scrapeWebsiteFast/continueCrawlToFull).
-  const level2Candidates = fast ? [] : Array.from(level2Links.values())
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 6);
+  const level2Candidates = fast ? [] : selectDiverseCandidates(Array.from(level2Links.values()), 6);
 
   if (level2Candidates.length) {
     logger.info('[Prospect] Level-2 pages discovered', {
@@ -2076,15 +2646,16 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
   }
 
   async function fetchLevel2Candidate({ fullHref, path, anchor, score }) {
+    const category = categorizePage(path, anchor);
     if (fetched.has(fullHref)) {
-      logDiag({ url: fullHref, attempt: 0, http_status: null, raw_length: 0, extracted_length: 0, included: false, reason: 'duplicate' });
+      logDiag({ url: fullHref, path, score, category, attempt: 0, http_status: null, raw_length: 0, extracted_length: 0, included: false, reason: 'duplicate' });
       return;
     }
     fetched.add(fullHref);
 
     const { html, status, attempts, error } = await fetchPageForCrawl(fullHref);
     if (error || !html) {
-      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: 'fetch_error' });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: 'fetch_error' });
       await sleepJittered(400);
       return;
     }
@@ -2094,10 +2665,10 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     const text  = extractText($page);
     if (text.length > 100) {
       const label = anchor ? `${path} — ${anchor}` : path;
-      fetchedPages.push({ path, anchor, score, text, label, category: categorizePage(path, anchor) });
-      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: true, reason: 'included' });
+      fetchedPages.push({ path, anchor, score, text, label, category });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: true, reason: 'included' });
     } else {
-      logDiag({ url: fullHref, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short' });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short' });
     }
 
     await sleepJittered(400);
@@ -2110,6 +2681,12 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
       fetched, allEmails, allPhones, diagnostics, fetchedPages,
       identityTitle, identityH1, homepageHtml, effectiveBase, homeSection, baseHostname,
       allLinks, level2Links, tlsUnverified, protocolFallback,
+      // ETAP 4 (audytowalność, 19.09) — ścieżki wybrane do faktycznego
+      // pobrania na obu poziomach, żeby finalizeCrawl mogło oznaczyć w
+      // link_audit KAŻDY odkryty link jako selected/not-selected, nie tylko
+      // te które faktycznie trafiły do fetchedPages.
+      level1SelectedPaths: new Set(candidates.map(c => c.path)),
+      level2SelectedPaths: new Set(level2Candidates.map(c => c.path)),
     },
   };
 }
@@ -2154,24 +2731,100 @@ function dedupeRepeatedFragments(sections) {
   return { sections: deduped, charsBefore, charsAfter };
 }
 
+// ETAP 4 (audytowalność retrievalu, 19.09) — buduje pełną listę WSZYSTKICH
+// odkrytych linków (nie tylko tych pobranych) z ich losem na każdym etapie
+// lejka: score → wybrany do top-12/top-6? → pobrany? → jaka kategoria? →
+// ile znaków faktycznie trafiło do tekstu dla AI? → jeśli nie trafiło, DOKŁADNIE
+// dlaczego. Cel: dla jednej firmy dać jednoznaczną odpowiedź "czy AI dostało
+// stronę, na której był dowód", bez przeszukiwania logów ręcznie.
+function buildLinkAudit(state, outcomes) {
+  const { allLinks, level2Links, level1SelectedPaths, level2SelectedPaths, fetchedPages, diagnostics } = state;
+  const fetchedByPath = new Map(fetchedPages.map(p => [p.path, p]));
+  const audit = [];
+
+  for (const [path, link] of [...allLinks, ...level2Links]) {
+    if (audit.some(a => a.path === path)) continue; // level2Links nie duplikuje allLinks, ale na wszelki wypadek
+    const selectedLevel1 = level1SelectedPaths.has(path);
+    const selectedLevel2 = level2SelectedPaths.has(path);
+    const fetchedPage = fetchedByPath.get(path);
+    const diag = diagnostics.find(d => d.path === path);
+    const outcome = outcomes.get(path);
+
+    let stage, reason, included_chars = 0, extracted_length = null, category = fetchedPage?.category ?? null;
+
+    if (link.score <= 0) {
+      stage = 'LINK_SCORE_TOO_LOW';
+      reason = `score ${link.score} — odfiltrowany przed rankingiem (próg > 0)`;
+    } else if (!selectedLevel1 && !selectedLevel2) {
+      stage = 'PAGE_NOT_SELECTED';
+      reason = `score ${link.score}, ale poza top-${FULL_LEVEL1_LIMIT} (poziom 1) / top-6 (poziom 2)`;
+    } else if (!fetchedPage) {
+      extracted_length = diag?.extracted_length ?? null;
+      if (diag?.reason === 'fetch_error' || diag?.reason === 'not_found') stage = 'FETCH_FAILED';
+      else if (diag?.reason === 'bot_challenge_suspected') stage = 'BOT_CHALLENGE';
+      else if (diag?.reason === 'too_short') stage = 'FETCH_FAILED';
+      else stage = 'FETCH_FAILED';
+      reason = diag?.reason || 'nieznany błąd pobierania';
+    } else {
+      extracted_length = fetchedPage.text.length;
+      category = fetchedPage.category;
+      if (outcome?.reason === 'included') {
+        stage = 'EVIDENCE_REACHED_AI';
+        included_chars = outcome.included_chars;
+        reason = `pobrana i włączona do finalnego tekstu (${included_chars} zn.)`;
+      } else if (outcome?.reason === 'category_budget_exhausted') {
+        stage = 'CATEGORY_BUDGET_EXHAUSTED';
+        reason = `kategoria "${category}" wyczerpała rezerwację zanim doszła kolej na tę stronę`;
+      } else if (outcome?.reason === 'global_12k_truncation') {
+        stage = 'GLOBAL_12K_TRUNCATION';
+        reason = 'globalny limit 12 000 znaków wyczerpany wcześniejszymi kategoriami/stroną główną';
+      } else {
+        stage = 'GLOBAL_12K_TRUNCATION';
+        reason = 'pobrana, ale nie zakwalifikowana do finalnego tekstu';
+      }
+    }
+
+    audit.push({
+      path, anchor: link.anchor || fetchedPage?.anchor || null, score: link.score,
+      category, selected_level1: selectedLevel1, selected_level2: selectedLevel2,
+      fetched: !!fetchedPage, extracted_length, included_chars, stage, reason,
+    });
+  }
+
+  return audit.sort((a, b) => b.score - a.score);
+}
+
 function finalizeCrawl(state) {
   const { homeSection, fetchedPages, diagnostics, allEmails, allPhones, identityTitle, identityH1, tlsUnverified, protocolFallback } = state;
   const remainingBudget = Math.max(0, 12_000 - homeSection.length);
-  const { selected, includedPaths } = selectWithinBudget(fetchedPages, remainingBudget);
+  const { selected, includedPaths, outcomes } = selectWithinBudget(fetchedPages, remainingBudget);
 
   // Strony, które miały dobrą treść, ale nie zmieściły się w budżecie —
-  // odnotuj to wprost w diagnostyce zamiast cichego pominięcia.
+  // odnotuj to wprost w diagnostyce zamiast cichego pominięcia. Poprawka
+  // 19.09: rozróżniamy TERAZ category_budget_exhausted vs global_12k_truncation
+  // (wcześniej oba wpadały pod ten sam napis 'content_limit') i dopisujemy
+  // included_chars na WSZYSTKICH wpisach, nie tylko wykluczonych.
   for (const p of fetchedPages) {
+    const diag = diagnostics.find(d => d.path === p.path && d.reason === 'included');
+    if (!diag) continue;
+    const outcome = outcomes.get(p.path);
+    diag.included_chars = outcome?.included_chars ?? 0;
     if (!includedPaths.has(p.path)) {
-      const diag = diagnostics.find(d => d.url.includes(p.path) && d.reason === 'included');
-      if (diag) diag.reason = 'content_limit', diag.included = false;
+      diag.reason = outcome?.reason || 'content_limit';
+      diag.included = false;
     }
   }
+
+  const linkAudit = buildLinkAudit(state, outcomes);
 
   const rawSections = [homeSection, ...selected.map(p => `[${p.label}]\n${p.text}`)].filter(Boolean);
   const { sections: finalTexts, charsBefore: dedupCharsBefore, charsAfter: dedupCharsAfter } = dedupeRepeatedFragments(rawSections);
   logger.info('[Prospect] Content dedup', {
     chars_before: dedupCharsBefore, chars_after: dedupCharsAfter, removed: dedupCharsBefore - dedupCharsAfter,
+  });
+  logger.info('[Prospect] Link audit (ETAP 4)', {
+    total_discovered: linkAudit.length,
+    by_stage: linkAudit.reduce((acc, a) => { acc[a.stage] = (acc[a.stage] || 0) + 1; return acc; }, {}),
   });
 
   const contacts = {
@@ -2180,7 +2833,7 @@ function finalizeCrawl(state) {
   };
 
   return {
-    text: finalTexts.join('\n\n---\n\n'), contacts, diagnostics,
+    text: finalTexts.join('\n\n---\n\n'), contacts, diagnostics, link_audit: linkAudit,
     identity: { title: identityTitle, h1: identityH1 }, deterministicFailure: null,
     dedup: { chars_before: dedupCharsBefore, chars_after: dedupCharsAfter },
     tls_unverified: !!tlsUnverified,
@@ -2251,30 +2904,68 @@ SYGNAŁY (true/false) — każdy z nich to niezależne dopasowanie strukturalne 
 profilu CRMtree, nie sygnał "dobrego momentu":
 
 field_sales_team ("Dział handlowy"):
-  Główny dowód: jawna nazwa "dział handlowy"/formalna struktura organizacyjna
-  sprzedaży, LUB podstrona zespołu/kontaktu z co najmniej 2-3 nazwanymi
-  osobami pełniącymi role stricte handlowe (przedstawiciel handlowy,
-  sprzedawca, account manager — nie zarząd).
-  NIE wystarcza: jedna nazwana osoba na stanowisku dyrektorskim
-  ("Dyrektor Handlowy", "Dyrektor ds. Handlowych") bez opisanego zespołu ani
-  innych wymienionych handlowców — to może być jedna osoba w zarządzie,
-  nie dowód na istnienie sformalizowanego działu.
-  Drugorzędne wsparcie: sam adres sprzedaz@ — może być zwykłą skrzynką ogólną.
+  RÓWNOWAŻNE nazwy tej samej struktury — traktuj jako identyczny dowód, nie tylko dosłowne
+  "dział handlowy": "dział handlowy", "dział sprzedaży", "sales team", "sales department",
+  "zespół sprzedaży", "przedstawiciele handlowi" jako nazwana sekcja/nagłówek.
+  Główny dowód: jawnie nazwany dział/zespół sprzedażowy (nagłówek podstrony, sekcja "Nasz
+  zespół sprzedaży", nazwa działu w strukturze firmy, pod dowolną z powyższych równoważnych
+  nazw) — WYSTARCZA nawet przy JEDNEJ widocznej, nazwanej osobie pod tym nagłówkiem, bo
+  dowodem jest nazwana struktura organizacyjna, nie liczba osób. LUB: podstrona
+  zespołu/kontaktu BEZ nazwanego nagłówka działu, ale z co najmniej 2-3 nazwanymi osobami
+  pełniącymi role stricte handlowe (przedstawiciel handlowy, sprzedawca, account manager —
+  nie zarząd) — to alternatywny, słabszy dowód używany tylko gdy nagłówka działu brak.
+  NIE wystarcza: jedna nazwana osoba na stanowisku dyrektorskim ("Dyrektor Handlowy",
+  "Dyrektor ds. Handlowych", "Sales Director") BEZ nazwanego działu/zespołu obok niej i bez
+  innych wymienionych handlowców — to może być jedna osoba w zarządzie, nie dowód na
+  istnienie sformalizowanego działu.
+  Drugorzędne wsparcie: sam adres sprzedaz@/sales@ — może być zwykłą skrzynką ogólną.
 
 custom_quote_process ("Złożony proces sprzedaży / indywidualna wycena"):
-  Relacyjny, projektowy lub negocjacyjny model, nie zakup impulsowy.
-  Główny dowód: fraza CTA — "zapytaj o ofertę", "poproś o wycenę", "indywidualna oferta",
-  "przygotujemy ofertę", "skontaktuj się z handlowcem".
-  Drugorzędne wsparcie: sam brak jawnego cennika bez takiej frazy.
+  Relacyjny, projektowy lub negocjacyjny model PROCESU SPRZEDAŻY, nie zakup impulsowy.
+  KLUCZOWA GRANICA: cena musi być ustalana INDYWIDUALNIE, PO stronie firmy, na podstawie
+  potrzeb/specyfikacji konkretnego klienta — nie może być z góry jawnie podana jako stała
+  kwota za standardowy produkt/usługę. Sam fakt sprzedaży B2B, posiadania formularza
+  kontaktowego lub możliwości "skontaktowania się ze sprzedażą" NIE wystarcza, jeśli nie
+  towarzyszy temu informacja, że wycena/oferta jest przygotowywana indywidualnie.
+  Główny dowód: fraza CTA LUB jej funkcjonalny odpowiednik (wszystkie równoważne) —
+  "zapytaj o ofertę", "poproś o wycenę", "przygotujemy ofertę", "indywidualna oferta",
+  "wycena indywidualna", "wyślij zapytanie ofertowe", "RFQ", "skontaktuj się z handlowcem",
+  LUB opis, że cena/oferta jest ustalana PO poznaniu potrzeb/specyfikacji klienta
+  (indywidualna kalkulacja), nie z góry określona, LUB firma AKTYWNIE DOBIERA/REKOMENDUJE
+  konkretny wariant/parametry/konfigurację na podstawie zgłoszonych potrzeb klienta (np.
+  "indywidualne dobranie [produktu] o niestandardowej pojemności/wielkości/zakresie") —
+  taki dobór ZAWSZE poprzedza indywidualną kalkulację ceny, więc liczy się nawet bez słowa
+  "wycena"/"oferta" wprost obok niego, LUB CTA sformułowane jako propozycja DOPASOWANA do
+  zgłoszenia klienta (np. "dowiedz się, jakie rozwiązania możemy Ci zaproponować",
+  "napisz do nas, przygotujemy coś dla Ciebie") — nie sam neutralny link "kontakt", ale
+  sformułowanie sugerujące, że odpowiedź będzie dopasowana do konkretnego zgłoszenia.
+  ZWRÓĆ FALSE:
+    - jawna, stała cena konkretnego produktu/usługi (cennik, cena jednostkowa przy
+      produkcie w sklepie/katalogu) — to standardowa sprzedaż, nie indywidualna wycena,
+      NAWET jeśli produkt jest sprzedawany firmom;
+    - format "od X zł" przy produkcie/usłudze/pokoju/pakiecie — to publiczny cennik z
+      progami cenowymi, nie dowód indywidualnej kalkulacji dla konkretnego klienta;
+    - standardowa, jawnie podana cena pokoju/usługi/pakietu (np. cennik hotelowy,
+      konsumencki cennik pakietów) — nawet jeśli firma osobno obsługuje też klientów
+      biznesowych, sam TEN dowód tego nie potwierdza. UWAGA: jeśli firma ma OSOBNY, jawny
+      cennik dla JEDNEJ usługi (np. standardowy nocleg) ORAZ oddzielnie opisany proces
+      ofertowy dla INNEJ, odrębnej usługi (np. eventy/konferencje B2B, zamówienia
+      produkcyjne) — oceniaj dowód dla tej DRUGIEJ usługi niezależnie; jawny cennik jednej
+      usługi nie dyskwalifikuje automatycznie dowodu dla innej;
+    - sam kontakt do działu sprzedaży / formularz kontaktowy / "skontaktuj się z nami" BEZ
+      jawnej informacji, że oferta/cena jest przygotowywana indywidualnie dla klienta —
+      to zwykły kanał kontaktu, nie dowód procesu ofertowego.
+  Drugorzędne wsparcie (NIE wystarcza samo): sam brak jawnego cennika bez którejś z
+  powyższych fraz — brak ceny sam w sobie nie jest dowodem złożonego procesu sprzedaży.
 
 consultation_demo_needs_analysis ("Konsultacja, demo lub analiza potrzeb"):
   Sprzedaż wymaga rozmowy przed zakupem, nie samoobsługowego checkoutu — łapie też firmy
   z jawnym cennikiem, które mimo to sprzedają przez rozmowę (częste w SaaS/usługach).
+  RÓWNOWAŻNE określenia tego samego etapu procesu — traktuj jako ten sam dowód: konsultacja,
+  demo, dobór rozwiązania, analiza potrzeb, dobór techniczny, doradztwo przedsprzedażowe,
+  projektowanie pod klienta/indywidualnego klienta.
   Główny dowód (dosłowna fraza LUB funkcjonalny odpowiednik — oba liczą się tak samo):
     - dosłowne: "umów demo", "zamów prezentację", "bezpłatna konsultacja", "dobór rozwiązania";
-    - funkcjonalne: oferta personalizacji/dostosowania produktu do wymagań klienta ("custom",
-      "dostosowane do indywidualnych potrzeb", "prace/projekty zlecone indywidualnie", karta
-      personalizacji per klient);
     - przypisany doradca/opiekun/dyrektor regionalny opisany jako doradztwo PRZEDSPRZEDAŻOWE,
       projektowe lub techniczne PRZY DOBORZE ROZWIĄZANIA (np. "Doradcy Twojego projektu"),
       nawet bez słowa "konsultacja";
@@ -2282,7 +2973,11 @@ consultation_demo_needs_analysis ("Konsultacja, demo lub analiza potrzeb"):
       ofertowe z polami technicznymi), nie sam formularz kontaktowy ogólnego typu;
     - sprzedaż oparta na indywidualnym projekcie technicznym/architektonicznym/inżynierskim,
       gdzie analiza wymagań klienta jest jawnie opisanym etapem procesu (nie samym typem
-      działalności — patrz zastrzeżenie niżej).
+      działalności — patrz zastrzeżenie niżej);
+    - doradztwo opisane jako DOSTOSOWANE do indywidualnych wymagań klienta (np. "doradztwo
+      w [obszarze]" połączone w tym samym opisie z "dostosowujemy usługi do indywidualnych
+      wymagań klienta") — to funkcjonalny odpowiednik doradztwa przedsprzedażowego, nawet
+      jeśli samo słowo "doradztwo" bez tego dopełnienia byłoby zbyt ogólne.
   Drugorzędne wsparcie (nie wystarcza samo): ogólne hasło "indywidualne podejście do klienta"
   bez opisu konkretnego procesu, etapu lub osoby.
   NIE LICZY SIĘ (mimo słowa "doradca"/"konsultacja" w tekście):
@@ -2293,66 +2988,159 @@ consultation_demo_needs_analysis ("Konsultacja, demo lub analiza potrzeb"):
     - ogólny, poradnikowy tekst nieopisujący WŁASNEGO procesu tej firmy (np. blogowa porada
       "na co zwrócić uwagę kupując X" bez odniesienia do konkretnej usługi/osoby/etapu w tej
       firmie) — to nie jest dowód konsultacji sprzedażowej, tylko treść informacyjna;
-    - sama produkcja/wykonanie "na wymiar" lub "według dokumentacji/wytycznych klienta" —
-      to dowód dla custom_quote_process (indywidualna wycena), NIE automatycznie dla tego
-      sygnału; liczy się TYLKO jeśli osobno opisany jest etap doradztwa/rozmowy o
-      wymaganiach przed złożeniem zamówienia, nie sam fakt wykonania na zamówienie;
+    - sama produkcja/wykonanie "na wymiar", "na życzenie klienta", "według
+      dokumentacji/wytycznych/specyfikacji klienta" — to opis MOŻLIWOŚCI PRODUKCYJNYCH
+      (elastyczność wytwarzania), NIE dowód rozmowy doradczej, i NIE liczy się automatycznie
+      ani dla tego sygnału, ani dla custom_quote_process;
+    - elastyczność produkcyjna i "możliwość personalizacji" produktu/usługi same w sobie —
+      to opis ZDOLNOŚCI firmy, nie opis PROCESU rozmowy z klientem przed zakupem;
+    - realizacja projektu/dokumentacji DOSTARCZONEJ JUŻ przez klienta (firma tylko wykonuje
+      to, co klient sam zaprojektował/określił) — brak tu żadnego etapu doboru/doradztwa PO
+      stronie badanej firmy;
+    - fraza w stylu "uwzględniamy wymagania klienta w produkcji"/"od koncepcji, przez
+      prototyp, aż po finalną produkcję"/"wspólnie stworzymy rozwiązania"/"projekt od
+      pomysłu do realizacji" — to WCIĄŻ tylko opis zdolności produkcyjnej lub ogólne hasło
+      o współpracy, dopóki nie jest OSOBNO opisany etap ROZMOWY/DORADZTWA/ANALIZY POTRZEB
+      PRZED złożeniem zamówienia (kto, kiedy, w jakiej formie ustala z klientem właściwe
+      rozwiązanie) — sam fakt, że produkt powstaje "pod klienta" lub hasło o wspólnej pracy
+      nad projektem, nigdy nie wystarcza samo w sobie bez opisanego etapu doboru/doradztwa;
     - sam formularz kontaktowy ogólnego typu (imię, e-mail, wiadomość) — to nie jest dowód
       konsultacji/analizy potrzeb, nawet jeśli firma go używa jako jedynego kanału kontaktu.
   ZASTRZEŻENIE: nie ustawiaj true wyłącznie na podstawie branży/typu działalności ani z
   domysłu "każdy proces projektowy wymaga analizy potrzeb" — musi być konkretny tekstowy
-  sygnał z listy powyżej, nie sama inferencja z rodzaju firmy.
+  sygnał z listy powyżej, nie sama inferencja z rodzaju firmy. Jeśli jedyny dostępny dowód
+  to opis elastyczności/personalizacji PRODUKCJI (bez osobno opisanego etapu rozmowy
+  doradczej przed zamówieniem), zwróć false.
   Jeśli to ten sam fragment tekstu co dowód dla custom_quote_process, oceń oba sygnały
   niezależnie, ale nie licz jednego zdania jako dwóch niezależnych, mocniejszych dowodów.
 
 distributed_sales_structure ("Rozproszona struktura sprzedaży / wiele oddziałów"):
-  Zespół lub sieć sprzedaży fizycznie rozproszona terytorialnie, WŁASNA (ta sama osoba
-  prawna, nie osobne podmioty).
+  Zespół lub sieć sprzedaży fizycznie rozproszona terytorialnie, WYŁĄCZNIE WŁASNA (ten sam
+  podmiot/firma — nie osobne podmioty, nawet powiązane kapitałowo). Oddział/przedstawicielstwo
+  tej samej firmy ZA GRANICĄ nadal się liczy jako własne — to NIE jest automatycznie inny
+  podmiot tylko dlatego, że działa w innym kraju (nie wymagaj polskiego NIP/KRS, żeby uznać
+  zagraniczny oddział za "własny" — firma może mieć oddział/przedstawicielstwo bez odrębnej
+  polskiej rejestracji).
   Główny dowód: oficjalne oddziały, biura regionalne lub placówki firmy w kilku miastach —
   to WYSTARCZA samo w sobie, nawet bez podanych nazwisk osób przy adresach. Przypisani
   regionalni handlowcy/przedstawiciele zwiększają pewność, ale NIE są warunkiem koniecznym.
+  JAK ODRÓŻNIĆ własny zagraniczny oddział od spółki z grupy (częsta pomyłka): oddział/
+  przedstawicielstwo TEJ SAMEJ firmy jest opisany jako część JEJ struktury (np. "Oddział
+  Niemcy", "przedstawicielstwo w Hiszpanii" pod tą samą nazwą firmy) — to liczy się jako
+  własne. Jeśli natomiast lokalizacja w innym kraju ma WŁASNĄ, ODRĘBNĄ nazwę firmy z lokalną
+  formą prawną (np. "[Nazwa]-Werk GmbH", "[Nazwa] Kft.", "[Nazwa] S.L.", "[Nazwa] AG", "[Nazwa]
+  Sp. z o.o." obok głównej "[Nazwa] S.A.") — to jest OSOBNY PODMIOT GRUPY KAPITAŁOWEJ, nie
+  własny oddział badanej spółki, NAWET jeśli działa pod tą samą marką/nazwą i jest wymieniony
+  na tej samej stronie kontaktowej. Sama przynależność do międzynarodowej grupy/sieci spółek
+  o wspólnej marce NIE wystarcza — lista krajów lub spółek grupy to nie własna sieć oddziałów
+  badanej firmy.
   NIE liczy się (to nie własne oddziały tej firmy): lokalizacje realizacji/projektów u
   klientów, siedziby klientów, adresy zewnętrznych partnerów/dealerów/niezależnych
   dystrybutorów (nawet zagranicznych, nawet z "recognized distributor" w opisie), ani
-  spółki-siostry/spółki z tej samej grupy kapitałowej (to osobne podmioty prawne).
+  spółki-siostry/spółki z tej samej grupy kapitałowej (to osobne podmioty prawne — rozpoznaj
+  je po odrębnej nazwie firmy/formie prawnej, patrz wyżej).
 
 ecommerce_b2b ("Sprzedaż e-commerce (B2B)"):
-  Sklep/platforma zamówieniowa w domenie firmy z realną obsługą B2B, nie czysty
-  samoobsługowy self-service bez ludzi po stronie sprzedaży.
-  Główny dowód: sklep lub panel klienta B2B w domenie firmy.
+  Realny sklep/panel zamówieniowy w domenie firmy skierowany do klientów BIZNESOWYCH, nie
+  zwykły sklep konsumencki (D2C) z możliwością wpisania NIP-u na fakturze.
+  Główny dowód: sklep lub panel logowania w domenie firmy z co najmniej jedną cechą B2B —
+  ceny netto/"dla firm", wymagana rejestracja firmy/NIP przy zakładaniu konta, rabaty
+  ilościowe/hurtowe dla stałych klientów biznesowych, jawna nazwa "sklep B2B"/"panel B2B"/
+  "strefa klienta firmowego" — POD WARUNKIEM że tekst potwierdza realną funkcję zamówieniową
+  (logowanie/konto/koszyk/składanie zamówień), nie tylko nazwę.
+  NIE wystarcza: zwykły sklep detaliczny (ceny brutto, zakupy bez konta firmowego) tylko
+  dlatego, że przy zamówieniu można podać NIP do faktury — to nadal sprzedaż D2C.
+  NIE wystarcza: sama etykieta menu/link "Platforma B2B"/"B2B" bez żadnego dalszego opisu w
+  dostępnym tekście, co ta platforma faktycznie robi (zamawianie, logowanie, konto) — nazwa
+  linku w nawigacji to nie potwierdzenie działania panelu, może to być np. osobny produkt
+  firmy (system/platforma techniczna), a nie sklep zamówieniowy.
+  Ten sygnał liczy się w scoringu TYLKO razem z dzial_handlowy lub dedicated_customer_care_b2b
+  (zależność ustawiona w kodzie, nie w tym prompcie) — oceniaj go niezależnie i uczciwie,
+  nie zaniżaj/zawyżaj z myślą o tej zależności.
 
 dedicated_customer_care_b2b ("Dedykowana opieka nad klientem B2B"):
-  Dedykowany zespół posprzedażowy, ew. przypisany opiekun.
+  KLUCZOWA GRANICA: sygnał wymaga OSOBY (lub zespołu) PRZYPISANEJ NA STAŁE do konkretnego
+  klienta, konta lub segmentu i odpowiedzialnej za CIĄGŁĄ relację z nim — nie samego
+  istnienia działu/zespołu sprzedaży ani jednej rozmowy sprzedażowej. Rozstrzyga to, czy
+  tekst albo (a) używa słownictwa dedykowanej opieki ("opiekun", "KAM", "Key Account
+  Manager/Advisor", "account manager", "doradca ds. kluczowych klientów"), albo (b) wprost
+  opisuje osobę jako odpowiedzialną NA STAŁE za określony obszar/segment/konto klienta —
+  sama nazwa stanowiska sprzedażowego (bez żadnego z tych dwóch elementów) NIE wystarcza.
+  RÓWNOWAŻNE określenia — traktuj jako ten sam dowód: dedykowany opiekun, Key Account
+  Manager (KAM), account manager, customer success, opieka handlowa B2B, opiekun biznesowy.
   Główny dowód: "dedykowany opiekun", "opiekun biznesowy", "Key Account Manager",
-  "Customer Success", "obsługa posprzedażowa", "odnowienia umów", "stała opieka nad klientem".
+  "account manager", "Customer Success", "obsługa posprzedażowa", "odnowienia umów",
+  "stała opieka nad klientem", LUB osoba jawnie opisana jako odpowiedzialna na stałe za
+  dany segment/branżę/konto klienta (np. "kontakt z konsultantem odpowiedzialnym za daną
+  branżę"), nawet bez słowa "opiekun"/"KAM" wprost.
   Stanowiska/oferty pracy "Specjalista ds. klientów kluczowych", "Key Account Manager",
   "opiekun klienta biznesowego" i ich jednoznaczne odpowiedniki to RÓWNIEŻ mocny dowód —
   ogłoszenie o pracę na taką rolę liczy się tak samo jak opis usługi na stronie.
-  Drugorzędne wsparcie: samo słowo "BOK" lub sama infolinia — może prowadzić do jednej
-  osoby lub zwykłego wsparcia technicznego, nie relacyjnej opieki.
+  ZWRÓĆ FALSE:
+    - samo Biuro Obsługi Klienta (BOK), sama infolinia, LUB nazwany kierownik/osoba
+      zarządzająca BOK — to nadal ogólna, niezróżnicowana obsługa, nie opieka przypisana
+      do konkretnego klienta/konta;
+    - zwykły handlowiec/przedstawiciel handlowy przypisany do REGIONU/terytorium — to
+      pozyskiwanie sprzedaży na obszarze, nie opieka nad już pozyskanym, konkretnym
+      klientem — chyba że tekst wprost nazywa tę osobę opiekunem/KAM lub opisuje ją jako
+      odpowiedzialną na stałe za konkretne konto (nie tylko za "sprzedaż w regionie X");
+    - Kierownik/Dyrektor Działu Sprzedaży — to funkcja zarządcza zespołu sprzedaży, nie
+      osobista, ciągła opieka nad klientem;
+    - sam kontakt do działu sprzedaży (telefon/e-mail działu) bez informacji o stałej,
+      przypisanej opiece nad konkretnym klientem/kontem.
 
 partner_dealer_network ("Sieć partnerów / dealerów"):
-  Firma buduje lub rozwija sieć sprzedaży pośredniej przez NIEZALEŻNE, osobne podmioty
-  odsprzedające jej produkty (dealerzy, dystrybutorzy, franczyzobiorcy).
+  KLUCZOWY WARUNEK — KIERUNEK RELACJI: sygnał dotyczy WYŁĄCZNIE sytuacji, w której BADANA
+  FIRMA jest DOSTAWCĄ posiadającym/organizującym WŁASNĄ, zewnętrzną sieć sprzedaży —
+  niezależne podmioty (dealerzy, dystrybutorzy, resellerzy, partnerzy handlowi), które
+  ODSPRZEDAJĄ PRODUKTY LUB USŁUGI TEJ FIRMY. Zanim uznasz dowód za wystarczający, ustal kto
+  jest dostawcą, a kto odsprzedawcą w opisanej relacji — sam fakt użycia słowa
+  "partner"/"dealer"/"dystrybutor" NIE wystarcza, jeśli kierunek relacji jest inny albo
+  niesprzedażowy.
   Główny dowód: "zostań partnerem", "sieć dealerska", "dla dystrybutorów", "strefa partnera"
-  w domenie firmy, LUB jawnie wymieniona lista niezależnych dystrybutorów/przedstawicieli
-  na rynkach zagranicznych (np. podstrona "distribution"/"dystrybucja", formularz dla
-  zagranicznych dystrybutorów rozpoczynających współpracę).
-  NIE liczy się: linki do spółek-sióstr/spółek z tej samej grupy kapitałowej — to nie sieć
-  odsprzedawców, tylko wewnętrzna struktura grupy — chyba że tekst wprost opisuje je jako
-  dealerów/dystrybutorów tej firmy, nie jako powiązane firmy.
+  w domenie firmy — w kontekście rekrutacji odsprzedawców JEJ WŁASNYCH produktów/usług —
+  LUB jawnie wymieniona lista niezależnych dystrybutorów/przedstawicieli na rynkach
+  zagranicznych, którzy sprzedają dalej produkty tej firmy.
+  ZASADA POZYTYWNA: jeżeli badana firma zaprasza inne firmy/sprzedawców do sprzedaży lub
+  dystrybucji JEJ WŁASNYCH produktów/usług i opisuje to jako współpracę z dystrybutorami,
+  dealerami, resellerami lub partnerami handlowymi — to jest to true, niezależnie od
+  dokładnego sformułowania. Przykład: "Sprzedajesz nasze produkty / produkty z naszej
+  kategorii? Rozpocznij z nami współpracę" połączone z informacją o modelu współpracy z
+  dystrybutorami — to true, bo badana firma jest tu DOSTAWCĄ/PRODUCENTEM, a zewnętrzny
+  podmiot ma sprzedawać JEJ ofertę.
+  ZWRÓĆ FALSE (częste pomyłki w obie strony):
+    - firma SAMA jest dealerem/dystrybutorem/autoryzowanym partnerem CUDZEJ marki (np.
+      "jesteśmy oficjalnym dystrybutorem [producenta X]") — to ONA jest odsprzedawcą, nie
+      dostawcą budującym własną sieć; jej WŁASNY dział montażu/instalacji/serwisu również
+      się nie liczy, to wewnętrzny zespół, nie zewnętrzna sieć;
+    - firma REKRUTUJE przewoźników, podwykonawców lub dostawców do współpracy z NIĄ (np.
+      "zostań naszym partnerem" skierowane do przewoźników/poddostawców, którzy będą
+      świadczyć usługę DLA tej firmy) — to ona jest stroną KUPUJĄCĄ usługę/zdolność, nie
+      buduje sieci odsprzedającej jej produkty;
+    - "partner" oznacza partnera eventowego, marketingowego, lokalną atrakcję turystyczną
+      lub inną współpracę niesprzedażową (patronat, cross-promocja, sponsoring);
+    - ogólne, marketingowe użycie słowa "partner"/"partnerzy" oznaczające KLIENTÓW lub
+      relacje biznesowe w ogóle (np. "budujemy długoterminowe relacje z partnerami na
+      całym świecie", "dostarczamy naszym partnerom niezawodne produkty");
+    - linki do spółek-sióstr/spółek z tej samej grupy kapitałowej — to nie sieć
+      odsprzedawców, tylko wewnętrzna struktura grupy — chyba że tekst wprost opisuje je
+      jako dealerów/dystrybutorów tej firmy, nie jako powiązane firmy.
+  Wymagany jest jawny kontekst NIEZALEŻNEGO podmiotu odsprzedającego/dystrybuującego
+  PRODUKTY/USŁUGI TEJ FIRMY (nie cudzej), nie samo słowo "partner" w dowolnym znaczeniu.
 
 tender_bidding_department ("Przetargi / dział ofertowania"):
-  Firma SPRZEDAJE w przetargach — UWAGA, częsta pomyłka w obie strony:
-  Dowód pozytywny (true): jawny język udziału w postępowaniu przetargowym JAKO
-  WYKONAWCA/OFERENT — "realizujemy zamówienia publiczne", "oferta dla sektora publicznego",
-  "doświadczenie w przetargach", "specjalista ds. przetargów/ofertowania", "startujemy w
-  przetargach", "oferty przetargowe", "wygraliśmy przetarg".
+  Firma SPRZEDAJE w przetargach jako wykonawca/dostawca — UWAGA, częsta pomyłka w obie
+  strony:
+  Dowód pozytywny (true): jawny język REALNEGO udziału w postępowaniu przetargowym JAKO
+  WYKONAWCA/OFERENT/DOSTAWCA — "realizujemy zamówienia publiczne", "oferta dla sektora
+  publicznego", "doświadczenie w przetargach", "specjalista ds. przetargów/ofertowania",
+  "startujemy w przetargach", "oferty przetargowe", "wygraliśmy przetarg", "wygraliśmy wiele
+  przetargów".
   NIE WYSTARCZA samo posiadanie klientów/zamawiających publicznych w portfolio realizacji
   (gmina, muzeum, biblioteka, urząd jako "Inwestor:" zrealizowanego projektu) — to dowód na
   OBSŁUGĘ sektora publicznego, nie na SPOSÓB pozyskania tego kontraktu. Bez jawnego słowa
-  "przetarg"/"zamówienie publiczne"/"PZP" użytego w kontekście SPRZEDAŻY (nie samego faktu
-  posiadania takiego klienta), zwróć false.
+  "przetarg"/"zamówienie publiczne"/"PZP" użytego w kontekście SPRZEDAŻY/WYGRANIA (nie
+  samego faktu posiadania takiego klienta), zwróć false.
   NIE liczy się, nawet jeśli słowo "przetarg" występuje (to firma KUPUJĄCA, zwróć false):
   "postępowania zakupowe", "zamówienia dla dostawców", "przetargi organizowane przez nas",
   "profil nabywcy".
@@ -2839,16 +3627,38 @@ async function enrichOne(prospectId, opts = {}) {
     }
 
     if (websiteUrl) {
-      // websiteSource === 'manual_correction' — admin jawnie wpisał/poprawił
-      // ten URL przez UI: to już jest ludzka weryfikacja, nie uruchamiamy
-      // automatycznego checku tożsamości nad nim (decyzja 20.08).
-      // opts.trustedDomain — wyłącznie testowe, identyczny efekt jak wyżej
-      // (patrz komentarz przy dryRun na początku funkcji).
-      const trustedByHuman = websiteSource === 'manual_correction' || opts.trustedDomain === true;
+      // Zaufanie jednorazowe, per to wywołanie — patrz isDomainTrustedForThisRun
+      // (poprawka 18.09: wcześniej czytaliśmy tu też trwałą kolumnę
+      // website_source==='manual_correction', co dawało bezterminowe obejście).
+      const trustedByHuman = isDomainTrustedForThisRun(opts);
 
       const fastScraped = await scrapeWebsiteFast(websiteUrl);
       let scraped = fastScraped;
       let identityCheck = computeIdentityCheck(fastScraped);
+
+      // Identity fallback na TEJ SAMEJ domenie (20.09, case Alior Bank): homepage
+      // nie dała mocnego dowodu, ale dane prawne bywają w stopce lub na
+      // /kontakt, /regulamin, /polityka-prywatnosci. Uruchamiany tylko gdy
+      // wynik to insufficient_evidence (NIE przy konflikcie zagranicznego
+      // adresu, parkingu ani błędzie deterministycznym) i nie zaufano domenie.
+      // Zatwierdza wyłącznie mocny dowód (NIP/KRS/REGON albo kod+ulica) — patrz
+      // evaluateIdentityFallback. Nic tu nie omija checkDomainIdentity.
+      let identityFallback = null;
+      if (!fastScraped.deterministicFailure && !trustedByHuman && !identityCheck.verified
+          && identityCheck.reason === 'insufficient_evidence'
+          && (fastScraped.text || '').trim() && fastScraped.crawlState) {
+        identityFallback = await runIdentityFallback({
+          company, krsData, gusData, crawlState: fastScraped.crawlState,
+          title: `${fastScraped.identity?.title || ''} ${fastScraped.identity?.h1 || ''}`.trim(),
+        });
+        logger.info('[Prospect] Identity fallback on same domain', {
+          prospectId, websiteUrl, verified: identityFallback.verified, decidedBy: identityFallback.decided_by,
+          pages: (identityFallback.pages_checked || []).length,
+        });
+        if (identityFallback.verified) {
+          identityCheck = { verified: true, reason: identityFallback.reason, evidence: identityFallback.evidence, via_fallback: true };
+        }
+      }
 
       if (fastScraped.deterministicFailure) {
         // Błąd deterministyczny (TLS/DNS, potwierdzony parking domeny, zły
@@ -2875,8 +3685,15 @@ async function enrichOne(prospectId, opts = {}) {
         // (evidence w logu bogatsze), decyzja o kontynuacji już zapadła wyżej;
         // może jednak wykryć konflikt (np. zagraniczny adres) niewidoczny w
         // wąskiej treści fast — sprawdzenie niżej (`!identityCheck.verified`)
-        // wciąż na to reaguje.
-        identityCheck = computeIdentityCheck(scraped);
+        // wciąż na to reaguje. Wyjątek: potwierdzenie z identity fallback (dowód
+        // z podstrony, której tekst dla AI nie zawiera) zostaje, dopóki pełna
+        // treść nie wykaże konfliktu zagranicznego adresu.
+        {
+          const recomputed = computeIdentityCheck(scraped);
+          const keepFallbackVerdict = identityFallback?.verified && !recomputed.verified
+            && recomputed.reason !== 'foreign_address_conflict';
+          if (!keepFallbackVerdict) identityCheck = recomputed;
+        }
         scanStage = 'full';
       } else {
         // Domena niepotwierdzona i nie zaufana — JEDNA próba fallbacku (patrz
@@ -2939,13 +3756,41 @@ async function enrichOne(prospectId, opts = {}) {
       // śladu: url, próby, status HTTP, długości przed/po, czy weszła do
       // finalnej treści, i dokładny powód jeśli nie.
       enrichLog.website.candidates = scraped.diagnostics || [];
+      // ETAP 4 (audytowalność retrievalu, 19.09) — KAŻDY odkryty link (nie
+      // tylko pobrane) z jego score/kategorią/losem w lejku selekcji, jedną
+      // z 8 klas: LINK_SCORE_TOO_LOW, PAGE_NOT_SELECTED, FETCH_FAILED,
+      // BOT_CHALLENGE, CATEGORY_BUDGET_EXHAUSTED, GLOBAL_12K_TRUNCATION,
+      // EVIDENCE_REACHED_AI. Pozwala odpowiedzieć "czy AI dostało stronę z
+      // dowodem" bez przeszukiwania logów ręcznie — patrz buildLinkAudit().
+      enrichLog.website.link_audit = scraped.link_audit || [];
       // Szczegóły identity-check (decyzja 20.08) — NIP/KRS/REGON sprawdzone i
       // trafione, nazwa firmy vs title/h1, adres z KRS/GUS i czy trafił w
       // tekście, oraz czy wykryto konflikt zagranicznego adresu.
+      // Diagnostyka (20.09): na pytanie "dlaczego ta domena została uznana za
+      // właściwą albo odrzucona?" odpowiadają pola poniżej — kandydat i jego
+      // źródło, jaki dowód zdecydował (decided_by), czy zadziałał identity
+      // fallback oraz które strony sprawdzono i co na każdej znaleziono.
       enrichLog.website.identity_check = {
         verified: identityCheck.verified,
         reason:   identityCheck.reason,
         evidence: identityCheck.evidence || null,
+        candidate_url:    websiteUrl,
+        candidate_source: websiteSource || null,
+        trusted_by_human: trustedByHuman,
+        decided_by: identityFallback?.verified
+          ? identityFallback.decided_by
+          : (trustedByHuman && !identityCheck.verified ? 'trusted_domain_override' : identityCheck.reason),
+        fallback: identityFallback
+          ? {
+              attempted:  identityFallback.attempted,
+              used:       !!identityFallback.verified,
+              verified:   identityFallback.verified,
+              reason:     identityFallback.reason,
+              decided_by: identityFallback.decided_by,
+              pages_checked: identityFallback.pages_checked || [],
+              sources:    identityFallback.sources || [],
+            }
+          : { attempted: false, used: false },
       };
       // Zapisane od razu (nie dopiero po AI) — inaczej wczesne return'y niżej
       // (identity-check-fail, brak treści) nigdy nie zapisywały scan_stage,
@@ -3042,9 +3887,15 @@ async function enrichOne(prospectId, opts = {}) {
     const branchesCount = krsData?.branchesCount ?? null;
     const branchesScope = krsData?.branchesScope ?? null;
 
+    // Bramki: b2b z AI bez zmian, company_size WYŁĄCZNIE deterministycznie z
+    // employment_count (patrz calcCompanySizeGate). Ta jedna wartość `gates` jest
+    // używana wszędzie niżej (status, punkty, log, zapis do bazy, zwrot dryRun) —
+    // żadna ścieżka nie czyta już analysis.gates bezpośrednio.
+    const gates = analysis ? buildIcpGates(analysis.gates, company.employment_count, company.employment_range) : null;
+
     const scoreResult   = calcIcpScore(analysis?.icp_signals);
-    const gateStatus    = icpGateStatus(analysis?.gates);
-    const gatePointsResult = calcIcpGatePoints(analysis?.gates);
+    const gateStatus    = icpGateStatus(gates);
+    const gatePointsResult = calcIcpGatePoints(gates);
     const downgradeFlags = calcIcpDowngradeFlags(websiteUrl, websiteStatus);
 
     // Blacklista ICP (np. hurtownie) — kara punktowa do icp_score, NIE zmienia
@@ -3088,6 +3939,15 @@ async function enrichOne(prospectId, opts = {}) {
       icp_blacklist_matched: blacklistMatches || null,
       icp_total:    totalScore,
       gate_status:  gateStatus,
+      // Audyt bramki company_size: wartość finalna (deterministyczna), dane wejściowe
+      // oraz to, co zwróciło AI — żeby nadpisanie było widoczne w Inspekcji.
+      company_size_gate: {
+        value:            gates?.company_size ?? null,
+        employment_count: company.employment_count ?? null,
+        employment_range: company.employment_range ?? null,
+        ai_value:         analysis?.gates?.company_size ?? null,
+        overridden:       (analysis?.gates?.company_size ?? null) !== (gates?.company_size ?? null),
+      },
       signal_reasoning: analysis?.signal_reasoning || null,
       prompt_tokens:            aiUsage?.prompt_tokens ?? null,
       completion_tokens:        aiUsage?.completion_tokens ?? null,
@@ -3147,7 +4007,7 @@ async function enrichOne(prospectId, opts = {}) {
         websiteUrl || null,
         totalScore,
         JSON.stringify(scoreResult.breakdown),
-        analysis?.gates ? JSON.stringify(analysis.gates) : null,
+        gates ? JSON.stringify(gates) : null,
         gateStatus,
         JSON.stringify(bonusResult.breakdown),
         JSON.stringify(downgradeFlags),
@@ -3173,7 +4033,7 @@ async function enrichOne(prospectId, opts = {}) {
         dryRun: true,
         icp_score: totalScore,
         icp_signals: scoreResult.breakdown,
-        icp_gates: analysis?.gates || null,
+        icp_gates: gates,
         icp_gate_status: gateStatus,
         icp_gate_points: gatePointsResult.breakdown,
         icp_downgrade_flags: downgradeFlags,
@@ -3323,10 +4183,31 @@ module.exports = {
   // Eksport dodatkowy na potrzeby menuAuditTool.js — diagnostyczne narzędzie
   // audytu menu nawigacyjnego, reużywa scrapingu zamiast duplikować go.
   fetchKRS, findWebsiteUrl, scrapeWebsite, normalizeName, fetchPage, extractText, extractInternalLinks, scoreLinkRelevance,
-  checkDomainIdentity, isDomainParkingPage,
+  checkDomainIdentity, isDomainParkingPage, isDomainTrustedForThisRun,
+  matchesIcpBlacklist, getIcpScoringRules, calcIcpScore,
   // Eksport na potrzeby ręcznego/testowego wywołania fallbacku drugiej domeny
   // w izolacji (audyt 21.08) — enrichOne woła resolveDomainFallback()
   // wewnętrznie (patrz gałąź "domena niepotwierdzona i nie zaufana"), ten
   // eksport służy tylko testom poza pełnym przebiegiem enrichmentu.
   guessFallbackDomains, resolveDomainFallback, scrapeWebsiteFast,
+  // Eksport na potrzeby audytu jakości sygnałów ICP (regresja treści promptu +
+  // replay realnych wywołań DeepSeek poza pełnym przebiegiem enrichmentu).
+  SYSTEM_PROMPT, buildUserMessage, callDeepSeek,
+  // Eksport na potrzeby testów regresyjnych retrievalu (19.09, druga tura —
+  // limit różnorodności kandydatów, wykluczenie dokumentów prawnych z budżetu
+  // klasyfikacyjnego, dwupoziomowe scorowanie "partner").
+  categorizePage, selectDiverseCandidates, selectWithinBudget,
+  // Eksport na potrzeby testu regresyjnego tie-breaku (19.09, trzecia tura —
+  // strony z osobami/zespołem wygrywają remis score z formularzami kontaktowymi).
+  pageRankTieBreakBonus,
+  // Eksport na potrzeby testów bramki company_size (20.09) — deterministyczna,
+  // z employment_count, bez udziału AI — oraz jej przepływu do statusu/punktów.
+  calcCompanySizeGate, buildIcpGates, icpGateStatus, calcIcpGatePoints,
+  // Identity fallback (20.09, case Alior Bank) — testy jednostkowe i walidacja
+  // poza pełnym enrichOne.
+  extractIdentityText, sameSiteHost, pickIdentityFallbackUrls,
+  evaluateIdentityFallback, runIdentityFallback,
+  // Eksport na potrzeby domknięcia pokrycia testami (20.09, review przed
+  // commitem) — obie funkcje czyste, testowalne bez sieci/AI.
+  isBotChallengePage, buildLinkAudit,
 };

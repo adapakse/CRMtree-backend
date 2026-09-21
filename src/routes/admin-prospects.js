@@ -343,6 +343,12 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
       }
 
       const employmentCount = safeInt(getStr(row, employmentKey));
+      // Surowy tekst zatrudnienia (np. '10-19 osób', '250+') zachowujemy w
+      // employment_range — employment_count to tylko dolna granica takiego
+      // przedziału i sam nie odróżnia dokładnej liczby od zakresu, a od tego
+      // zależy bramka company_size (zakres przecinający próg 15 => unknown).
+      const employmentRaw   = getStr(row, employmentKey);
+      const employmentRange = employmentRaw ? employmentRaw.slice(0, 20) : null;
       // Revenue: może być z separatorami tysięcy (spacje lub kropki)
       const revenueRaw = getStr(row, revenueKey);
       const annualRevenue = revenueRaw
@@ -366,7 +372,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
         const result = await db.query(
           `INSERT INTO prospect_companies (
              tenant_id, nip, regon, company_name, krs_number, website_url, website_source,
-             employment_count, annual_revenue, founding_year, company_size,
+             employment_count, employment_range, annual_revenue, founding_year, company_size,
              industry, company_profile,
              decision_maker_name, decision_maker_title, decision_maker_dept,
              decision_maker_phone, decision_maker_email,
@@ -375,7 +381,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
              linkedin_url, decision_maker_linkedin, decision_maker_facebook,
              group_id, imported_by
            )
-           VALUES ($1,$2,$3,$4,$5,$6,$29,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+           VALUES ($1,$2,$3,$4,$5,$6,$29,$7,$30,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
            ON CONFLICT (tenant_id, nip) DO UPDATE SET
              regon                = COALESCE(EXCLUDED.regon,         prospect_companies.regon),
              company_name         = COALESCE(EXCLUDED.company_name,  prospect_companies.company_name),
@@ -394,6 +400,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
                ELSE prospect_companies.website_source
              END,
              employment_count     = COALESCE(EXCLUDED.employment_count,    prospect_companies.employment_count),
+             employment_range     = COALESCE(EXCLUDED.employment_range,    prospect_companies.employment_range),
              annual_revenue       = COALESCE(EXCLUDED.annual_revenue,      prospect_companies.annual_revenue),
              founding_year        = COALESCE(EXCLUDED.founding_year,       prospect_companies.founding_year),
              company_size         = COALESCE(EXCLUDED.company_size,        prospect_companies.company_size),
@@ -436,6 +443,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
             linkedinUrl, dmLinkedin, dmFacebook,
             importerGroupId, req.user.id,
             websiteUrl ? 'csv_import' : null,
+            employmentRange,
           ]
         );
         if (result.rows[0]?.inserted) added++;
@@ -726,9 +734,12 @@ router.post('/:id/re-process',
            branches_scope         = NULL,
            krs_website            = NULL,
            website_url            = COALESCE($2, website_url),
-           -- Admin jawnie wpisał/poprawił URL w tym request'cie — to ludzka
-           -- weryfikacja, trwałe źródło 'manual_correction' (nigdy automatycznie
-           -- nadpisywane później, patrz enrichOne/migracja 0269, decyzja 20.08).
+           -- Admin jawnie wpisał/poprawił URL w tym request'cie — etykieta
+           -- pochodzenia do wyświetlenia w UI (migracja 0269, decyzja 20.08).
+           -- UWAGA (poprawka 18.09): ta kolumna NIE jest już czytana przez
+           -- enrichOne jako bezterminowe zaufanie — o pominięciu identity-check
+           -- w TYM konkretnym uruchomieniu decyduje wyłącznie websiteChanged
+           -- niżej (patrz opts.trustedDomain przekazywane do reEnrichOne).
            website_source          = CASE WHEN $2::TEXT IS NOT NULL THEN 'manual_correction' ELSE website_source END,
            nip                    = COALESCE($3::VARCHAR, nip),
            linkedin_url           = COALESCE($4, linkedin_url),
@@ -741,8 +752,14 @@ router.post('/:id/re-process',
       if (!rows.length) return res.status(404).json({ error: 'Prospekt nie znaleziony' });
 
       // Uruchom enrichment jednej firmy w tle (ustawia batchProgress dla pollingu frontendu)
+      // trustedDomain: jednorazowe zaufanie identity-check WYŁĄCZNIE gdy TEN
+      // request faktycznie przyniósł nowy, inny URL niż zapisany wcześniej
+      // (websiteChanged) — nie dla samego ponownego użycia istniejącego URL-a,
+      // i nie dla kolejnych re-processów tego samego rekordu bez nowej zmiany
+      // (poprawka 18.09, patrz isDomainTrustedForThisRun w prospectEnrichmentService.js).
       enrichSvc.reEnrichOne(req.user.tenant_id, req.params.id, {
         processLinkedin: effectiveProcessLinkedin, skipWebsite, processPracuj: effectiveProcessPracuj,
+        trustedDomain: websiteChanged,
       });
 
       res.json({ queued: true, id: req.params.id });
@@ -794,6 +811,18 @@ router.post('/enrich-batch', async (req, res, next) => {
 
 router.get('/enrich-status', (req, res) => {
   res.json(enrichSvc.getBatchProgress(req.user.tenant_id));
+});
+
+// ── GET /scoring-rules — algorytm naliczania icp_score jako dane ────
+// Jeden per-tenant (nie per-prospekt) — wagi/bramki są stałe w kodzie,
+// jedyna część zależna od tenanta to blacklista ICP z app_settings.
+// Pokazywane w zakładce "Zasady naliczania punktów" w Inspekcji.
+
+router.get('/scoring-rules', async (req, res, next) => {
+  try {
+    const rules = await enrichSvc.getIcpScoringRules(req.user.tenant_id);
+    res.json(rules);
+  } catch (err) { next(err); }
 });
 
 // ── GET /:id/prompt — rekonstrukcja promptu wysłanego do Claude ────
