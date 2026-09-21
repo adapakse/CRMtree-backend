@@ -7,15 +7,16 @@
 // getIcpScoringRules(), którego WŁASNA logika ma już osobne testy jednostkowe
 // (icpScoring.test.js, companySizeGate.test.js).
 //
-// Import CSV (zapis employment_range) i POST /:id/re-process (trustedDomain:
-// websiteChanged) NIE mają tu testu route'owego — wymagałyby nowego harnessu
-// (multipart CSV + mockowanie enrichSvc.reEnrichOne, który odpala prawdziwy
-// crawl/AI w tle) i decyzją z 20.09 nie budujemy go teraz. Zweryfikowane
-// integracyjnie ręcznie:
-//   - employment_range: import.js zapisuje kolumnę (potwierdzone przeglądem
-//     kodu + parseEmploymentBounds ma 32 testy jednostkowe w companySizeGate.test.js);
-//   - trustedDomain: websiteChanged: potwierdzone dry-runem enrichOne() na
-//     żywo (Alior Bank, Tilton) w tej samej sesji — patrz raport review.
+// POST /:id/re-process (trustedDomain: websiteChanged) NIE ma tu testu
+// route'owego — wymagałby mockowania enrichSvc.reEnrichOne, który odpala
+// prawdziwy crawl/AI w tle, i decyzją z 20.09 nie budujemy tego teraz.
+// Zweryfikowane integracyjnie ręcznie: dry-runem enrichOne() na żywo (Alior
+// Bank, Tilton) w tej samej sesji — patrz raport review.
+//
+// POST /import MA tu prawdziwy test end-to-end (21.09, regresja "Wielkość"→
+// company_size) — multipart CSV przez supertest, bo to jedyny sposób, żeby
+// udowodnić że findColumnKey() rzeczywiście dopasowuje nagłówek z polską
+// diakrytyką W CAŁYM PRZEPŁYWIE importu, nie tylko w izolowanej funkcji.
 
 const request = require('supertest');
 const app = require('../app');
@@ -23,6 +24,7 @@ const db = require('../config/database');
 const { signAccessToken } = require('../middleware/auth');
 
 const TEST_TENANT_SLUG = 'zz-prospects-scoring-test';
+const TEST_IMPORT_NIPS = ['9999999901', '9999999902'];
 let tenantId, adminToken;
 
 beforeAll(async () => {
@@ -43,6 +45,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await db.query(`DELETE FROM prospect_companies WHERE tenant_id = $1 AND nip = ANY($2)`, [tenantId, TEST_IMPORT_NIPS]);
   // Pool zamykany przez --forceExit; ten plik go nie zamyka.
 });
 
@@ -68,5 +71,54 @@ describe('GET /api/admin/prospects/scoring-rules', () => {
   test('bez tokenu zwraca 401', async () => {
     const res = await request(app).get('/api/admin/prospects/scoring-rules');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('POST /api/admin/prospects/import — nagłówki z polską diakrytyką (regresja "Wielkość")', () => {
+  test('CSV z nagłówkiem "Wielkość" zapisuje company_size (przed poprawką: zawsze NULL)', async () => {
+    const csv = [
+      'BAZA,NIP,Nazwa,WWW,Zatrudnienie,Wielkość,Branża',
+      `zz-test-import,${TEST_IMPORT_NIPS[0]},Testowa Diakrytyka sp. z o.o.,https://example-diakrytyka.pl,20-49 osób,małe,Handel`,
+    ].join('\n');
+
+    const res = await request(app)
+      .post('/api/admin/prospects/import')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('file', Buffer.from('﻿' + csv, 'utf8'), 'test-diakrytyka.csv');
+
+    expect(res.status).toBe(200);
+    expect(res.body.added).toBe(1);
+
+    const { rows } = await db.query(
+      `SELECT company_size, employment_range, employment_count, industry
+         FROM prospect_companies WHERE tenant_id = $1 AND nip = $2`,
+      [tenantId, TEST_IMPORT_NIPS[0]],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].company_size).toBe('małe');
+    expect(rows[0].employment_range).toBe('20-49 osób');
+    expect(rows[0].employment_count).toBe(20);
+    expect(rows[0].industry).toBe('Handel');
+  });
+
+  test('CSV z nagłówkiem ASCII "Wielkosc" (bez diakrytyki) nadal działa — brak regresji dla starych plików', async () => {
+    const csv = [
+      'BAZA,NIP,Nazwa,WWW,Zatrudnienie,Wielkosc',
+      `zz-test-import,${TEST_IMPORT_NIPS[1]},Testowa Ascii sp. z o.o.,https://example-ascii.pl,50-99 osób,srednie`,
+    ].join('\n');
+
+    const res = await request(app)
+      .post('/api/admin/prospects/import')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('file', Buffer.from('﻿' + csv, 'utf8'), 'test-ascii.csv');
+
+    expect(res.status).toBe(200);
+    expect(res.body.added).toBe(1);
+
+    const { rows } = await db.query(
+      `SELECT company_size FROM prospect_companies WHERE tenant_id = $1 AND nip = $2`,
+      [tenantId, TEST_IMPORT_NIPS[1]],
+    );
+    expect(rows[0].company_size).toBe('srednie');
   });
 });

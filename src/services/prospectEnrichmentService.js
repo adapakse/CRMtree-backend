@@ -1467,9 +1467,31 @@ async function findLinkedinUrl(company) {
   return { url: null, method: 'none' };
 }
 
+// Parsuje pole schema.org Organization.numberOfEmployees (QuantitativeValue)
+// do {count, range} — DETERMINISTYCZNIE, żadnego zgadywania: liczy się tylko
+// jeśli pole faktycznie jest obecne w JSON-LD, dokładnie tak jak dziś czytamy
+// NIP/KRS regexem. .value = dokładna liczba; .minValue/.maxValue = przedział
+// (przynajmniej jedna granica). Zwraca {count:null, range:null} gdy brak pola.
+function parseNumberOfEmployees(numberOfEmployees) {
+  if (!numberOfEmployees || typeof numberOfEmployees !== 'object') return { count: null, range: null };
+  const exact = Number(numberOfEmployees.value);
+  if (Number.isFinite(exact)) return { count: exact, range: null };
+  const min = Number(numberOfEmployees.minValue);
+  const max = Number(numberOfEmployees.maxValue);
+  if (Number.isFinite(min) || Number.isFinite(max)) {
+    return { count: null, range: `${Number.isFinite(min) ? min : '?'}-${Number.isFinite(max) ? max : '?'}` };
+  }
+  return { count: null, range: null };
+}
+
 // Scrapuje stronę firmy na LinkedIn — extrahuje tekst z meta tagów i JSON-LD
-// LinkedIn często zwraca 999 (bot detected) ale i tak zawiera OG/schema.org dane w HTML
+// LinkedIn często zwraca 999 (bot detected) ale i tak zawiera OG/schema.org dane w HTML.
+// Zwraca też {employmentCount, employmentRange} sparsowane z tego samego JSON-LD
+// (fallback dla company_size gate, patrz enrichOne — poprawka 21.09, żadnego
+// dodatkowego requestu, tylko dane już i tak pobrane tu dla innych pól).
 async function scrapeLinkedin(linkedinUrl) {
+  let employmentCount = null;
+  let employmentRange = null;
   try {
     const { data: html } = await axios.get(linkedinUrl, {
       timeout: 12_000,
@@ -1507,7 +1529,18 @@ async function scrapeLinkedin(linkedinUrl) {
         for (const o of items) {
           if (o['@type'] === 'Organization' || o['@type'] === 'Corporation') {
             if (o.description)                 parts.push(`Opis (schema): ${String(o.description).slice(0, 800)}`);
-            if (o.numberOfEmployees?.value)    parts.push(`Zatrudnienie: ${o.numberOfEmployees.value}`);
+            if (o.numberOfEmployees) {
+              const parsed = parseNumberOfEmployees(o.numberOfEmployees);
+              if (parsed.count != null || parsed.range != null) {
+                parts.push(`Zatrudnienie: ${parsed.count ?? parsed.range}`);
+                // Pierwsze trafienie wygrywa — strona nie powinna mieć dwóch
+                // sprzecznych bloków Organization, ale na wszelki wypadek.
+                if (employmentCount == null && employmentRange == null) {
+                  employmentCount = parsed.count;
+                  employmentRange = parsed.range;
+                }
+              }
+            }
             if (o.foundingDate)                parts.push(`Założona: ${o.foundingDate}`);
             if (o.industry)                    parts.push(`Branża (schema): ${o.industry}`);
             if (o.email)                       parts.push(`E-mail (schema): ${[].concat(o.email).join(', ')}`);
@@ -1524,11 +1557,11 @@ async function scrapeLinkedin(linkedinUrl) {
     if (mainText.length > 50) parts.push(mainText);
 
     const result = parts.join('\n').trim();
-    logger.info('[Prospect] LinkedIn scraped', { url: linkedinUrl, chars: result.length });
-    return result;
+    logger.info('[Prospect] LinkedIn scraped', { url: linkedinUrl, chars: result.length, employmentCount, employmentRange });
+    return { text: result, employmentCount, employmentRange };
   } catch (err) {
     logger.debug('[Prospect] LinkedIn scrape failed', { url: linkedinUrl, error: err.message });
-    return '';
+    return { text: '', employmentCount: null, employmentRange: null };
   }
 }
 
@@ -2180,6 +2213,124 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
   return { html: '', finalUrl: lastFinalUrl, status: lastStatus, attempts: maxRetries + 1, error: lastError?.message };
 }
 
+// ── Level 2 — hardened HTTP fallback (21.09, po audycie próbki 50 firm) ──
+// Uruchamiany WYŁĄCZNIE po kwalifikującym niepowodzeniu Level 1
+// (fetchPageForCrawl, który zostaje bez zmian i nadal jest pierwszą, tanią
+// próbą) — 403, 429, timeout/błąd sieciowy nie-deterministyczny, albo
+// podejrzanie mało treści mimo HTTP 200. NIGDY dla 404 (strona faktycznie nie
+// istnieje) ani dla deterministycznych błędów TLS/DNS (te już przeszły przez
+// własne fallbacki Level 1 — inne nagłówki tego nie naprawią). Różnica
+// względem Level 1: pełniejszy, spójniejszy zestaw nagłówków przeglądarkowych
+// (Sec-Fetch-*/sec-ch-ua — część WAF sprawdza ich OBECNOŚĆ i spójność z UA, nie
+// tylko sam UA), osobny keep-alive agent (nie dzieli połączenia z Level 1),
+// wolniejszy backoff (1s/3s/8s zamiast 500ms/1000ms — część 429 to zwykłe
+// rate-limiting, nie fingerprinting) i cookie jar między próbami tej samej
+// domeny w obrębie jednego przebiegu enrichmentu. ŚWIADOMIE NIE próbuje omijać
+// CAPTCHA, Cloudflare JS Challenge ani żadnego zabezpieczenia wymagającego
+// wykonania JS/interakcji — to wyłącznie "bardziej grzeczny" klient HTTP, nie
+// obejście zabezpieczeń. Realistyczne oczekiwanie (patrz audyt 21.09): pomaga
+// przy rate-limitingu i niespójnych nagłówkach, NIE pomaga przy twardym
+// enterprise WAF (Akamai/Cloudflare Bot Management z fingerprintingiem) — na
+// to potrzebny byłby headless browser (Level 3, świadomie odłożony).
+const level2Agent = new https.Agent({ keepAlive: true, maxSockets: 10 });
+const level2CookieJar = new Map(); // hostname -> "a=1; b=2" (per-proces, per-domena, żyje tylko w RAM)
+
+function level2Headers(hostname) {
+  const headers = {
+    'User-Agent': CRAWL_REQUEST_HEADERS['User-Agent'],
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+    'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+  };
+  const cookie = hostname && level2CookieJar.get(hostname);
+  if (cookie) headers['Cookie'] = cookie;
+  return headers;
+}
+
+function storeLevel2Cookies(hostname, setCookieHeaders) {
+  if (!hostname || !setCookieHeaders || !setCookieHeaders.length) return;
+  const pairs = setCookieHeaders.map(c => c.split(';')[0]).filter(Boolean);
+  if (pairs.length) level2CookieJar.set(hostname, pairs.join('; '));
+}
+
+const LEVEL2_BACKOFFS_MS = [1000, 3000, 8000];
+
+async function fetchPageHardened(url, { maxRetries = 2, timeoutMs = 12_000 } = {}) {
+  let hostname = null;
+  try { hostname = new URL(url).hostname; } catch { /* zostaw null */ }
+  const deadline = Date.now() + 25_000;
+  let lastStatus = null;
+  let lastError = null;
+  let lastFinalUrl = url;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) await sleepJittered(LEVEL2_BACKOFFS_MS[attempt - 1] ?? 8000);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    try {
+      const resp = await axios.get(url, {
+        timeout: Math.min(timeoutMs, remaining),
+        maxRedirects: 5,
+        headers: level2Headers(hostname),
+        httpsAgent: level2Agent,
+        validateStatus: () => true,
+      });
+      lastStatus = resp.status;
+      const finalUrl = resp.request?.res?.responseUrl || url;
+      lastFinalUrl = finalUrl;
+      storeLevel2Cookies(hostname, resp.headers['set-cookie']);
+
+      if (resp.status === 404) return { html: '', finalUrl, status: 404, attempts: attempt + 1, level: 2 };
+      if ([403, 429, 500, 502, 503, 504].includes(resp.status) && attempt < maxRetries) continue;
+
+      const ct = resp.headers['content-type'] || '';
+      if (!ct.includes('html')) return { html: '', finalUrl, status: resp.status, attempts: attempt + 1, level: 2 };
+
+      const html = resp.data;
+      if (typeof html === 'string' && html.length < SUSPICIOUSLY_SHORT_HTML && attempt < maxRetries) continue;
+      return { html, finalUrl, status: resp.status, attempts: attempt + 1, level: 2 };
+    } catch (err) {
+      lastError = err;
+      if (attempt >= maxRetries) {
+        return { html: '', finalUrl: lastFinalUrl, status: null, attempts: attempt + 1, error: err.message, level: 2 };
+      }
+    }
+  }
+  return { html: '', finalUrl: lastFinalUrl, status: lastStatus, attempts: maxRetries + 1, error: lastError?.message, level: 2 };
+}
+
+// Kwalifikacja do Level 2 — patrz komentarz przy fetchPageHardened wyżej.
+function qualifiesForLevel2(result) {
+  if (!result) return false;
+  if (result.status === 403 || result.status === 429) return true;
+  if (!result.html && result.status !== 404 && !(result.error && DETERMINISTIC_FETCH_ERROR.test(result.error))) {
+    return true; // timeout/reset/5xx po wyczerpaniu retry Level 1 — nie deterministyczny TLS/DNS
+  }
+  if (result.html && result.html.length > 0 && result.html.length < 1000 && result.status === 200) {
+    return true; // HTTP 200, ale podejrzanie mało treści (placeholder/błąd zamaskowany jako 200)
+  }
+  return false;
+}
+
+// Drop-in zamiennik fetchPageForCrawl() we wszystkich miejscach crawla —
+// Level 1 zostaje pierwszą, tanią próbą; Level 2 dogrywany TYLKO po
+// kwalifikującym niepowodzeniu Level 1 (patrz qualifiesForLevel2). Zwraca ten
+// sam kształt co fetchPageForCrawl(), więc wywołujący kod się nie zmienia.
+async function fetchPageResilient(url, opts) {
+  const level1 = await fetchPageForCrawl(url, opts);
+  if (!qualifiesForLevel2(level1)) return level1;
+  const level2 = await fetchPageHardened(url);
+  return level2.html ? level2 : level1;
+}
+
 // ── Kategorie treści + budżet znaków (decyzja 19.08) ─────────────────────
 // Zamiast dokładać całe strony wg rankingu aż do wyczerpania limitu 12000
 // znaków (przez co np. newsowa strona "spotkanie partnerów 2025" potrafiła
@@ -2447,7 +2598,7 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     // (fetchPageForCrawl — retry+jitter, nigdy nie rzuca wyjątku) zamiast
     // jednorazowego fetchPage(), żeby przejściowe błędy (timeout, throttling)
     // dostały tę samą szansę na retry co reszta crawla (decyzja 20.08).
-    const { html, finalUrl, status: homeStatus, error: homeError, tlsUnverified: homeTlsUnverified, protocolFallback: homeProtocolFallback } = await fetchPageForCrawl(base);
+    const { html, finalUrl, status: homeStatus, error: homeError, tlsUnverified: homeTlsUnverified, protocolFallback: homeProtocolFallback, level: homeFetchLevel } = await fetchPageResilient(base);
     homepageHtml = typeof html === 'string' ? html : '';
     if (homeTlsUnverified) tlsUnverified = true;
     if (homeProtocolFallback) protocolFallback = true;
@@ -2461,7 +2612,7 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
       return {
         terminal: {
           text: '', contacts: { emails: [], phones: [] },
-          diagnostics: [{ url: base, attempt: 1, http_status: homeStatus, raw_length: 0, extracted_length: 0, included: false, reason: homeStatus === 404 ? 'not_found' : 'fetch_error' }],
+          diagnostics: [{ url: base, attempt: 1, http_status: homeStatus, raw_length: 0, extracted_length: 0, included: false, reason: homeStatus === 404 ? 'not_found' : 'fetch_error', fetch_level: homeFetchLevel || 1 }],
           identity: { title: '', h1: '' },
           deterministicFailure: deterministic ? { type: 'tls_dns', reason: homeError } : null,
         },
@@ -2507,11 +2658,11 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     const homeText = extractText($home);
     if (homeText.length > 100) {
       homeSection = `[/ — strona główna]\n${homeText}`;
-      logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: homeText.length, included: true, reason: 'included' });
+      logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: homeText.length, included: true, reason: 'included' , fetch_level: homeFetchLevel || 1 });
     } else if (isBotChallengePage(homepageHtml)) {
       // Nie wpuszczaj tytułu strony-wyzwania ("Proszę czekać…") do promptu jako
       // rzekomej treści firmy — patrz komentarz przy isBotChallengePage().
-      logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: 0, included: false, reason: 'bot_challenge_suspected' });
+      logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: 0, included: false, reason: 'bot_challenge_suspected' , fetch_level: homeFetchLevel || 1 });
     } else {
       const $meta = cheerio.load(homepageHtml);
       const title       = $meta('title').text().trim();
@@ -2520,9 +2671,9 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
       const fallback    = [title, description || ogDesc].filter(Boolean).join(' — ');
       if (fallback.length > 10) {
         homeSection = `[/ — strona główna (meta)]\n${fallback}`;
-        logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: homeText.length, included: true, reason: 'included_meta_fallback' });
+        logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: homeText.length, included: true, reason: 'included_meta_fallback' , fetch_level: homeFetchLevel || 1 });
       } else {
-        logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: homeText.length, included: false, reason: 'too_short' });
+        logDiag({ url: base, attempt: 1, http_status: 200, raw_length: homepageHtml.length, extracted_length: homeText.length, included: false, reason: 'too_short' , fetch_level: homeFetchLevel || 1 });
       }
     }
     fetched.add(effectiveBase);
@@ -2602,9 +2753,9 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     }
     fetched.add(fullHref);
 
-    const { html, status, attempts, error } = await fetchPageForCrawl(fullHref);
+    const { html, status, attempts, error, level: fetchLevel } = await fetchPageResilient(fullHref);
     if (error || !html) {
-      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: status === 404 ? 'not_found' : 'fetch_error' });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: status === 404 ? 'not_found' : 'fetch_error', fetch_level: fetchLevel || 1 });
       await sleepJittered(400);
       return;
     }
@@ -2615,9 +2766,9 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     if (text.length > 100) {
       const label = anchor ? `${path} — ${anchor}` : path;
       fetchedPages.push({ path, anchor, score, text, label, category });
-      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: true, reason: 'included' });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: true, reason: 'included', fetch_level: fetchLevel || 1 });
     } else {
-      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short' });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short', fetch_level: fetchLevel || 1 });
     }
 
     // Tryb szybki nie rozwija się do poziomu 2 — pomiń zbieranie kandydatów.
@@ -2653,9 +2804,9 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     }
     fetched.add(fullHref);
 
-    const { html, status, attempts, error } = await fetchPageForCrawl(fullHref);
+    const { html, status, attempts, error, level: fetchLevel } = await fetchPageResilient(fullHref);
     if (error || !html) {
-      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: 'fetch_error' });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: 'fetch_error', fetch_level: fetchLevel || 1 });
       await sleepJittered(400);
       return;
     }
@@ -2666,9 +2817,9 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     if (text.length > 100) {
       const label = anchor ? `${path} — ${anchor}` : path;
       fetchedPages.push({ path, anchor, score, text, label, category });
-      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: true, reason: 'included' });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: true, reason: 'included', fetch_level: fetchLevel || 1 });
     } else {
-      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short' });
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: text.length, included: false, reason: 'too_short', fetch_level: fetchLevel || 1 });
     }
 
     await sleepJittered(400);
@@ -3480,12 +3631,22 @@ async function enrichOne(prospectId, opts = {}) {
     let linkedinText = '';
     let resolvedLinkedinUrl = company.linkedin_url || null;
     let linkedinStatus = null;
+    // Fallback company_size (poprawka 21.09): JSON-LD numberOfEmployees z tej
+    // SAMEJ strony LinkedIn, już i tak pobieranej wyżej dla innych pól — zero
+    // dodatkowego requestu wyłącznie po zatrudnienie. Użyte niżej TYLKO gdy
+    // import nie dał ani employment_count ani employment_range (patrz
+    // employmentSource przy buildIcpGates) — import zawsze ma pierwszeństwo.
+    let linkedinEmploymentCount = null;
+    let linkedinEmploymentRange = null;
 
     if (opts.processLinkedin) {
       const linkedinFound = await findLinkedinUrl(company);
       if (linkedinFound.url) {
         resolvedLinkedinUrl = linkedinFound.url;
-        linkedinText = await scrapeLinkedin(resolvedLinkedinUrl);
+        const linkedinResult = await scrapeLinkedin(resolvedLinkedinUrl);
+        linkedinText = linkedinResult.text;
+        linkedinEmploymentCount = linkedinResult.employmentCount;
+        linkedinEmploymentRange = linkedinResult.employmentRange;
         linkedinStatus = linkedinText.trim().length > 50 ? 'ok' : 'blocked';
         enrichLog.linkedin = {
           url:    resolvedLinkedinUrl,
@@ -3888,10 +4049,21 @@ async function enrichOne(prospectId, opts = {}) {
     const branchesScope = krsData?.branchesScope ?? null;
 
     // Bramki: b2b z AI bez zmian, company_size WYŁĄCZNIE deterministycznie z
-    // employment_count (patrz calcCompanySizeGate). Ta jedna wartość `gates` jest
-    // używana wszędzie niżej (status, punkty, log, zapis do bazy, zwrot dryRun) —
-    // żadna ścieżka nie czyta już analysis.gates bezpośrednio.
-    const gates = analysis ? buildIcpGates(analysis.gates, company.employment_count, company.employment_range) : null;
+    // employment_count/employment_range (patrz calcCompanySizeGate). Priorytet
+    // źródeł danych o zatrudnieniu (poprawka 21.09): import z CSV zawsze
+    // pierwszy — LinkedIn JSON-LD tylko gdy import nie dał NIC (ani count, ani
+    // range). Dane z importu w company.employment_count/_range NIGDY nie są
+    // nadpisywane wartością z LinkedIn — to tylko efemeryczny fallback na czas
+    // TEGO przebiegu, nie trafia do kolumn importowych w bazie.
+    const hasImportEmployment = company.employment_count != null || company.employment_range != null;
+    const hasLinkedinEmployment = linkedinEmploymentCount != null || linkedinEmploymentRange != null;
+    const effectiveEmploymentCount = hasImportEmployment ? company.employment_count : linkedinEmploymentCount;
+    const effectiveEmploymentRange = hasImportEmployment ? company.employment_range : linkedinEmploymentRange;
+    const employmentSource = hasImportEmployment ? 'import' : (hasLinkedinEmployment ? 'linkedin_jsonld' : 'none');
+    // Ta jedna wartość `gates` jest używana wszędzie niżej (status, punkty, log,
+    // zapis do bazy, zwrot dryRun) — żadna ścieżka nie czyta już analysis.gates
+    // bezpośrednio.
+    const gates = analysis ? buildIcpGates(analysis.gates, effectiveEmploymentCount, effectiveEmploymentRange) : null;
 
     const scoreResult   = calcIcpScore(analysis?.icp_signals);
     const gateStatus    = icpGateStatus(gates);
@@ -3940,13 +4112,17 @@ async function enrichOne(prospectId, opts = {}) {
       icp_total:    totalScore,
       gate_status:  gateStatus,
       // Audyt bramki company_size: wartość finalna (deterministyczna), dane wejściowe
+      // (z importu ORAZ, jeśli użyty, fallback LinkedIn — patrz employmentSource),
       // oraz to, co zwróciło AI — żeby nadpisanie było widoczne w Inspekcji.
       company_size_gate: {
-        value:            gates?.company_size ?? null,
-        employment_count: company.employment_count ?? null,
-        employment_range: company.employment_range ?? null,
-        ai_value:         analysis?.gates?.company_size ?? null,
-        overridden:       (analysis?.gates?.company_size ?? null) !== (gates?.company_size ?? null),
+        value:                     gates?.company_size ?? null,
+        employment_count:          company.employment_count ?? null,
+        employment_range:          company.employment_range ?? null,
+        employment_source:         employmentSource, // 'import' | 'linkedin_jsonld' | 'none'
+        linkedin_employment_count: linkedinEmploymentCount,
+        linkedin_employment_range: linkedinEmploymentRange,
+        ai_value:                  analysis?.gates?.company_size ?? null,
+        overridden:                (analysis?.gates?.company_size ?? null) !== (gates?.company_size ?? null),
       },
       signal_reasoning: analysis?.signal_reasoning || null,
       prompt_tokens:            aiUsage?.prompt_tokens ?? null,
@@ -4210,4 +4386,10 @@ module.exports = {
   // Eksport na potrzeby domknięcia pokrycia testami (20.09, review przed
   // commitem) — obie funkcje czyste, testowalne bez sieci/AI.
   isBotChallengePage, buildLinkAudit,
+  // Level 2 hardened HTTP fallback (21.09) — qualifiesForLevel2 testowalne bez
+  // sieci; fetchPageHardened/fetchPageResilient testowane przez mock axios.
+  qualifiesForLevel2, fetchPageHardened, fetchPageResilient,
+  // Fallback company_size z LinkedIn JSON-LD (21.09) — czysta funkcja
+  // parsująca schema.org QuantitativeValue, testowalna bez sieci.
+  parseNumberOfEmployees,
 };

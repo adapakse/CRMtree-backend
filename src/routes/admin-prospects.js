@@ -137,10 +137,26 @@ function buildFilters(q, tenantId) {
 
 // ── Helper: wykrywanie klucza kolumny po znormalizowanej nazwie ────
 
+// Usuwa polskie znaki diakrytyczne z nagłówka CSV przed porównaniem z listą
+// kandydatów (poprawka 21.09 — case "Wielkość"/"Branża": findColumnKey() nie
+// usuwał diakrytyki wcale, więc np. "wielkość" nigdy nie dopasowywało się do
+// kandydata "wielkosc" — sizeKey wychodził zawsze null, company_size nigdy się
+// nie zapisywał mimo poprawnie wypełnionej kolumny w pliku źródłowym).
+// Unicode NFD + usunięcie combining marks załatwia większość liter (ą/ć/ę/ń/
+// ó/ś/ź/ż dekomponują się na literę bazową + znak diakrytyczny), ale polskie
+// "ł"/"Ł" NIE dekomponują się w NFD (to odrębne punkty kodowe Unicode, nie
+// litera+znak) — stąd jawna podmiana przed normalizacją.
+function deaccentHeader(str) {
+  return String(str)
+    .replace(/[łŁ]/g, 'l')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+}
+
 function findColumnKey(rowKeys, candidates) {
   for (const c of candidates) {
-    const normCandidate = c.toLowerCase().replace(/[\s_.-]/g, '');
-    const found = rowKeys.find(k => k.toLowerCase().trim().replace(/[\s_.-]/g, '') === normCandidate);
+    const normCandidate = deaccentHeader(c).toLowerCase().replace(/[\s_.-]/g, '');
+    const found = rowKeys.find(k => deaccentHeader(k).toLowerCase().trim().replace(/[\s_.-]/g, '') === normCandidate);
     if (found) return found;
   }
   return null;
@@ -1073,3 +1089,8 @@ router.post('/:id/to-lead',
 );
 
 module.exports = router;
+// Eksport na potrzeby testów jednostkowych normalizacji nagłówków CSV (21.09,
+// poprawka "Wielkość"→company_size) — router jest funkcją (Express), można
+// bezpiecznie dopiąć właściwości bez wpływu na app.use('/api/admin/prospects', ...).
+module.exports.findColumnKey = findColumnKey;
+module.exports.deaccentHeader = deaccentHeader;
