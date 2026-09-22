@@ -97,15 +97,19 @@ const ArticleSchema = z.object({
   internal_link_suggestions: z
     .array(z.object({ target_slug: z.string(), anchor_text: z.string() }))
     .max(6),
-  // No `url` field here on purpose — the marketing site has no demo/contact/pricing
-  // page for the model to link to, only /login exists. Letting the model invent one
+  // No `cta` field at all — the marketing site has no demo/contact/pricing page for
+  // the model to link to, only /login exists. Letting the model invent a CTA url
   // (it consistently guessed "/demo", a common SaaS convention that doesn't exist on
-  // this site) produced a dead CTA link on every published article. The real target
-  // is hardcoded in CTA_URL below and used by renderBody() instead.
-  cta: z.object({ text: z.string() }),
+  // this site) produced a dead link on every published article. The real, fixed
+  // footer (login + real contact form on crmtree.pl) is appended by renderBody()
+  // instead, unconditionally, for every article.
 });
 
-const CTA_URL = '/login';
+// Two fixed footer CTAs appended to every article — not model-generated, since
+// there are exactly two real destinations on the site and no reason to let the
+// model guess at either one.
+const LOGIN_CTA = '[Masz już konto? Zaloguj się](/login)';
+const DEMO_CTA = '[Nie masz konta? Zamów demo](https://crmtree.pl/#contact)';
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -193,9 +197,8 @@ function renderBody(article) {
     parts.push('## Zobacz też');
     parts.push(article.internal_link_suggestions.map((l) => `- [${l.anchor_text}](/blog/${l.target_slug})`).join('\n'));
   }
-  if (article.cta?.text) {
-    parts.push(`[${article.cta.text}](${CTA_URL})`);
-  }
+  parts.push(LOGIN_CTA);
+  parts.push(DEMO_CTA);
   return parts.join('\n\n');
 }
 
@@ -279,7 +282,7 @@ async function generateDraft({ outline, keyword }) {
           outline.internal_link_candidates.length
             ? `Kandydaci na linki wewnętrzne:\n${outline.internal_link_candidates.map((l) => `- ${l.target_slug} (${l.reason})`).join('\n')}`
             : 'Brak kandydatów na linki wewnętrzne — zostaw internal_link_suggestions puste.',
-          'Zwróć kompletny artykuł: title, slug (kebab-case, ASCII), meta_title (≤60 znaków), meta_description (100-160 znaków), primary_keyword, sections (z pełną treścią w content_markdown), faq (3-5 pozycji), internal_link_suggestions, cta.',
+          'Zwróć kompletny artykuł: title, slug (kebab-case, ASCII), meta_title (≤60 znaków), meta_description (100-160 znaków), primary_keyword, sections (z pełną treścią w content_markdown), faq (3-5 pozycji), internal_link_suggestions.',
         ].join('\n\n'),
       },
     ],
