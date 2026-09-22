@@ -24,6 +24,7 @@ const db         = require('../config/database');
 const logger     = require('../utils/logger');
 const gusRegon   = require('./gusRegonService');
 const { normalizeWebsiteUrl, normalizeLinkedinUrl } = require('../utils/urlUtils');
+const tenantIcpConfigService = require('./tenantIcpConfigService');
 
 const KRS_BASE        = 'https://api-krs.ms.gov.pl/api/krs';
 const DEEPSEEK_API    = 'https://api.deepseek.com/chat/completions';
@@ -105,6 +106,15 @@ const LINK_SCORES = [
   // score=0 → link filtrowany PRZED dotarciem do budżetu treści, mimo że
   // był na homepage z anchorem "Biuro Certyfikacji Wyrobów").
   { pattern: /certyfikacj|akredytacj|procedura|zasady.wsp[oó]lpracy|jak.to.dziala|jak.dzia[lł]a|krok.po.kroku/i, score: 8 },
+  // Sekcja "dla firm"/"przedsiębiorstwa"/bankowość korporacyjna — dotąd
+  // nierozpoznawana żadnym wzorcem (audyt 22.09, case Alior Bank: link menu
+  // głównego "Przedsiębiorstwa" → /przedsiebiorstwa.html, z realnym opisem
+  // "Centra Bankowości Korporacyjnej... profesjonalna opieka doradców",
+  // scorował 0/1 i przegrywał o miejsce w top kandydatów z dziesiątkami
+  // stron niezwiązanych z B2B, mimo że extractInternalLinks() go poprawnie
+  // odkrywał — to była luka w SCORINGU linków, nie w discovery ani w
+  // extractText()). Generalizowalne — nie tylko dla banków.
+  { pattern: /przedsiebiorstw|korporacyjn|dla.{0,3}firm|\bbiznes\w*/i, score: 8 },
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -238,6 +248,11 @@ const GENERIC_NAME_WORDS = new Set([
   'serwis', 'service', 'uslugi',
   // Spójniki
   'i', 'z', 'w', 'na', 'do', 'dla', 'oraz', 'a',
+  // "Euro" jako pierwszy człon nazwy jest zbyt generyczny, żeby samodzielnie
+  // potwierdzać domenę (strong_brand_identity V3, 21.09) — case Euro-Net →
+  // euro.com.pl dawał fałszywe dopasowanie tokenu "euro" do dowolnej domeny
+  // zawierającej ten ciąg.
+  'euro',
 ]);
 
 // Rdzenie polskich przymiotników opisujących RODZAJ działalności (nie markę),
@@ -272,18 +287,24 @@ function isGenericNameWord(word) {
   return GENERIC_NAME_WORDS.has(word) || GENERIC_NAME_STEMS.some(stem => word.startsWith(stem));
 }
 
-// Dopasowuje najbardziej charakterystyczne słowo nazwy firmy (pierwsze PO
-// odfiltrowaniu GENERIC_NAME_WORDS/GENERIC_NAME_STEMS) do title/h1 strony —
-// ten sam wzorzec co guessDomainsFromName()/guessFallbackDomains() używają
-// do zgadywania domen.
-function nameTokensMatch(companyName, titleText) {
-  if (!companyName || !titleText) return false;
+// Najbardziej charakterystyczne słowo nazwy firmy (pierwsze PO odfiltrowaniu
+// GENERIC_NAME_WORDS/GENERIC_NAME_STEMS) — współdzielone przez nameTokensMatch
+// (identity-check) i strong_brand_identity V3 (evaluateBrandIdentityFallback,
+// niżej), żeby obie ścieżki liczyły token tej samej firmy dokładnie tak samo.
+function firstDistinctiveNameToken(companyName) {
   const norm  = normalizeName(companyName);
   const words = norm.split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !isGenericNameWord(w));
-  if (!words.length) return false;
-  const firstWord  = words[0];
-  const titleNorm  = normalizeName(titleText);
-  return titleNorm.includes(firstWord);
+  return words[0] || null;
+}
+
+// Dopasowuje najbardziej charakterystyczne słowo nazwy firmy do title/h1
+// strony — ten sam wzorzec co guessDomainsFromName()/guessFallbackDomains()
+// używają do zgadywania domen.
+function nameTokensMatch(companyName, titleText) {
+  if (!companyName || !titleText) return false;
+  const firstWord = firstDistinctiveNameToken(companyName);
+  if (!firstWord) return false;
+  return normalizeName(titleText).includes(firstWord);
 }
 
 // Drugi, niezależny od nazwy sygnał tożsamości — TYLKO dane z oficjalnego
@@ -378,6 +399,40 @@ function checkDomainIdentity({ nip, text, title, company, krsData, gusData }) {
   if (secondary.strong) return { verified: true, reason: 'strong_registry_address', nameHit, secondary, evidence };
   if (nameHit && secondary.positive) return { verified: true, reason: 'name_plus_registry_address', nameHit, secondary, evidence };
   return { verified: false, reason: 'insufficient_evidence', nameHit, secondary, evidence };
+}
+
+// ── Monotonic identity resolution (21.09, po benchmarku 50 firm) ───────────
+// Problem znaleziony w praktyce: identityCheck.verified===true ustawione przez
+// runIdentityFallback LUB evaluateBrandIdentityFallback (V3) było CICHO
+// gubione, gdy kod po dokończeniu pełnego crawla przeliczał tożsamość jeszcze
+// raz na szerszej treści (computeIdentityCheck(scraped)) i ta druga próba nie
+// znalazła TEGO SAMEGO dowodu — np. bo dowodowa podstrona odpadła z finalnego
+// tekstu przez limit global_12k_truncation (case PSE), albo bo dowód V3
+// (brand-consistency) w ogóle nie jest czymś, co checkDomainIdentity umie
+// wykryć (case Pepco/Kanał 6 — zawsze "insufficient_evidence" na recompute,
+// bo ta funkcja nie zna V3). Poprzedni fix (`identityFallback?.verified`)
+// naprawiał to tylko dla STRICT fallbacku, nie dla V3 — stąd ten ogólny,
+// nazwany mechanizm zamiast kolejnego doraźnego warunku.
+//
+// Zasada (wymóg biznesowy, nie tylko techniczny): sam BRAK dowodu w kolejnym,
+// bardziej ograniczonym materiale NIE jest dowodem, że wcześniejsza
+// weryfikacja była błędna — więc `insufficient_evidence` NIGDY nie cofa
+// wcześniejsze verified:true. Cofnąć je może WYŁĄCZNIE odkrycie NOWEGO,
+// twardego, pozytywnego dowodu konfliktu (inny podmiot/adres/numer
+// rejestrowy) — te powody ZAWSZE wygrywają, niezależnie od tego, co ustalił
+// wcześniejszy etap. Priorytet: hard conflict > wcześniejsze verified >
+// insufficient_evidence.
+const HARD_IDENTITY_CONFLICT_REASONS = new Set([
+  'foreign_address_conflict',
+  'legal_entity_conflict',
+  'foreign_entity_or_country_conflict',
+  'different_entity_brand',
+]);
+
+function resolveIdentityMonotonically(previous, next) {
+  if (next?.reason && HARD_IDENTITY_CONFLICT_REASONS.has(next.reason)) return next; // twardy konflikt zawsze wygrywa, nawet nad wcześniejszym verified
+  if (previous?.verified && !next?.verified) return previous; // sam brak dowodu (insufficient_evidence i podobne) nie cofa wcześniejszej weryfikacji
+  return next; // next.verified===true (potwierdzenie/mocniejszy dowód), albo previous i tak nie było verified
 }
 
 // ── Identity fallback: dane prawne firmy poza homepage (20.09, case Alior Bank) ──
@@ -541,7 +596,350 @@ async function runIdentityFallback({ company, krsData, gusData, crawlState, titl
     if (f.status === 'ok') sources.push({ label: f.url, text: f.text });
   }
   const verdict = evaluateIdentityFallback({ company, krsData, gusData, title, sources });
-  return { attempted: true, ...verdict, pages_checked: pagesChecked };
+  // raw_sources (pełny tekst, nie tylko metadane z evaluateIdentityFallback) —
+  // reużywane przez evaluateBrandIdentityFallback (strong_brand_identity V3,
+  // niżej), żeby nie pobierać tych samych stron drugi raz.
+  return { attempted: true, ...verdict, pages_checked: pagesChecked, raw_sources: sources };
+}
+
+// ── strong_brand_identity V3 (21.09, case Pepco/Euro Freight/BSH-TROX) ──────
+// Konserwatywny, DODATKOWY fallback uruchamiany WYŁĄCZNIE gdy runIdentityFallback
+// powyżej zwrócił verified:false, reason:'insufficient_evidence' (NIE przy
+// foreign_address_conflict — ten wciąż wygrywa bez zmian, patrz miejsce wywołania
+// w enrichOne). Domena bez NIP/KRS/REGON/adresu w treści może i tak być
+// prawidłowa (marka nie publikuje danych rejestrowych na stronie marketingowej —
+// case Pepco), ale precyzja jest priorytetem: V1 (samo dopasowanie nazwy) miał
+// prawie 0% recall po zaostrzeniu, V2 (punktowy brand-consistency bez sprawdzania
+// obcego podmiotu) dawał realne ryzyko false positive (Euro Freight Logistics →
+// eurofreight.com, strona cypryjskiej firmy o tej samej nazwie branżowej). V3
+// dokłada DWA twarde negatywne sprawdzenia PRZED jakimkolwiek pozytywnym
+// scoringiem marki — dopiero gdy oba przejdą czysto, liczone są punkty.
+//
+// Kolejność (żadna z tych trzech gałęzi nie zależy od kolejnej):
+//   1. legal_entity_conflict            — NIP/KRS/REGON/pełna nazwa prawna
+//      INNEGO polskiego podmiotu w treści.
+//   2. foreign_entity_or_country_conflict — Tier A (twardy: strona
+//      identyfikacyjna/JSON-LD/obcy numer rejestrowy) / Tier B (miękki: kraj w
+//      title/treści, wymaga POLISH_LINK_EVIDENCE żeby NIE ograniczyć wyniku).
+//   2b. different_entity_brand          — marka/nazwa prawna innego podmiotu
+//      (z zagranicznym LUB polskim sufiksem prawnym) powtórzona w ≥2 niezależnych
+//      miejscach (title + treść), przy ZEROWYM śladzie własnej marki na stronie
+//      (case BSH Sprzęt Gospodarstwa Domowego → bsh.pl, który dziś faktycznie
+//      serwuje treść TROX SE — title "Homepage | TROX SE Homepage" powtórzone na
+//      wielu podstronach, żadna nie wspomina BSH).
+//   3. brand consistency scoring        — punkty za domenę/title-h1/wielostronicową
+//      spójność marki/​o-nas-kontakt, próg wyższy dla source='resolver' (domena
+//      zgadnięta algorytmicznie nie może potwierdzić się sama podobieństwem
+//      nazwy — wymaga silniejszego dowodu niż CSV/manual).
+//   4. group/global portal cap          — title/H1 sugerujący portal
+//      grupy/marki globalnej (Europe/Global/International/Worldwide) BEZ
+//      dowodu powiązania z polską spółką ogranicza wynik do unresolved, nawet
+//      jeśli punkty formalnie przekroczyłyby próg (case Follett Europe Polska →
+//      folletteurope.com, title "Europe | Follett Ice" — prawdopodobnie
+//      poprawne, ale bez potwierdzenia nie ryzykujemy false positive).
+
+const BRAND_DOWNGRADE_CTX_RX = /partner|klient|dostawc|wykonawc|dystrybutor|sponsor|wsp[oó][łl]prac|zleceniodawc|kontrahent/i;
+// Reużywa pierwszy (najsilniejszy) wzorzec z IDENTITY_PAGE_RANKS — te same
+// ścieżki, którymi kieruje się już wybór stron do fallbacku. "Strona
+// identyfikacyjna" = ranga 0 (impressum/nota prawna/dane spółki) ORAZ ranga 1
+// (polityka prywatności/regulamin/RODO/terms) — dane operatora/właściciela
+// strony równie często są w regulaminie/polityce prywatności co w stopce
+// prawnej (case Ardix Pl → ardix.pl/polityka-prywatnosci: adres belgijskiego
+// biura). Sama ranga 0 to za wąski zakres — bez rangi 1 ten dowód był
+// niewidoczny dla foreign_entity_or_country_conflict/legal_entity_conflict,
+// co dawało fałszywe brand_verified (znalezione przy walidacji benchmarku V3
+// na realnej implementacji, 21.09).
+const BRAND_IDENTITY_PAGE_RX = new RegExp(`${IDENTITY_PAGE_RANKS[0].source}|${IDENTITY_PAGE_RANKS[1].source}`, 'i');
+const BRAND_ONAS_KONTAKT_PATH_RX = /o[-_.]?nas|o[-_.]?firmie|o[-_.]?spolce|about|kontakt|contact/i;
+const PL_LEGAL_NAME_RX = /([A-ZŁŚŻŹĆŃÓĄĘ][\włśżźćńóąęĄĘŁŃÓŚŹŻ.-]*(?:\s+[A-ZŁŚŻŹĆŃÓĄĘ][\włśżźćńóąęĄĘŁŃÓŚŹŻ.-]*){0,4})\s+(Sp\.\s*z\s*o\.?\s*o\.?|S\.A\.|Sp\.\s*j\.|S\.K\.A\.)/g;
+const FOREIGN_LEGAL_NAME_RX = /([A-ZÄÖÜ][\wÄÖÜäöüß&.-]*(?:\s+[A-ZÄÖÜ][\wÄÖÜäöüß&.-]*){0,4})\s+(SE|AG|GmbH(?:\s*&\s*Co\.?\s*KG)?|Ltd\.?|PLC|LLC|Inc\.?|S\.p\.A\.|B\.V\.|N\.V\.)\b/g;
+const FOREIGN_REGISTRY_NUMBER_RX = /Companies\s*House|Company\s*(?:Registration|Reg\.?)\s*(?:Number|No\.?)|HRB\s*[0-9]|Handelsregister|I[ČC]O[:\s]*[0-9]{8}|VAT\s*(?:number|no\.?|id)?[:\s]*(?:GB|DE|CZ|SK|NL|FR|IT|ES|CY|IE|LT|RO|HU|AT)[0-9A-Z]{6,}/i;
+const FOREIGN_COUNTRY_NAME_RX = /\b(Cyprus|Cypr(?:u|em|owi)?|Germany|Niemc(?:y|ach|iec|zech)|Deutschland|United Kingdom|UK|Great Britain|United States|USA|France|Francj(?:a|i)|Italy|W[łl]och(?:y|ach)|Spain|Hiszpani(?:a|i)|Netherlands|Holandi(?:a|i)|Czech Republic|Czech(?:y|ach)|Slovakia|S[łl]owacj(?:a|i)|Switzerland|Szwajcari(?:a|i)|Ukraine|Ukrain(?:a|ie)|Lithuania|Litw(?:a|ie)|Ireland|Irlandi(?:a|i)|Belgium|Belgi(?:a|i)|Sweden|Szwecj(?:a|i)|Denmark|Dani(?:a|i)|Norway|Norwegi(?:a|i)|Hungary|W[eę]gr(?:y|ach|zech)|Romania|Rumuni(?:a|i)|China|Chin(?:y|ach)|Austria|Austri(?:a|i)|Portugal|Portugali(?:a|i))\b/;
+const FOREIGN_JSONLD_COUNTRY_RX = /addressCountry"?\s*:\s*"?([A-Za-z]{2,24})"?/gi;
+const SHIPPING_CONTEXT_RX = /wysy[łl]k\w*|dostaw\w*|shipping|deliver\w*|dor[eę]cz\w*|obs[łl]uguj[ea]my|dzia[łl]amy w|we (?:serve|operate|ship|deliver)|export\w*|eksport\w*|klient\w* z ca[łl]ego [śs]wiata|worldwide/i;
+const POLISH_LINK_EVIDENCE_RX = /\bPolsk(?:a|i|ie|iej|iego)\b|\bPoland\b|oddzia[łl]\s*w\s*Polsce|filia\s*w\s*Polsce|local\s*office.{0,20}Poland|subsidiary.{0,20}Poland|europe\s*branch|biuro\s*w\s*Polsce|przedstawicielstwo\s*w\s*Polsce/i;
+const GROUP_PORTAL_HINT_RX = /\bEurope\b|\bGlobal\b|\bInternational\b|\bWorldwide\b|\bGroup\b/i;
+const LEGAL_BLOCK_WINDOW = 250;
+
+// "Ten sam blok danych firmy" (spec 21.09, po fałszywych odrzuceniach K+L/
+// ZBUiAND/Bemo Motors w walidacji V2→V3): jeśli w promieniu LEGAL_BLOCK_WINDOW
+// wokół znalezionego KRS występuje TAKŻE nasz własny NIP lub REGON, a w tym
+// samym oknie NIE ma innej jednoznacznej pełnej nazwy prawnej — uznajemy KRS za
+// nasz, nawet gdy prospect.krs_number jest nieznany (null) i nie da się
+// porównać wprost. Bez tego trzy realne firmy były fałszywie odrzucane
+// wyłącznie z powodu luki w naszych danych, nie realnego konfliktu.
+function isOwnRegistryBlock({ company, gusData, text, matchIndex }) {
+  const windowText = text.slice(Math.max(0, matchIndex - LEGAL_BLOCK_WINDOW), matchIndex + LEGAL_BLOCK_WINDOW);
+  const ownNipHit = nipFoundInText(company.nip, windowText);
+  const ownRegonHit = regonFoundInText(gusData?.regon, windowText);
+  if (!ownNipHit && !ownRegonHit) return false;
+  // "Inna jednoznaczna pełna nazwa prawna" = WIĘCEJ NIŻ JEDNA odrębna nazwa w
+  // tym samym oknie — NIE porównanie tokenu znalezionej nazwy z
+  // firstDistinctiveNameToken(company.company_name). Powód (znaleziony przy
+  // walidacji V2→V3, case K+L/ZBUiAND): firma na własnej stronie często
+  // przedstawia się skrótem/akronimem ("ZBUiAND Sp. z o.o.", "K+L Biuro
+  // Handlowe Polska"), którego żadna tokenizacja pełnej nazwy rejestrowej z
+  // bazy nie odtworzy — porównanie token-do-tokenu fałszywie odrzucało takie
+  // firmy jako "inny podmiot". Własny NIP/REGON w oknie już zakotwiczają blok
+  // jako nasz; DOKŁADNIE JEDNA nazwa w całym oknie (niezależnie od jej
+  // brzmienia) nie może jednocześnie być "naszą" i "czyjąś inną" — taki zbieg
+  // okoliczności (ten sam NIP+REGON, ale nazwa innej firmy) praktycznie nie
+  // występuje. Dwie LUB WIĘCEJ różnych nazw w oknie nadal blokują inferencję.
+  const distinctTokens = new Set();
+  let m;
+  PL_LEGAL_NAME_RX.lastIndex = 0;
+  while ((m = PL_LEGAL_NAME_RX.exec(windowText)) !== null) {
+    const foundToken = firstDistinctiveNameToken(m[1]);
+    if (foundToken) distinctTokens.add(foundToken);
+  }
+  return distinctTokens.size <= 1;
+}
+
+// NIP/KRS/REGON INNEGO podmiotu w treści (nie naszego) — z wykluczeniem
+// kontekstu partner/klient/dostawca (wzmianka o kontrahencie nie jest
+// konfliktem tożsamości) i own-registry-block inference dla KRS (patrz wyżej).
+function findLegalEntityConflict({ company, krsData, gusData, sources }) {
+  const ourKrsDigits = String(krsData?.krsNumber || '').replace(/\D/g, '').replace(/^0+/, '');
+  const ourToken = firstDistinctiveNameToken(company.company_name);
+  const LABELED_RX = {
+    nip: /NIP[:\s]{0,10}([0-9][0-9\s.-]{8,13}[0-9])/gi,
+    krs: /KRS[:\s]{0,10}(\d[\d\s.-]{4,12}\d)/gi,
+    regon: /REGON[:\s]{0,10}(\d[\d\s.-]{7,16}\d)/gi,
+  };
+  for (const src of sources) {
+    const text = src.text || '';
+    const isIdentityPage = BRAND_IDENTITY_PAGE_RX.test(src.label || '');
+    for (const [label, rx] of Object.entries(LABELED_RX)) {
+      rx.lastIndex = 0;
+      let m;
+      while ((m = rx.exec(text)) !== null) {
+        const digits = m[1].replace(/\D/g, '').replace(/^0+/, '');
+        if (digits.length < 6) continue;
+        if (label === 'nip' && nipFoundInText(company.nip, m[0])) continue;
+        if (label === 'regon' && regonFoundInText(gusData?.regon, m[0])) continue;
+        if (label === 'krs') {
+          if (ourKrsDigits && digits === ourKrsDigits) continue; // znamy własny KRS i się zgadza
+          if (!ourKrsDigits && isOwnRegistryBlock({ company, gusData, text, matchIndex: m.index })) continue; // nieznany własny KRS, ale ten sam blok danych
+        }
+        const around = text.slice(Math.max(0, m.index - 100), m.index + 100);
+        if (BRAND_DOWNGRADE_CTX_RX.test(around)) continue;
+        return {
+          conflict: true, type: `differing_${label}`, page: src.label, evidence: m[0].trim(),
+          context: around.replace(/\s+/g, ' ').trim(),
+        };
+      }
+    }
+    if (isIdentityPage) {
+      let m;
+      PL_LEGAL_NAME_RX.lastIndex = 0;
+      while ((m = PL_LEGAL_NAME_RX.exec(text)) !== null) {
+        const foundToken = firstDistinctiveNameToken(m[1]);
+        if (foundToken && foundToken !== ourToken) {
+          const around = text.slice(Math.max(0, m.index - 100), m.index + 100);
+          if (BRAND_DOWNGRADE_CTX_RX.test(around)) continue;
+          return {
+            conflict: true, type: 'differing_legal_name_on_identity_page', page: src.label, evidence: m[0].trim(),
+            context: around.replace(/\s+/g, ' ').trim(),
+          };
+        }
+      }
+    }
+  }
+  return { conflict: false };
+}
+
+function extractForeignCountriesFromJsonLd(text) {
+  const found = [];
+  FOREIGN_JSONLD_COUNTRY_RX.lastIndex = 0;
+  let m;
+  while ((m = FOREIGN_JSONLD_COUNTRY_RX.exec(text)) !== null) found.push(m[1]);
+  return found;
+}
+
+// Tier A (twardy, blokuje brand scoring): obcy kraj na stronie identyfikacyjnej,
+// JSON-LD addressCountry != PL, lub jawny obcy numer rejestrowy. Tier B (miękki):
+// kraj wspomniany w title/treści ogólnej poza kontekstem wysyłki/eksportu —
+// zwraca dodatkowo polishLinkEvidence, decyzję (cap czy nie) podejmuje wywołujący.
+function findForeignEntityOrCountryConflict({ sources, homepageTitle }) {
+  for (const src of sources) {
+    const text = src.text || '';
+    for (const country of extractForeignCountriesFromJsonLd(text)) {
+      if (!/^(PL|POLAND|POLSKA)$/i.test(country.trim())) {
+        return { tier: 'A', type: 'jsonld_foreign_address_country', page: src.label, evidence: country };
+      }
+    }
+    const registryMatch = FOREIGN_REGISTRY_NUMBER_RX.exec(text);
+    if (registryMatch) {
+      const around = text.slice(Math.max(0, registryMatch.index - 100), registryMatch.index + 100);
+      return { tier: 'A', type: 'foreign_registry_number', page: src.label, evidence: registryMatch[0], context: around.replace(/\s+/g, ' ').trim() };
+    }
+  }
+  // Nazwa obcego kraju (bez numeru rejestrowego/JSON-LD) — ZAWSZE Tier B,
+  // NIGDY twardy Tier A, nawet na stronie identyfikacyjnej (polityka
+  // prywatności/regulamin/impressum). Powód (znaleziony przy walidacji
+  // benchmarku V3 na realnych 87 rekordach, 21.09): globalne firmy bardzo
+  // często podają adres centrali grupy w polityce prywatności RODO — nawet na
+  // stronie lokalnej/europejskiej spółki-córki (case Follett Europe Polska →
+  // follettice.com/privacy-policy: adres centrali w Easton, PA, USA — to
+  // NIE dowodzi, że strona nie należy do polskiej spółki, tylko że operator
+  // grupy jest amerykański, co jest normalne dla globalnej marki). Sama nazwa
+  // kraju w tekście to więc dowód SŁABSZY niż numer rejestrowy/JSON-LD — stąd
+  // zawsze przechodzi przez ten sam mechanizm co Tier B niżej: wymaga braku
+  // POLISH_LINK_EVIDENCE, żeby cokolwiek zablokować, i wtedy tylko ogranicza
+  // do unresolved (nie odrzuca na twardo).
+  const haystacks = [{ label: 'title', text: homepageTitle || '' }, ...sources];
+  for (const h of haystacks) {
+    const countryMatch = FOREIGN_COUNTRY_NAME_RX.exec(h.text || '');
+    if (countryMatch) {
+      const around = (h.text || '').slice(Math.max(0, countryMatch.index - 100), countryMatch.index + 100);
+      if (!SHIPPING_CONTEXT_RX.test(around)) {
+        const polishLinkEvidence = POLISH_LINK_EVIDENCE_RX.test(homepageTitle || '') || sources.some(s => POLISH_LINK_EVIDENCE_RX.test(s.text || ''));
+        return { tier: 'B', type: 'foreign_country_weak_mention', page: h.label, evidence: countryMatch[0], context: around.replace(/\s+/g, ' ').trim(), polishLinkEvidence };
+      }
+    }
+  }
+  return null;
+}
+
+// Marka/nazwa prawna INNEGO podmiotu (z sufiksem prawnym, polskim lub obcym)
+// powtórzona w title ORAZ na ≥1 osobnej podstronie (mocny dowód — pojedyncza
+// wzmianka NIE wystarcza), przy CAŁKOWITYM braku śladu własnej marki na
+// żadnej sprawdzonej stronie (bez tego warunku ryzykowne — case: legalna
+// wzmianka o zagranicznej centrali obok własnej marki, patrz Cartonplast).
+function findDifferentEntityBrand({ company, sources, homepageTitle }) {
+  const ourToken = firstDistinctiveNameToken(company.company_name);
+  const ourBrandFoundAnywhere = !!ourToken && (
+    tokenInText(ourToken, homepageTitle) || sources.some(s => tokenInText(ourToken, s.text))
+  );
+  if (ourBrandFoundAnywhere) return null;
+
+  const hits = new Map(); // token -> Set(location labels)
+  const registerHit = (rxSource, label, text) => {
+    const rx = new RegExp(rxSource.source, 'g');
+    let m;
+    while ((m = rx.exec(text)) !== null) {
+      const around = text.slice(Math.max(0, m.index - 100), m.index + 100);
+      if (BRAND_DOWNGRADE_CTX_RX.test(around)) continue;
+      const token = firstDistinctiveNameToken(m[1]);
+      if (!token || token === ourToken) continue;
+      if (!hits.has(token)) hits.set(token, { locations: new Set(), evidence: m[0].trim(), context: around.replace(/\s+/g, ' ').trim() });
+      hits.get(token).locations.add(label);
+    }
+  };
+  registerHit(FOREIGN_LEGAL_NAME_RX, 'title', homepageTitle || '');
+  registerHit(PL_LEGAL_NAME_RX, 'title', homepageTitle || '');
+  for (const src of sources) {
+    registerHit(FOREIGN_LEGAL_NAME_RX, src.label, src.text || '');
+    registerHit(PL_LEGAL_NAME_RX, src.label, src.text || '');
+  }
+  for (const [token, info] of hits.entries()) {
+    if (info.locations.size >= 2) {
+      return { type: 'different_entity_brand', token, evidence: info.evidence, context: info.context, locations: [...info.locations] };
+    }
+  }
+  return null;
+}
+
+function tokenInText(token, text) {
+  return !!token && normalizeName(text || '').includes(token);
+}
+
+function looksLikeGroupPortalWithoutPolishLink({ homepageTitle, sources }) {
+  if (!GROUP_PORTAL_HINT_RX.test(homepageTitle || '')) return false;
+  const polishLink = POLISH_LINK_EVIDENCE_RX.test(homepageTitle || '') || sources.some(s => POLISH_LINK_EVIDENCE_RX.test(s.text || ''));
+  return !polishLink;
+}
+
+// Punktacja spójności marki — domena/title-h1(połączone, jak już są dostępne
+// na tym etapie)/wielostronicowa obecność marki/o-nas-kontakt. Próg wyższy dla
+// source='resolver' (domena zgadnięta algorytmicznie), bo tam samo podobieństwo
+// nazwy nie może być jedynym potwierdzeniem — wymaga JEDNOCZEŚNIE dopasowania
+// domeny i title/h1.
+function scoreBrandConsistency({ company, candidateUrl, homepageTitle, sources }) {
+  const token = firstDistinctiveNameToken(company.company_name);
+  let hostname = '';
+  try { hostname = normalizeName(new URL(candidateUrl).hostname.replace(/^www\./, '')); } catch { /* zły URL — brak dopasowania domeny */ }
+
+  const domainStrong = !!token && (hostname === token || hostname.startsWith(token));
+  const domainWeak = !!token && !domainStrong && hostname.includes(token);
+  const titleMatch = tokenInText(token, homepageTitle);
+  const pagesWithBrand = sources.filter(s => tokenInText(token, s.text) && (s.text || '').length >= 300);
+  const onasKontaktHit = sources.some(s => BRAND_ONAS_KONTAKT_PATH_RX.test(s.label || '') && (s.text || '').length >= 1000 && tokenInText(token, s.text));
+  const maxChars = sources.length ? Math.max(...sources.map(s => (s.text || '').length)) : 0;
+
+  let points = 0;
+  if (domainStrong) points += 2; else if (domainWeak) points += 1;
+  if (titleMatch) points += 3;
+  if (pagesWithBrand.length >= 2) points += 3;
+  if (onasKontaktHit) points += 2;
+
+  return { token, points, detail: { domainStrong, domainWeak, titleMatch, multiPageBrandCount: pagesWithBrand.length, onasKontaktHit, maxChars } };
+}
+
+// Punkt wejścia — wołany z enrichOne WYŁĄCZNIE gdy strict identity fallback
+// (runIdentityFallback, powyżej) zwrócił verified:false z powodem
+// 'insufficient_evidence' (foreign_address_conflict nadal wygrywa bez zmian,
+// patrz kolejność w enrichOne). Zwraca jeden z czterech werdyktów:
+//   verified:true  → brand_verified (dowód pozytywny wystarczający)
+//   verified:false, reason='legal_entity_conflict'/'foreign_entity_or_country_conflict'/
+//     'different_entity_brand' → jawny konflikt, silniejszy sygnał niż zwykłe
+//     insufficient_evidence (surowane do identity_check.reason w enrichOne)
+//   verified:false, reason='insufficient_evidence' → bez zmian względem stanu
+//     przed V3, ewentualnie z cap_reason gdy punkty by wystarczyły, ale
+//     zadziałało ograniczenie (Tier B bez polish link, portal grupy/marki)
+function evaluateBrandIdentityFallback({ company, krsData, gusData, candidateUrl, candidateSource, homepageTitle, sources }) {
+  if (!sources || !sources.length) {
+    return { verified: false, reason: 'insufficient_evidence', decided_by: 'no_sources_for_brand_fallback', positive_evidence: null, conflict_evidence: null, cap_reason: null };
+  }
+
+  const legalConflict = findLegalEntityConflict({ company, krsData, gusData, sources });
+  if (legalConflict.conflict) {
+    return {
+      verified: false, reason: 'legal_entity_conflict', decided_by: `legal_entity_conflict@${legalConflict.page}`,
+      positive_evidence: null, conflict_evidence: legalConflict, cap_reason: null,
+    };
+  }
+
+  const foreignConflict = findForeignEntityOrCountryConflict({ sources, homepageTitle });
+  if (foreignConflict && foreignConflict.tier === 'A') {
+    return {
+      verified: false, reason: 'foreign_entity_or_country_conflict', decided_by: `foreign_entity_or_country_conflict@${foreignConflict.page}`,
+      positive_evidence: null, conflict_evidence: foreignConflict, cap_reason: null,
+    };
+  }
+
+  const differentBrand = findDifferentEntityBrand({ company, sources, homepageTitle });
+  if (differentBrand) {
+    return {
+      verified: false, reason: 'different_entity_brand', decided_by: `different_entity_brand@${differentBrand.locations.join(',')}`,
+      positive_evidence: null, conflict_evidence: differentBrand, cap_reason: null,
+    };
+  }
+
+  const { points, detail } = scoreBrandConsistency({ company, candidateUrl, homepageTitle, sources });
+  const threshold = candidateSource === 'resolver' ? 9 : 7;
+  const hardRequiredForResolver = candidateSource === 'resolver' ? (detail.domainStrong || detail.domainWeak) && detail.titleMatch : true;
+  let verified = detail.maxChars >= 1000 && points >= threshold && hardRequiredForResolver;
+
+  let capReason = null;
+  if (verified && foreignConflict && foreignConflict.tier === 'B' && !foreignConflict.polishLinkEvidence) {
+    verified = false;
+    capReason = `foreign_entity_or_country_conflict tier B (${foreignConflict.evidence}) bez POLISH_LINK_EVIDENCE`;
+  }
+  if (verified && looksLikeGroupPortalWithoutPolishLink({ homepageTitle, sources })) {
+    verified = false;
+    capReason = 'group/global portal hint (Europe/Global/International/Worldwide w title) bez dowodu powiazania z polska spolka';
+  }
+
+  return {
+    verified,
+    reason: verified ? 'brand_verified' : 'insufficient_evidence',
+    decided_by: verified ? `brand_verified@points_${points}_${threshold}` : 'brand_consistency_below_threshold',
+    positive_evidence: verified ? { token: detail.token, points, threshold, detail } : null,
+    conflict_evidence: null,
+    cap_reason: capReason,
+    points, threshold,
+  };
 }
 
 // Zaufanie do domeny jest WYŁĄCZNIE jednorazowe, per KONKRETNE wywołanie
@@ -657,29 +1055,13 @@ function parseKrsDate(dateStr) {
   return `${m[3]}-${m[2]}-${m[1]}`;
 }
 
-// ── Sygnały ICP jako dane (decyzja 19.08.2026, artefakt "Sygnały Prospektów") ─
-// Wagi: wysoka 10 pkt, średnia 5 pkt. Rozszerzone o 8 z 11 sygnałów artefaktu —
-// sygnały 9-11 (rekrutacja/raportowanie/call center) wymagają portali z ofertami
-// pracy (Pracuj.pl), nie są jeszcze podpięte, patrz pamięć projektu.
-// Wyjątek 18.09: dzial_handlowy podniesiony do 15 pkt (decyzja biznesowa), żeby
-// maksymalny możliwy score wynosił równo 100 zamiast 95.
-const ICP_SIGNALS = [
-  { id: 'dzial_handlowy',        label: 'Dział handlowy',                                    tier: 'wysoka', points: 15, promptKey: 'field_sales_team' },
-  { id: 'zlozony_proces_sprzedazy', label: 'Złożony proces sprzedaży / indywidualna wycena',  tier: 'wysoka', points: 10, promptKey: 'custom_quote_process' },
-  { id: 'konsultacja_demo',      label: 'Konsultacja, demo lub analiza potrzeb',              tier: 'wysoka', points: 10, promptKey: 'consultation_demo_needs_analysis' },
-  { id: 'opieka_nad_klientem',   label: 'Dedykowana opieka nad klientem B2B',                 tier: 'wysoka', points: 10, promptKey: 'dedicated_customer_care_b2b' },
-  { id: 'przetargi',             label: 'Przetargi / dział ofertowania',                      tier: 'wysoka', points: 10, promptKey: 'tender_bidding_department' },
-  { id: 'rozproszona_struktura', label: 'Rozproszona struktura sprzedaży / wiele oddziałów',  tier: 'srednia', points: 5,  promptKey: 'distributed_sales_structure' },
-  { id: 'siec_partnerow',        label: 'Sieć partnerów / dealerów',                          tier: 'srednia', points: 5,  promptKey: 'partner_dealer_network' },
-  {
-    id: 'ecommerce_b2b', label: 'Sprzedaż e-commerce (B2B)', tier: 'srednia', points: 5, promptKey: 'ecommerce_b2b',
-    // Liczy się TYLKO razem z "Dział handlowy" albo "Opieka nad klientem B2B" —
-    // czysty samoobsługowy sklep bez ludzi po stronie sprzedaży sam w sobie
-    // nie świadczy o potrzebie CRM.
-    requiresAnyOf: ['dzial_handlowy', 'opieka_nad_klientem'],
-  },
-];
-const ICP_MAX_RAW_SCORE = ICP_SIGNALS.reduce((sum, s) => sum + s.points, 0); // 70
+// ── Sygnały ICP — DYNAMICZNE per tenant od ETAPU B (2026-09) ──────────────
+// Dawny hardkodowany ICP_SIGNALS (8 sygnałów, promptKey→bool) został zastąpiony
+// przez tenant_icp_signals/tenantIcpConfigService.getActiveConfig() — patrz
+// buildSystemPrompt()/calcIcpScore() niżej. Domyślna konfiguracja CRMtree
+// (DEFAULT_SIGNALS w tenantIcpConfigService.js) to 1:1 kopia dawnych 8 sygnałów
+// — te same label/definicje/punkty/zależności, suma punktów aktywnych sygnałów
+// nadal wynosi dokładnie 70 (gates 20 + bonus 10 + signals 70 = max 100).
 
 // Bonusowe punkty (decyzja 19.08, potwierdzone na spotkaniu: 5 pkt za każdy) —
 // wykrywane regexem po SUROWYM HTML strony głównej (script tagi), nie po
@@ -713,12 +1095,49 @@ function icpGateStatus(gates) {
 // "pass" — wcześniej bramki tylko kwalifikowały/dyskwalifikowały (icpGateStatus)
 // i nie wpływały na icp_score. "fail"/"unknown" = 0 pkt za tę bramkę (bez
 // dodatkowej kary — kara za brak kwalifikacji to już samo disqualified/needs_review).
+// Decyzja 2026-09-22: gate'y NIE dodają już punktów do icp_score (patrz enrichOne())
+// — ICP_GATE_POINTS/ICP_GATE_DEFS/ICP_MAX_GATE_SCORE zostają wyłącznie informacyjne
+// (icp_gate_points w bazie, panel Inspekcji), disqualified/needs_review i tak już
+// dziś nigdzie realnie nie blokuje pipeline'u (żadne query nie filtruje po
+// icp_gate_status — sprawdzone), więc to nie jest zmiana zachowania, tylko
+// odcięcie wkładu punktowego.
 const ICP_GATE_POINTS = 10;
 const ICP_GATE_DEFS = [
   { id: 'b2b', label: 'Sprzedaż B2B (nie do konsumenta)' },
   { id: 'company_size', label: 'Minimum 15 pracowników' },
 ];
-const ICP_MAX_GATE_SCORE = ICP_GATE_DEFS.length * ICP_GATE_POINTS; // 20
+const ICP_MAX_GATE_SCORE = ICP_GATE_DEFS.length * ICP_GATE_POINTS; // 20 — informacyjne, nie wchodzi do icp_score
+
+// Wymagana suma punktów AKTYWNYCH sygnałów tenanta — decyzja 2026-09-22: icp_score
+// to WYŁĄCZNIE suma aktywnych sygnałów (gates/bonus zostają informacyjne, patrz
+// komentarz przy ICP_GATE_POINTS/ICP_BONUS_SIGNALS), więc sygnały same muszą
+// sumować się do pełnego sufitu — stąd STAŁE 100, nie hybryda z gates/bonus jak
+// wcześniej (100 − gates(20) − bonus(10) = 70, gdzie wyłączenie jednego sygnału
+// bez ręcznej rekompensacji gdzie indziej psuło sumę i blokowało publikację na
+// zawsze — admin nie miał jak po prostu "wyłączyć sygnał i mieć to z głowy").
+// Ten sam mechanizm LIVE/PUBLISHED zostaje bez zmian (patrz
+// tenantIcpConfigService.bumpRevisionAndMaybePublish): wyłączenie/dodanie
+// sygnału w LIVE publikuje się dopiero, gdy suma AKTYWNYCH sygnałów znów
+// wynosi dokładnie ICP_REQUIRED_SIGNALS_MAX_SCORE — do tego czasu enrichment
+// dalej używa ostatniej poprawnej PUBLISHED wersji.
+const ICP_BONUS_MAX_SCORE = ICP_BONUS_SIGNALS.reduce((sum, b) => sum + b.points, 0); // 10 — informacyjne, nie wchodzi do icp_score
+const ICP_TOTAL_MAX_SCORE = 100;
+const ICP_REQUIRED_SIGNALS_MAX_SCORE = ICP_TOTAL_MAX_SCORE; // 100 — signals alone must reach the full ceiling
+
+// Ocena configu ICP tenanta względem wymaganej sumy sygnałów (tenantIcpConfigService
+// sam tego nie wie — patrz komentarz przy getActiveConfig() w tamtym pliku).
+// icpConfig: wynik tenantIcpConfigService.getActiveConfig().
+function evaluateIcpConfigValidity(icpConfig) {
+  const signalsSum = icpConfig.maxScore;
+  return {
+    signalsSum,
+    signalsMax: ICP_REQUIRED_SIGNALS_MAX_SCORE,
+    isValid: signalsSum === ICP_REQUIRED_SIGNALS_MAX_SCORE,
+    // Decyzja 2026-09-22: gates/bonus nie dodają już punktów do icp_score, więc
+    // finalMaxScore = wyłącznie signalsSum (dawniej: + ICP_MAX_GATE_SCORE + ICP_BONUS_MAX_SCORE).
+    finalMaxScore: signalsSum,
+  };
+}
 
 // company_size to TWARDA bramka liczona w backendzie z employment_count (dane z
 // importu) — NIGDY z odpowiedzi AI. Powód (audyt Alior Bank, 20.09): rekord bez
@@ -810,25 +1229,65 @@ function calcIcpGatePoints(gates) {
   return { points, breakdown };
 }
 
-// Kalkuluje icp_score deterministycznie z sygnałów zwróconych przez AI —
-// nie ufamy score'owi liczonemu przez sam model, tak jak poprzednio.
-function calcIcpScore(signals) {
-  const rawHits = {};
-  for (const sig of ICP_SIGNALS) rawHits[sig.id] = !!signals?.[sig.promptKey];
+// Kalkuluje icp_score deterministycznie z sygnałów zwróconych przez AI — nie
+// ufamy score'owi liczonemu przez sam model, tak jak poprzednio. Od ETAPU B
+// dynamiczne: `aiSignals` to zwalidowana tablica {key,value,reasoning} z
+// odpowiedzi AI (key = stabilny biznesowy identyfikator sygnału, NIE techniczne
+// UUID — patrz analiza przy buildSignalPromptBlock), `tenantSignals` to AKTYWNA
+// konfiguracja tenanta (tenantIcpConfigService.getActiveConfig().activeSignals).
+// AI nigdy nie przydziela punktów — tylko true/false per key, backend dolicza
+// sig.points deterministycznie. rawHits/requires_any_of nadal operują na
+// sig.id (technicznym UUID z tenant_icp_signals) — to wewnętrzna, DB-owa
+// relacja między sygnałami tego samego tenanta, niezwiązana z kontraktem AI —
+// więc tylko ŹRÓDŁO wartości hit zmienia się z aiValueById na aiValueByKey,
+// reszta logiki suppresji zostaje identyczna. breakdown[].id celowo używa
+// sig.key (nie sig.id/UUID) — to ten sam string, jaki dawny kod trzymał jako
+// ICP_SIGNALS[].id (np. "dzial_handlowy"), więc frontend i historyczne dane
+// prospektów nadal się mapują bez zmian.
+function calcIcpScore(aiSignals, tenantSignals) {
+  const aiValueByKey = new Map();
+  if (Array.isArray(aiSignals)) {
+    for (const entry of aiSignals) {
+      if (entry && typeof entry === 'object') aiValueByKey.set(entry.key, entry.value === true);
+    }
+  }
 
+  const rawHits = {};
+  for (const sig of tenantSignals) rawHits[sig.id] = aiValueByKey.get(sig.key) === true;
+
+  // Decyzja 2026-09-22: requires_any_of przestaje wpływać na scoring (sygnały są
+  // niezależne) — `suppressed` zostaje w breakdown jako pole (zawsze false), bo
+  // frontend (admin-prospects.component.ts) je czyta, nie zmieniam kształtu odpowiedzi.
   let raw = 0;
   const breakdown = [];
-  for (const sig of ICP_SIGNALS) {
-    let hit = rawHits[sig.id];
-    let suppressed = false;
-    if (hit && sig.requiresAnyOf && !sig.requiresAnyOf.some(depId => rawHits[depId])) {
-      hit = false;
-      suppressed = true;
-    }
+  for (const sig of tenantSignals) {
+    const hit = rawHits[sig.id];
     if (hit) raw += sig.points;
-    breakdown.push({ id: sig.id, label: sig.label, tier: sig.tier, points: sig.points, hit, suppressed });
+    breakdown.push({ id: sig.key, label: sig.label, tier: sig.tier, points: sig.points, hit, suppressed: false });
   }
-  return { raw, capped: Math.min(100, raw), maxPossible: ICP_MAX_RAW_SCORE, breakdown };
+  const maxPossible = tenantSignals.reduce((sum, s) => sum + s.points, 0);
+  return { raw, capped: Math.min(100, raw), maxPossible, breakdown };
+}
+
+// Rekonstruuje enrichLog.claude.signal_reasoning z analysis.signals[] (kontrakt
+// {key,value,reasoning} — patrz buildJsonContractSection) — kluczowane po
+// sig.key, żeby getSignalReasoning() we frontendzie (fallback r[s.reasoningKey]
+// || r[s.key]) trafiało. Poprawka 22.09: poprzednia (inline) wersja dopasowywała
+// po `s.id === entry.id`, ale AI nigdy nie zwraca `entry.id` (kontrakt to
+// `key`, nie `id` — dokładnie to samo pole, po którym już poprawnie liczy
+// calcIcpScore() wyżej) — dopasowanie zawsze zawodziło, signal_reasoning
+// zawsze wychodziło puste `{}`, mimo że AI realnie zwracało uzasadnienie dla
+// każdego sygnału (true I false).
+function buildSignalReasoningMap(aiSignals, tenantSignals) {
+  if (!Array.isArray(aiSignals)) return null;
+  return Object.fromEntries(
+    aiSignals
+      .map(entry => {
+        const sig = tenantSignals.find(s => s.key === entry.key);
+        return sig ? [sig.key, entry.reasoning ?? null] : null;
+      })
+      .filter(Boolean)
+  );
 }
 
 // Miękkie obniżenia priorytetu (decyzja 19.08) — NIE dyskwalifikują firmy.
@@ -882,22 +1341,26 @@ async function loadIcpBlacklistSettings(tenantId) {
 // Cały algorytm naliczania icp_score jako dane — pokazywane wprost w zakładce
 // "Zasady naliczania punktów" w Inspekcji (decyzja 18.09, audyt Prospektów:
 // dotąd admin widział TYLKO wynik i evidence z AI, nigdzie w UI nie było
-// samej definicji wag/formuły/blacklisty). Buduje JSON BEZPOŚREDNIO z tych
-// samych stałych (ICP_SIGNALS/ICP_GATE_DEFS/ICP_BONUS_SIGNALS) i tej samej
-// funkcji (loadIcpBlacklistSettings) których używają calcIcpScore/
-// calcIcpGatePoints/calcIcpBonus/matchesIcpBlacklist — nie jest to osobno
-// utrzymywana kopia, więc nie może się rozjechać z tym co faktycznie liczy
-// enrichOne(). Blacklista jest per-tenant, stąd tenantId jest wymagany.
+// samej definicji wag/formuły/blacklisty). Sekcja `signals` czyta PUBLISHED
+// (nie LIVE) konfigurację tenanta — dokładnie tę, której realnie używa
+// enrichOne()/calcIcpScore() — celowo, żeby ten widok nigdy nie pokazywał
+// nieopublikowanego draftu admina jako "obowiązujących zasad". Gates/bonus/
+// blacklist zostają globalne (patrz tenantIcpConfigService.js — V2).
 async function getIcpScoringRules(tenantId) {
   const blacklist = await loadIcpBlacklistSettings(tenantId);
-  const bonusMaxPoints = ICP_BONUS_SIGNALS.reduce((sum, b) => sum + b.points, 0);
+  const icpConfig = await tenantIcpConfigService.getPublishedConfig(tenantId);
+  const validity = evaluateIcpConfigValidity(icpConfig);
 
   return {
-    formula: 'icp_score = clamp(0, 100, suma_sygnałów + suma_bonusów + punkty_bramek − kara_blacklisty)',
+    // Decyzja 2026-09-22: icp_score = wyłącznie suma punktów TRAFIONYCH aktywnych
+    // sygnałów (minus kara blacklisty) — gates i bonusy NIE wchodzą już do wyniku,
+    // zostają wyłącznie informacyjne (patrz notes niżej i totalScore w enrichOne()).
+    formula: 'icp_score = clamp(0, 100, suma punktów trafionych aktywnych sygnałów − kara_blacklisty)',
     gates: {
       points_per_pass: ICP_GATE_POINTS,
       max_points: ICP_MAX_GATE_SCORE,
-      note: 'Bramka "fail" dyskwalifikuje firmę niezależnie od score (icp_gate_status). "unknown" nie dyskwalifikuje, trafia do needs_review. ' +
+      note: 'Informacyjne — NIE wchodzą do icp_score (decyzja 2026-09-22). "fail" nadal ustawia icp_gate_status=disqualified, ' +
+        'ale to sama etykieta/status, nic realnie nie blokuje w pipeline (żadne query nie filtruje po icp_gate_status). "unknown" trafia do needs_review. ' +
         'company_size: minimum 15 pracowników, liczone deterministycznie w backendzie na podstawie danych employment_count/employment_range z importu (AI go nie ustala); ' +
         'brak danych, nieczytelna wartość lub zakres przecinający próg 15 (np. 10-19) = unknown. Zakres w całości poniżej 15 (np. 1-9) = fail, w całości od 15 wzwyż (np. 20-49, 250+) = pass. ' +
         'b2b: oceniane przez AI na podstawie treści strony.',
@@ -909,20 +1372,25 @@ async function getIcpScoringRules(tenantId) {
       })),
     },
     signals: {
-      max_points: ICP_MAX_RAW_SCORE,
-      note: 'AI zwraca wyłącznie true/false per sygnał (nigdy punktów) — punkty przypisuje deterministycznie backend, patrz calcIcpScore().',
-      definitions: ICP_SIGNALS.map(s => ({
-        id: s.id,
+      max_points: validity.signalsSum,
+      max_points_expected: validity.signalsMax,
+      is_valid: validity.isValid,
+      is_default_config: icpConfig.isDefault,
+      note: 'AI zwraca wyłącznie true/false per sygnał (nigdy punktów) — punkty przypisuje deterministycznie backend, patrz calcIcpScore(). Konfiguracja dynamiczna per tenant (tenant_icp_signals). Jedyny składnik icp_score poza karą blacklisty.',
+      definitions: icpConfig.activeSignals.map(s => ({
+        id: s.key,
+        technical_id: s.id,
         label: s.label,
         tier: s.tier,
         points: s.points,
-        prompt_key: s.promptKey,
-        requires_any_of: s.requiresAnyOf || null,
+        ai_definition: s.ai_definition,
+        short_description: s.short_description,
+        requires_any_of: s.requires_any_of || null,
       })),
     },
     bonus_signals: {
-      max_points: bonusMaxPoints,
-      note: 'Wykrywane regexem po surowym HTML strony głównej — nie wołają AI.',
+      max_points: ICP_BONUS_MAX_SCORE,
+      note: 'Informacyjne — NIE wchodzą do icp_score (decyzja 2026-09-22). Wykrywane regexem po surowym HTML strony głównej — nie wołają AI.',
       definitions: ICP_BONUS_SIGNALS.map(b => ({ id: b.id, label: b.label, points: b.points })),
     },
     blacklist: {
@@ -930,7 +1398,7 @@ async function getIcpScoringRules(tenantId) {
       penalty: blacklist.penalty,
       checked_sources: ['company_name', 'industry', 'pkd_description', 'gusData.pkdMain', 'gusData.pkdCodes[].nazwa'],
     },
-    max_possible_score: ICP_MAX_RAW_SCORE + ICP_MAX_GATE_SCORE + bonusMaxPoints,
+    max_possible_score: validity.finalMaxScore,
   };
 }
 
@@ -2382,7 +2850,11 @@ const CONTENT_CATEGORIES = [
   // W. Śliwiński — content_limit mimo trafienia w top rankingu linków).
   // Dodane 19.09: "strefa klienta"/"panel klienta".
   { id: 'sklep_b2b',            reserved: 1500, pattern: /sklep|shop|e-?commerce|portal.?b2b|konto.?klient|strefa.?klient|panel.?klient|koszyk|checkout|\bb2b\b|hurt\w*|wsp[oó][lł]prac\w*|platforma.{0,20}\b(b2b|zakup\w*|klient\w*)\b/i },
-  { id: 'oferta',               reserved: 2000, pattern: /ofert|us[lł]ug|produkt|rozwiazani|wycen|konsultacj|doradztw|dob[oó]r|solution|service|zapytani\w*.?ofert|request.?for.?quot|\brfq\b|certyfikacj|akredytacj|procedura|zasady.wsp[oó]lpracy/i },
+  // "przedsiebiorstw|korporacyjn|dla firm|biznes" dopisane 22.09 razem z
+  // odpowiadającym wzorcem w LINK_SCORES (case Alior Bank) — bez tego strona
+  // po pobraniu i tak trafiłaby do 'other' zamiast dostać zarezerwowany
+  // budżet znaków obok pokrewnej treści ofertowej.
+  { id: 'oferta',               reserved: 2000, pattern: /ofert|us[lł]ug|produkt|rozwiazani|wycen|konsultacj|doradztw|dob[oó]r|solution|service|zapytani\w*.?ofert|request.?for.?quot|\brfq\b|certyfikacj|akredytacj|procedura|zasady.wsp[oó]lpracy|przedsiebiorstw|korporacyjn|dla.{0,3}firm|\bbiznes\w*/i },
   { id: 'o_nas_zespol',         reserved: 3000, pattern: /o[.-]?nas|o[.-]?firmie|about|zesp[oó][lł]|team|kim.jestesmy|historia/i },
   { id: 'realizacje_przetargi', reserved: 1000, pattern: /realizacj|referencj|case.stud|przetarg|zam[oó]wien\w*.publiczn/i },
   { id: 'praca',                reserved: 2500, pattern: /praca|kariera|jobs|career|rekrutacj|dolacz|join/i },
@@ -3024,7 +3496,11 @@ async function continueCrawlToFull(baseUrl, crawlState) {
 
 // Statyczne instrukcje systemowe — DeepSeek cache'uje prefix kontekstu automatycznie.
 // Dane firmy trafiają wyłącznie do wiadomości user (buildUserMessage), nie tutaj.
-const SYSTEM_PROMPT = `Jesteś analitykiem oceniającym, czy firma B2B pasuje do profilu klienta systemu CRM
+// Nagłówek promptu WSPÓLNY dla wszystkich tenantów (decyzja przed ETAPEM B) —
+// ogólne instrukcje, zasada "nie zgaduj", bramki, format odpowiedzi. Sekcja
+// SYGNAŁÓW jest doklejana dynamicznie (buildSystemPrompt) z konfiguracji
+// tenanta, patrz tenantIcpConfigService.js. Bramki zostają globalne w V1.
+const PROMPT_STATIC_HEADER = `Jesteś analitykiem oceniającym, czy firma B2B pasuje do profilu klienta systemu CRM
 (CRMtree) — firmy z formalnym działem handlowym i złożonym, relacyjnym procesem sprzedaży,
 nie sklepu samoobsługowego czy zakupu impulsowego.
 
@@ -3037,8 +3513,9 @@ na podstawie samej branży czy wielkości firmy. Przy każdym sygnale rozróżni
 Jeśli dowodu brak: bramki → "unknown", sygnały → false. Nie zgaduj w żadną stronę.
 ═══════════════════════════════════════
 
-BRAMKI (status: "pass" / "fail" / "unknown") — sprawdzane przed sygnałami, bez PASS na obu
-firma się nie kwalifikuje niezależnie od liczby trafionych sygnałów:
+BRAMKI (status: "pass" / "fail" / "unknown") — WYŁĄCZNIE informacyjne. NIE wpływają na wynik
+(icp_score), NIE dyskwalifikują firmy i NIE zmieniają oceny żadnego sygnału — oceń każdy
+sygnał niezależnie od wyniku bramek, nawet gdy bramka wychodzi "fail" albo "unknown":
 
 b2b: sprzedaż firma → firma, nie do konsumenta.
   Główny dowód: wprost opisana obsługa firm/klientów biznesowych — "dla firm", "dla biznesu",
@@ -3052,284 +3529,97 @@ company_size: minimum 15 pracowników. Użyj DANYCH HANDLOWYCH Z BAZY KLIENTA (z
 
 ═══════════════════════════════════════
 SYGNAŁY (true/false) — każdy z nich to niezależne dopasowanie strukturalne (FIT) do
-profilu CRMtree, nie sygnał "dobrego momentu":
+profilu CRMtree, nie sygnał "dobrego momentu". Poniżej lista sygnałów TEGO KLIENTA —
+inny klient może mieć inną listę.`;
 
-field_sales_team ("Dział handlowy"):
-  RÓWNOWAŻNE nazwy tej samej struktury — traktuj jako identyczny dowód, nie tylko dosłowne
-  "dział handlowy": "dział handlowy", "dział sprzedaży", "sales team", "sales department",
-  "zespół sprzedaży", "przedstawiciele handlowi" jako nazwana sekcja/nagłówek.
-  Główny dowód: jawnie nazwany dział/zespół sprzedażowy (nagłówek podstrony, sekcja "Nasz
-  zespół sprzedaży", nazwa działu w strukturze firmy, pod dowolną z powyższych równoważnych
-  nazw) — WYSTARCZA nawet przy JEDNEJ widocznej, nazwanej osobie pod tym nagłówkiem, bo
-  dowodem jest nazwana struktura organizacyjna, nie liczba osób. LUB: podstrona
-  zespołu/kontaktu BEZ nazwanego nagłówka działu, ale z co najmniej 2-3 nazwanymi osobami
-  pełniącymi role stricte handlowe (przedstawiciel handlowy, sprzedawca, account manager —
-  nie zarząd) — to alternatywny, słabszy dowód używany tylko gdy nagłówka działu brak.
-  NIE wystarcza: jedna nazwana osoba na stanowisku dyrektorskim ("Dyrektor Handlowy",
-  "Dyrektor ds. Handlowych", "Sales Director") BEZ nazwanego działu/zespołu obok niej i bez
-  innych wymienionych handlowców — to może być jedna osoba w zarządzie, nie dowód na
-  istnienie sformalizowanego działu.
-  Drugorzędne wsparcie: sam adres sprzedaz@/sales@ — może być zwykłą skrzynką ogólną.
+// Blok promptu dla JEDNEGO sygnału tenanta — [key: ...] mówi AI dokładnie jakiej
+// wartości "key" użyć w odpowiedzi JSON (signals[].key musi być tym samym stringiem).
+// Świadomie KEY, nie techniczne UUID (analiza przed wdrożeniem, patrz komentarz
+// przy validateAiSignalsResponse): key jest krótszy (mniej tokenów promptu i
+// odpowiedzi razy N sygnałów), czytelny semantycznie, i tak samo niezmienny jak
+// id — model nie ma żadnego powodu operować na UUID. Treść pod etykietą to
+// ai_definition z tenant_icp_signals, wklejana bez zmian (admin edytuje ją w
+// przyszłej zakładce Tenant → Enrichment/ICP).
+function buildSignalPromptBlock(signal) {
+  return `"${signal.label}" [key: ${signal.key}]:\n  ${signal.ai_definition}`;
+}
 
-custom_quote_process ("Złożony proces sprzedaży / indywidualna wycena"):
-  Relacyjny, projektowy lub negocjacyjny model PROCESU SPRZEDAŻY, nie zakup impulsowy.
-  KLUCZOWA GRANICA: cena musi być ustalana INDYWIDUALNIE, PO stronie firmy, na podstawie
-  potrzeb/specyfikacji konkretnego klienta — nie może być z góry jawnie podana jako stała
-  kwota za standardowy produkt/usługę. Sam fakt sprzedaży B2B, posiadania formularza
-  kontaktowego lub możliwości "skontaktowania się ze sprzedażą" NIE wystarcza, jeśli nie
-  towarzyszy temu informacja, że wycena/oferta jest przygotowywana indywidualnie.
-  Główny dowód: fraza CTA LUB jej funkcjonalny odpowiednik (wszystkie równoważne) —
-  "zapytaj o ofertę", "poproś o wycenę", "przygotujemy ofertę", "indywidualna oferta",
-  "wycena indywidualna", "wyślij zapytanie ofertowe", "RFQ", "skontaktuj się z handlowcem",
-  LUB opis, że cena/oferta jest ustalana PO poznaniu potrzeb/specyfikacji klienta
-  (indywidualna kalkulacja), nie z góry określona, LUB firma AKTYWNIE DOBIERA/REKOMENDUJE
-  konkretny wariant/parametry/konfigurację na podstawie zgłoszonych potrzeb klienta (np.
-  "indywidualne dobranie [produktu] o niestandardowej pojemności/wielkości/zakresie") —
-  taki dobór ZAWSZE poprzedza indywidualną kalkulację ceny, więc liczy się nawet bez słowa
-  "wycena"/"oferta" wprost obok niego, LUB CTA sformułowane jako propozycja DOPASOWANA do
-  zgłoszenia klienta (np. "dowiedz się, jakie rozwiązania możemy Ci zaproponować",
-  "napisz do nas, przygotujemy coś dla Ciebie") — nie sam neutralny link "kontakt", ale
-  sformułowanie sugerujące, że odpowiedź będzie dopasowana do konkretnego zgłoszenia.
-  ZWRÓĆ FALSE:
-    - jawna, stała cena konkretnego produktu/usługi (cennik, cena jednostkowa przy
-      produkcie w sklepie/katalogu) — to standardowa sprzedaż, nie indywidualna wycena,
-      NAWET jeśli produkt jest sprzedawany firmom;
-    - format "od X zł" przy produkcie/usłudze/pokoju/pakiecie — to publiczny cennik z
-      progami cenowymi, nie dowód indywidualnej kalkulacji dla konkretnego klienta;
-    - standardowa, jawnie podana cena pokoju/usługi/pakietu (np. cennik hotelowy,
-      konsumencki cennik pakietów) — nawet jeśli firma osobno obsługuje też klientów
-      biznesowych, sam TEN dowód tego nie potwierdza. UWAGA: jeśli firma ma OSOBNY, jawny
-      cennik dla JEDNEJ usługi (np. standardowy nocleg) ORAZ oddzielnie opisany proces
-      ofertowy dla INNEJ, odrębnej usługi (np. eventy/konferencje B2B, zamówienia
-      produkcyjne) — oceniaj dowód dla tej DRUGIEJ usługi niezależnie; jawny cennik jednej
-      usługi nie dyskwalifikuje automatycznie dowodu dla innej;
-    - sam kontakt do działu sprzedaży / formularz kontaktowy / "skontaktuj się z nami" BEZ
-      jawnej informacji, że oferta/cena jest przygotowywana indywidualnie dla klienta —
-      to zwykły kanał kontaktu, nie dowód procesu ofertowego.
-  Drugorzędne wsparcie (NIE wystarcza samo): sam brak jawnego cennika bez którejś z
-  powyższych fraz — brak ceny sam w sobie nie jest dowodem złożonego procesu sprzedaży.
-
-consultation_demo_needs_analysis ("Konsultacja, demo lub analiza potrzeb"):
-  Sprzedaż wymaga rozmowy przed zakupem, nie samoobsługowego checkoutu — łapie też firmy
-  z jawnym cennikiem, które mimo to sprzedają przez rozmowę (częste w SaaS/usługach).
-  RÓWNOWAŻNE określenia tego samego etapu procesu — traktuj jako ten sam dowód: konsultacja,
-  demo, dobór rozwiązania, analiza potrzeb, dobór techniczny, doradztwo przedsprzedażowe,
-  projektowanie pod klienta/indywidualnego klienta.
-  Główny dowód (dosłowna fraza LUB funkcjonalny odpowiednik — oba liczą się tak samo):
-    - dosłowne: "umów demo", "zamów prezentację", "bezpłatna konsultacja", "dobór rozwiązania";
-    - przypisany doradca/opiekun/dyrektor regionalny opisany jako doradztwo PRZEDSPRZEDAŻOWE,
-      projektowe lub techniczne PRZY DOBORZE ROZWIĄZANIA (np. "Doradcy Twojego projektu"),
-      nawet bez słowa "konsultacja";
-    - formularz zbierający szczegółowe parametry rozwiązania/zamówienia (RFQ, zapytanie
-      ofertowe z polami technicznymi), nie sam formularz kontaktowy ogólnego typu;
-    - sprzedaż oparta na indywidualnym projekcie technicznym/architektonicznym/inżynierskim,
-      gdzie analiza wymagań klienta jest jawnie opisanym etapem procesu (nie samym typem
-      działalności — patrz zastrzeżenie niżej);
-    - doradztwo opisane jako DOSTOSOWANE do indywidualnych wymagań klienta (np. "doradztwo
-      w [obszarze]" połączone w tym samym opisie z "dostosowujemy usługi do indywidualnych
-      wymagań klienta") — to funkcjonalny odpowiednik doradztwa przedsprzedażowego, nawet
-      jeśli samo słowo "doradztwo" bez tego dopełnienia byłoby zbyt ogólne.
-  Drugorzędne wsparcie (nie wystarcza samo): ogólne hasło "indywidualne podejście do klienta"
-  bez opisu konkretnego procesu, etapu lub osoby.
-  NIE LICZY SIĘ (mimo słowa "doradca"/"konsultacja" w tekście):
-    - doradca/opiekun ds. likwidacji szkód, ubezpieczeniowy, reklamacji lub gwarancji — to
-      obsługa posprzedażowa/roszczeniowa, nie doradztwo przy wyborze zakupu;
-    - serwisant, doradca serwisowy/techniczny wsparcia posprzedażowego, opiekun serwisu —
-      to wsparcie techniczne dla już kupionego produktu, nie etap sprzedaży;
-    - ogólny, poradnikowy tekst nieopisujący WŁASNEGO procesu tej firmy (np. blogowa porada
-      "na co zwrócić uwagę kupując X" bez odniesienia do konkretnej usługi/osoby/etapu w tej
-      firmie) — to nie jest dowód konsultacji sprzedażowej, tylko treść informacyjna;
-    - sama produkcja/wykonanie "na wymiar", "na życzenie klienta", "według
-      dokumentacji/wytycznych/specyfikacji klienta" — to opis MOŻLIWOŚCI PRODUKCYJNYCH
-      (elastyczność wytwarzania), NIE dowód rozmowy doradczej, i NIE liczy się automatycznie
-      ani dla tego sygnału, ani dla custom_quote_process;
-    - elastyczność produkcyjna i "możliwość personalizacji" produktu/usługi same w sobie —
-      to opis ZDOLNOŚCI firmy, nie opis PROCESU rozmowy z klientem przed zakupem;
-    - realizacja projektu/dokumentacji DOSTARCZONEJ JUŻ przez klienta (firma tylko wykonuje
-      to, co klient sam zaprojektował/określił) — brak tu żadnego etapu doboru/doradztwa PO
-      stronie badanej firmy;
-    - fraza w stylu "uwzględniamy wymagania klienta w produkcji"/"od koncepcji, przez
-      prototyp, aż po finalną produkcję"/"wspólnie stworzymy rozwiązania"/"projekt od
-      pomysłu do realizacji" — to WCIĄŻ tylko opis zdolności produkcyjnej lub ogólne hasło
-      o współpracy, dopóki nie jest OSOBNO opisany etap ROZMOWY/DORADZTWA/ANALIZY POTRZEB
-      PRZED złożeniem zamówienia (kto, kiedy, w jakiej formie ustala z klientem właściwe
-      rozwiązanie) — sam fakt, że produkt powstaje "pod klienta" lub hasło o wspólnej pracy
-      nad projektem, nigdy nie wystarcza samo w sobie bez opisanego etapu doboru/doradztwa;
-    - sam formularz kontaktowy ogólnego typu (imię, e-mail, wiadomość) — to nie jest dowód
-      konsultacji/analizy potrzeb, nawet jeśli firma go używa jako jedynego kanału kontaktu.
-  ZASTRZEŻENIE: nie ustawiaj true wyłącznie na podstawie branży/typu działalności ani z
-  domysłu "każdy proces projektowy wymaga analizy potrzeb" — musi być konkretny tekstowy
-  sygnał z listy powyżej, nie sama inferencja z rodzaju firmy. Jeśli jedyny dostępny dowód
-  to opis elastyczności/personalizacji PRODUKCJI (bez osobno opisanego etapu rozmowy
-  doradczej przed zamówieniem), zwróć false.
-  Jeśli to ten sam fragment tekstu co dowód dla custom_quote_process, oceń oba sygnały
-  niezależnie, ale nie licz jednego zdania jako dwóch niezależnych, mocniejszych dowodów.
-
-distributed_sales_structure ("Rozproszona struktura sprzedaży / wiele oddziałów"):
-  Zespół lub sieć sprzedaży fizycznie rozproszona terytorialnie, WYŁĄCZNIE WŁASNA (ten sam
-  podmiot/firma — nie osobne podmioty, nawet powiązane kapitałowo). Oddział/przedstawicielstwo
-  tej samej firmy ZA GRANICĄ nadal się liczy jako własne — to NIE jest automatycznie inny
-  podmiot tylko dlatego, że działa w innym kraju (nie wymagaj polskiego NIP/KRS, żeby uznać
-  zagraniczny oddział za "własny" — firma może mieć oddział/przedstawicielstwo bez odrębnej
-  polskiej rejestracji).
-  Główny dowód: oficjalne oddziały, biura regionalne lub placówki firmy w kilku miastach —
-  to WYSTARCZA samo w sobie, nawet bez podanych nazwisk osób przy adresach. Przypisani
-  regionalni handlowcy/przedstawiciele zwiększają pewność, ale NIE są warunkiem koniecznym.
-  JAK ODRÓŻNIĆ własny zagraniczny oddział od spółki z grupy (częsta pomyłka): oddział/
-  przedstawicielstwo TEJ SAMEJ firmy jest opisany jako część JEJ struktury (np. "Oddział
-  Niemcy", "przedstawicielstwo w Hiszpanii" pod tą samą nazwą firmy) — to liczy się jako
-  własne. Jeśli natomiast lokalizacja w innym kraju ma WŁASNĄ, ODRĘBNĄ nazwę firmy z lokalną
-  formą prawną (np. "[Nazwa]-Werk GmbH", "[Nazwa] Kft.", "[Nazwa] S.L.", "[Nazwa] AG", "[Nazwa]
-  Sp. z o.o." obok głównej "[Nazwa] S.A.") — to jest OSOBNY PODMIOT GRUPY KAPITAŁOWEJ, nie
-  własny oddział badanej spółki, NAWET jeśli działa pod tą samą marką/nazwą i jest wymieniony
-  na tej samej stronie kontaktowej. Sama przynależność do międzynarodowej grupy/sieci spółek
-  o wspólnej marce NIE wystarcza — lista krajów lub spółek grupy to nie własna sieć oddziałów
-  badanej firmy.
-  NIE liczy się (to nie własne oddziały tej firmy): lokalizacje realizacji/projektów u
-  klientów, siedziby klientów, adresy zewnętrznych partnerów/dealerów/niezależnych
-  dystrybutorów (nawet zagranicznych, nawet z "recognized distributor" w opisie), ani
-  spółki-siostry/spółki z tej samej grupy kapitałowej (to osobne podmioty prawne — rozpoznaj
-  je po odrębnej nazwie firmy/formie prawnej, patrz wyżej).
-
-ecommerce_b2b ("Sprzedaż e-commerce (B2B)"):
-  Realny sklep/panel zamówieniowy w domenie firmy skierowany do klientów BIZNESOWYCH, nie
-  zwykły sklep konsumencki (D2C) z możliwością wpisania NIP-u na fakturze.
-  Główny dowód: sklep lub panel logowania w domenie firmy z co najmniej jedną cechą B2B —
-  ceny netto/"dla firm", wymagana rejestracja firmy/NIP przy zakładaniu konta, rabaty
-  ilościowe/hurtowe dla stałych klientów biznesowych, jawna nazwa "sklep B2B"/"panel B2B"/
-  "strefa klienta firmowego" — POD WARUNKIEM że tekst potwierdza realną funkcję zamówieniową
-  (logowanie/konto/koszyk/składanie zamówień), nie tylko nazwę.
-  NIE wystarcza: zwykły sklep detaliczny (ceny brutto, zakupy bez konta firmowego) tylko
-  dlatego, że przy zamówieniu można podać NIP do faktury — to nadal sprzedaż D2C.
-  NIE wystarcza: sama etykieta menu/link "Platforma B2B"/"B2B" bez żadnego dalszego opisu w
-  dostępnym tekście, co ta platforma faktycznie robi (zamawianie, logowanie, konto) — nazwa
-  linku w nawigacji to nie potwierdzenie działania panelu, może to być np. osobny produkt
-  firmy (system/platforma techniczna), a nie sklep zamówieniowy.
-  Ten sygnał liczy się w scoringu TYLKO razem z dzial_handlowy lub dedicated_customer_care_b2b
-  (zależność ustawiona w kodzie, nie w tym prompcie) — oceniaj go niezależnie i uczciwie,
-  nie zaniżaj/zawyżaj z myślą o tej zależności.
-
-dedicated_customer_care_b2b ("Dedykowana opieka nad klientem B2B"):
-  KLUCZOWA GRANICA: sygnał wymaga OSOBY (lub zespołu) PRZYPISANEJ NA STAŁE do konkretnego
-  klienta, konta lub segmentu i odpowiedzialnej za CIĄGŁĄ relację z nim — nie samego
-  istnienia działu/zespołu sprzedaży ani jednej rozmowy sprzedażowej. Rozstrzyga to, czy
-  tekst albo (a) używa słownictwa dedykowanej opieki ("opiekun", "KAM", "Key Account
-  Manager/Advisor", "account manager", "doradca ds. kluczowych klientów"), albo (b) wprost
-  opisuje osobę jako odpowiedzialną NA STAŁE za określony obszar/segment/konto klienta —
-  sama nazwa stanowiska sprzedażowego (bez żadnego z tych dwóch elementów) NIE wystarcza.
-  RÓWNOWAŻNE określenia — traktuj jako ten sam dowód: dedykowany opiekun, Key Account
-  Manager (KAM), account manager, customer success, opieka handlowa B2B, opiekun biznesowy.
-  Główny dowód: "dedykowany opiekun", "opiekun biznesowy", "Key Account Manager",
-  "account manager", "Customer Success", "obsługa posprzedażowa", "odnowienia umów",
-  "stała opieka nad klientem", LUB osoba jawnie opisana jako odpowiedzialna na stałe za
-  dany segment/branżę/konto klienta (np. "kontakt z konsultantem odpowiedzialnym za daną
-  branżę"), nawet bez słowa "opiekun"/"KAM" wprost.
-  Stanowiska/oferty pracy "Specjalista ds. klientów kluczowych", "Key Account Manager",
-  "opiekun klienta biznesowego" i ich jednoznaczne odpowiedniki to RÓWNIEŻ mocny dowód —
-  ogłoszenie o pracę na taką rolę liczy się tak samo jak opis usługi na stronie.
-  ZWRÓĆ FALSE:
-    - samo Biuro Obsługi Klienta (BOK), sama infolinia, LUB nazwany kierownik/osoba
-      zarządzająca BOK — to nadal ogólna, niezróżnicowana obsługa, nie opieka przypisana
-      do konkretnego klienta/konta;
-    - zwykły handlowiec/przedstawiciel handlowy przypisany do REGIONU/terytorium — to
-      pozyskiwanie sprzedaży na obszarze, nie opieka nad już pozyskanym, konkretnym
-      klientem — chyba że tekst wprost nazywa tę osobę opiekunem/KAM lub opisuje ją jako
-      odpowiedzialną na stałe za konkretne konto (nie tylko za "sprzedaż w regionie X");
-    - Kierownik/Dyrektor Działu Sprzedaży — to funkcja zarządcza zespołu sprzedaży, nie
-      osobista, ciągła opieka nad klientem;
-    - sam kontakt do działu sprzedaży (telefon/e-mail działu) bez informacji o stałej,
-      przypisanej opiece nad konkretnym klientem/kontem.
-
-partner_dealer_network ("Sieć partnerów / dealerów"):
-  KLUCZOWY WARUNEK — KIERUNEK RELACJI: sygnał dotyczy WYŁĄCZNIE sytuacji, w której BADANA
-  FIRMA jest DOSTAWCĄ posiadającym/organizującym WŁASNĄ, zewnętrzną sieć sprzedaży —
-  niezależne podmioty (dealerzy, dystrybutorzy, resellerzy, partnerzy handlowi), które
-  ODSPRZEDAJĄ PRODUKTY LUB USŁUGI TEJ FIRMY. Zanim uznasz dowód za wystarczający, ustal kto
-  jest dostawcą, a kto odsprzedawcą w opisanej relacji — sam fakt użycia słowa
-  "partner"/"dealer"/"dystrybutor" NIE wystarcza, jeśli kierunek relacji jest inny albo
-  niesprzedażowy.
-  Główny dowód: "zostań partnerem", "sieć dealerska", "dla dystrybutorów", "strefa partnera"
-  w domenie firmy — w kontekście rekrutacji odsprzedawców JEJ WŁASNYCH produktów/usług —
-  LUB jawnie wymieniona lista niezależnych dystrybutorów/przedstawicieli na rynkach
-  zagranicznych, którzy sprzedają dalej produkty tej firmy.
-  ZASADA POZYTYWNA: jeżeli badana firma zaprasza inne firmy/sprzedawców do sprzedaży lub
-  dystrybucji JEJ WŁASNYCH produktów/usług i opisuje to jako współpracę z dystrybutorami,
-  dealerami, resellerami lub partnerami handlowymi — to jest to true, niezależnie od
-  dokładnego sformułowania. Przykład: "Sprzedajesz nasze produkty / produkty z naszej
-  kategorii? Rozpocznij z nami współpracę" połączone z informacją o modelu współpracy z
-  dystrybutorami — to true, bo badana firma jest tu DOSTAWCĄ/PRODUCENTEM, a zewnętrzny
-  podmiot ma sprzedawać JEJ ofertę.
-  ZWRÓĆ FALSE (częste pomyłki w obie strony):
-    - firma SAMA jest dealerem/dystrybutorem/autoryzowanym partnerem CUDZEJ marki (np.
-      "jesteśmy oficjalnym dystrybutorem [producenta X]") — to ONA jest odsprzedawcą, nie
-      dostawcą budującym własną sieć; jej WŁASNY dział montażu/instalacji/serwisu również
-      się nie liczy, to wewnętrzny zespół, nie zewnętrzna sieć;
-    - firma REKRUTUJE przewoźników, podwykonawców lub dostawców do współpracy z NIĄ (np.
-      "zostań naszym partnerem" skierowane do przewoźników/poddostawców, którzy będą
-      świadczyć usługę DLA tej firmy) — to ona jest stroną KUPUJĄCĄ usługę/zdolność, nie
-      buduje sieci odsprzedającej jej produkty;
-    - "partner" oznacza partnera eventowego, marketingowego, lokalną atrakcję turystyczną
-      lub inną współpracę niesprzedażową (patronat, cross-promocja, sponsoring);
-    - ogólne, marketingowe użycie słowa "partner"/"partnerzy" oznaczające KLIENTÓW lub
-      relacje biznesowe w ogóle (np. "budujemy długoterminowe relacje z partnerami na
-      całym świecie", "dostarczamy naszym partnerom niezawodne produkty");
-    - linki do spółek-sióstr/spółek z tej samej grupy kapitałowej — to nie sieć
-      odsprzedawców, tylko wewnętrzna struktura grupy — chyba że tekst wprost opisuje je
-      jako dealerów/dystrybutorów tej firmy, nie jako powiązane firmy.
-  Wymagany jest jawny kontekst NIEZALEŻNEGO podmiotu odsprzedającego/dystrybuującego
-  PRODUKTY/USŁUGI TEJ FIRMY (nie cudzej), nie samo słowo "partner" w dowolnym znaczeniu.
-
-tender_bidding_department ("Przetargi / dział ofertowania"):
-  Firma SPRZEDAJE w przetargach jako wykonawca/dostawca — UWAGA, częsta pomyłka w obie
-  strony:
-  Dowód pozytywny (true): jawny język REALNEGO udziału w postępowaniu przetargowym JAKO
-  WYKONAWCA/OFERENT/DOSTAWCA — "realizujemy zamówienia publiczne", "oferta dla sektora
-  publicznego", "doświadczenie w przetargach", "specjalista ds. przetargów/ofertowania",
-  "startujemy w przetargach", "oferty przetargowe", "wygraliśmy przetarg", "wygraliśmy wiele
-  przetargów".
-  NIE WYSTARCZA samo posiadanie klientów/zamawiających publicznych w portfolio realizacji
-  (gmina, muzeum, biblioteka, urząd jako "Inwestor:" zrealizowanego projektu) — to dowód na
-  OBSŁUGĘ sektora publicznego, nie na SPOSÓB pozyskania tego kontraktu. Bez jawnego słowa
-  "przetarg"/"zamówienie publiczne"/"PZP" użytego w kontekście SPRZEDAŻY/WYGRANIA (nie
-  samego faktu posiadania takiego klienta), zwróć false.
-  NIE liczy się, nawet jeśli słowo "przetarg" występuje (to firma KUPUJĄCA, zwróć false):
-  "postępowania zakupowe", "zamówienia dla dostawców", "przetargi organizowane przez nas",
-  "profil nabywcy".
-
-═══════════════════════════════════════
+// Kontrakt odpowiedzi AI — STAŁY kształt niezależnie od liczby sygnałów tenanta
+// (5 czy 12): "signals" to zawsze tablica {key,value,reasoning}, NIE dynamiczny
+// obiekt z kluczami per sygnał (stary format icp_signals{}/signal_reasoning{}).
+// Przykładowe wpisy niżej są wygenerowane z RZECZYWISTYCH key aktywnych sygnałów
+// tego tenanta, więc AI wie dokładnie ile obiektów i jakich key oczekujemy —
+// walidacja odpowiedzi (validateAiSignalsResponse) to później twardo egzekwuje.
+function buildJsonContractSection(activeSignals) {
+  const signalsExample = activeSignals
+    .map(s => `    {"key": "${s.key}", "value": <true|false>, "reasoning": "<max 10 słów>"}`)
+    .join(',\n');
+  return `═══════════════════════════════════════
 Zwróć odpowiedź WYŁĄCZNIE jako JSON (bez markdown, bez \`\`\`):
 {
   "gates": {
     "b2b": "pass|fail|unknown",
     "company_size": "pass|fail|unknown"
   },
-  "icp_signals": {
-    "field_sales_team": <true|false>,
-    "custom_quote_process": <true|false>,
-    "consultation_demo_needs_analysis": <true|false>,
-    "distributed_sales_structure": <true|false>,
-    "ecommerce_b2b": <true|false>,
-    "dedicated_customer_care_b2b": <true|false>,
-    "partner_dealer_network": <true|false>,
-    "tender_bidding_department": <true|false>
-  },
+  "signals": [
+${signalsExample}
+  ],
   "ai_summary": "<2-3 zdania po polsku: DLACZEGO ta firma pasuje lub nie pasuje do CRMtree, jakie konkretne cechy na to wskazują>",
-  "signal_reasoning": {
-    "field_sales_team": "<max 10 słów>",
-    "custom_quote_process": "<max 10 słów>",
-    "consultation_demo_needs_analysis": "<max 10 słów>",
-    "distributed_sales_structure": "<max 10 słów>",
-    "ecommerce_b2b": "<max 10 słów>",
-    "dedicated_customer_care_b2b": "<max 10 słów>",
-    "partner_dealer_network": "<max 10 słów>",
-    "tender_bidding_department": "<max 10 słów>"
-  },
   "key_contacts": [
     {"name": "<imię nazwisko>", "title": "<stanowisko>", "email": "<email lub null>", "phone": "<telefon lub null>"}
   ]
 }
 
+Dla "signals": zwróć DOKŁADNIE jeden obiekt dla KAŻDEGO "key" wymienionego w sekcji SYGNAŁY
+powyżej — nie pomijaj żadnego, nie dodawaj "key" spoza tej listy. "value" to zawsze true albo
+false (AI nigdy nie przydziela punktów — to robi backend). "reasoning" max 10 słów po polsku.
 Dla key_contacts: wypełnij tylko pola których jesteś pewien. Puste pole → null. Max 8 osób.`;
+}
+
+// Pełny SYSTEM_PROMPT dla KONKRETNEGO tenanta — core prompt (PROMPT_STATIC_HEADER)
+// jest wspólny dla wszystkich, doklejana jest tylko sekcja sygnałów i przykładowy
+// kontrakt JSON zbudowany z aktywnych sygnałów TEGO tenanta (tyle wpisów, ile ma
+// aktywnych sygnałów — 5, 8, 12, cokolwiek).
+function buildSystemPrompt(activeSignals) {
+  const signalsSection = activeSignals.map(buildSignalPromptBlock).join('\n\n');
+  return `${PROMPT_STATIC_HEADER}\n\n${signalsSection}\n\n${buildJsonContractSection(activeSignals)}`;
+}
+
+// Zwalidowana odpowiedź AI dla "signals": każdy AKTYWNY sygnał tenanta musi
+// wystąpić DOKŁADNIE RAZ (po key, nie po technicznym id — patrz analiza przy
+// buildSignalPromptBlock), bez nieznanych key, value musi być boolean. Brakujący
+// sygnał to NIGDY ciche false — to invalid/incomplete response, rzucamy błąd
+// (enrichOne go łapie i ustawia enrichment_status='error', tak jak każdy inny
+// błąd tego kroku — patrz catch w enrichOne).
+class IcpAiResponseValidationError extends Error {}
+
+function validateAiSignalsResponse(rawSignals, activeSignals) {
+  if (!Array.isArray(rawSignals)) {
+    throw new IcpAiResponseValidationError('Odpowiedź AI: "signals" nie jest tablicą (albo jej brak)');
+  }
+  const expectedKeys = new Set(activeSignals.map(s => s.key));
+  const seenKeys = new Set();
+  for (const entry of rawSignals) {
+    if (!entry || typeof entry !== 'object' || typeof entry.key !== 'string') {
+      throw new IcpAiResponseValidationError('Odpowiedź AI: wpis w "signals" bez poprawnego "key"');
+    }
+    if (!expectedKeys.has(entry.key)) {
+      throw new IcpAiResponseValidationError(`Odpowiedź AI: nieznany key sygnału "${entry.key}" spoza aktywnej konfiguracji tenanta`);
+    }
+    if (seenKeys.has(entry.key)) {
+      throw new IcpAiResponseValidationError(`Odpowiedź AI: key sygnału "${entry.key}" powtórzony w "signals"`);
+    }
+    seenKeys.add(entry.key);
+    if (typeof entry.value !== 'boolean') {
+      throw new IcpAiResponseValidationError(`Odpowiedź AI: "value" dla sygnału "${entry.key}" nie jest boolean`);
+    }
+  }
+  const missing = [...expectedKeys].filter(key => !seenKeys.has(key));
+  if (missing.length > 0) {
+    throw new IcpAiResponseValidationError(`Odpowiedź AI: brak wpisu "signals" dla key: ${missing.join(', ')}`);
+  }
+  return true;
+}
 
 
 function buildUserMessage(company, krsData, websiteText, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
@@ -3409,12 +3699,14 @@ ${companyDesc}${fileSection}
 ${websiteText ? `TREŚĆ ZE STRONY WWW:\n${websiteText}` : 'Strona WWW niedostępna — opieraj się na danych rejestrowych i handlowych.'}${fbSection}${linkedinSection}${pracujSection}${gusSection}`;
 }
 
-// Połączony prompt (dla endpointu inspekcji /prompt)
-function buildPromptText(company, krsData, websiteText, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
-  return `${SYSTEM_PROMPT}\n\n${buildUserMessage(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText)}`;
+// Połączony prompt (dla endpointu inspekcji /prompt) — activeSignals to
+// aktywna konfiguracja ICP tenanta (tenantIcpConfigService.getActiveConfig()
+// .activeSignals), caller ją pobiera raz i przekazuje tutaj.
+function buildPromptText(company, krsData, websiteText, activeSignals, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
+  return `${buildSystemPrompt(activeSignals)}\n\n${buildUserMessage(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText)}`;
 }
 
-async function callDeepSeek(userMessage) {
+async function callDeepSeek(userMessage, systemPrompt) {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
 
@@ -3425,7 +3717,7 @@ async function callDeepSeek(userMessage) {
       max_tokens: 3000,
       temperature: 0,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user',   content: userMessage },
       ],
     },
@@ -3459,7 +3751,7 @@ async function callDeepSeek(userMessage) {
   return { content: choice?.message?.content || '{}', model: data?.model || null, usage };
 }
 
-async function callAnthropic(userMessage) {
+async function callAnthropic(userMessage, systemPrompt) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
@@ -3472,7 +3764,7 @@ async function callAnthropic(userMessage) {
       system: [
         {
           type: 'text',
-          text: SYSTEM_PROMPT,
+          text: systemPrompt,
           cache_control: { type: 'ephemeral' },
         },
       ],
@@ -3514,24 +3806,33 @@ async function callAnthropic(userMessage) {
   return { content: data?.content?.[0]?.text || '{}', model: data?.model || null, usage };
 }
 
-async function analyzeWithAi(company, krsData, websiteText, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
+// activeSignals: konfiguracja ICP tenanta (tenantIcpConfigService.getActiveConfig()
+// .activeSignals) — caller (enrichOne) ją pobiera RAZ i przekazuje tutaj, żeby nie
+// odpytywać bazy drugi raz przy scoringu. Walidacja odpowiedzi rzuca
+// IcpAiResponseValidationError (niezłapane tutaj celowo — propaguje do enrichOne,
+// które oznacza enrichment jako 'error', tak jak każdy inny błąd tego kroku).
+// Całkowity brak parsowalnego JSON-a (raw nie jest JSON-em wcale) NIE jest
+// traktowany jako błąd walidacji — zachowuje dawne zachowanie: result=null,
+// calcIcpScore dostaje undefined i scoruje wszystko jako false (graceful degradation).
+async function analyzeWithAi(company, krsData, websiteText, activeSignals, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
   const { rows } = await db.query(
     `SELECT value FROM app_settings WHERE key = 'prospect.ai_provider' AND tenant_id = $1`,
     [company.tenant_id]
   );
   const provider = rows[0]?.value || 'deepseek';
 
+  const systemPrompt = buildSystemPrompt(activeSignals);
   const userMessage = buildUserMessage(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText);
   const { content: raw, model: usedModel, usage } = provider === 'anthropic'
-    ? await callAnthropic(userMessage)
-    : await callDeepSeek(userMessage);
+    ? await callAnthropic(userMessage, systemPrompt)
+    : await callDeepSeek(userMessage, systemPrompt);
 
   logger.info('[Prospect] AI raw response', { provider, company: company.company_name, rawLength: raw.length, rawPreview: raw.slice(0, 500) });
 
+  let parsed;
   try {
-    const parsed = JSON.parse(raw);
-    logger.info('[Prospect] AI parse OK', { provider, company: company.company_name, signals: parsed.icp_signals, summary: parsed.ai_summary?.slice(0, 80) });
-    return { result: parsed, provider, model: usedModel, usage };
+    parsed = JSON.parse(raw);
+    logger.info('[Prospect] AI parse OK', { provider, company: company.company_name, signals: parsed.signals, summary: parsed.ai_summary?.slice(0, 80) });
   } catch {
     // Fallback: wytnij blok {} i spróbuj jeszcze raz
     const match = raw.match(/\{[\s\S]*\}/);
@@ -3540,14 +3841,19 @@ async function analyzeWithAi(company, krsData, websiteText, fbData = null, linke
       return { result: null, provider, model: usedModel, usage };
     }
     try {
-      const parsed = JSON.parse(match[0]);
-      logger.info('[Prospect] AI parse OK (regex fallback)', { provider, company: company.company_name, signals: parsed.icp_signals });
-      return { result: parsed, provider, model: usedModel, usage };
+      parsed = JSON.parse(match[0]);
+      logger.info('[Prospect] AI parse OK (regex fallback)', { provider, company: company.company_name, signals: parsed.signals });
     } catch {
       logger.warn('[Prospect] AI JSON malformed after regex extract', { provider, rawLength: raw.length, rawTail: raw.slice(-200), preview: match[0].slice(0, 300) });
       return { result: null, provider, model: usedModel, usage };
     }
   }
+
+  // JSON sparsowany poprawnie — teraz musi respektować kontrakt "signals" (jeden
+  // wpis per AKTYWNY sygnał tenanta, bez braków/duplikatów/nieznanych id). Rzuca,
+  // nie zwraca null — brakujący sygnał to invalid response, nie ciche false.
+  validateAiSignalsResponse(parsed.signals, activeSignals);
+  return { result: parsed, provider, model: usedModel, usage };
 }
 
 // ── Śledzi ID firm aktualnie przetwarzanych (batch + pojedyncze) ────
@@ -3742,6 +4048,7 @@ async function enrichOne(prospectId, opts = {}) {
                icp_bonus_signals     = NULL,
                icp_gate_points        = NULL,
                icp_gate_status        = 'needs_review',
+               icp_config_version_id   = NULL,
                ai_summary              = NULL,
                enriched_at               = NOW(),
                enrichment_log             = $2
@@ -3805,12 +4112,13 @@ async function enrichOne(prospectId, opts = {}) {
       // Zatwierdza wyłącznie mocny dowód (NIP/KRS/REGON albo kod+ulica) — patrz
       // evaluateIdentityFallback. Nic tu nie omija checkDomainIdentity.
       let identityFallback = null;
+      let brandFallback = null;
       if (!fastScraped.deterministicFailure && !trustedByHuman && !identityCheck.verified
           && identityCheck.reason === 'insufficient_evidence'
           && (fastScraped.text || '').trim() && fastScraped.crawlState) {
+        const fallbackTitle = `${fastScraped.identity?.title || ''} ${fastScraped.identity?.h1 || ''}`.trim();
         identityFallback = await runIdentityFallback({
-          company, krsData, gusData, crawlState: fastScraped.crawlState,
-          title: `${fastScraped.identity?.title || ''} ${fastScraped.identity?.h1 || ''}`.trim(),
+          company, krsData, gusData, crawlState: fastScraped.crawlState, title: fallbackTitle,
         });
         logger.info('[Prospect] Identity fallback on same domain', {
           prospectId, websiteUrl, verified: identityFallback.verified, decidedBy: identityFallback.decided_by,
@@ -3818,6 +4126,29 @@ async function enrichOne(prospectId, opts = {}) {
         });
         if (identityFallback.verified) {
           identityCheck = { verified: true, reason: identityFallback.reason, evidence: identityFallback.evidence, via_fallback: true };
+        } else if (identityFallback.reason === 'insufficient_evidence') {
+          // strong_brand_identity V3 (21.09) — TYLKO gdy strict identity
+          // fallback wyżej nie znalazł nic i nie natrafił na
+          // foreign_address_conflict (ten wciąż wygrywa bez zmian). Reużywa
+          // te same, już pobrane strony (raw_sources) — zero dodatkowych
+          // requestów. Patrz komentarz przy evaluateBrandIdentityFallback.
+          brandFallback = evaluateBrandIdentityFallback({
+            company, krsData, gusData, candidateUrl: websiteUrl, candidateSource: websiteSource,
+            homepageTitle: fallbackTitle, sources: identityFallback.raw_sources || [],
+          });
+          logger.info('[Prospect] Brand identity fallback (V3) on same domain', {
+            prospectId, websiteUrl, verified: brandFallback.verified, reason: brandFallback.reason, decidedBy: brandFallback.decided_by,
+          });
+          if (brandFallback.verified) {
+            identityCheck = { verified: true, reason: brandFallback.reason, evidence: brandFallback.positive_evidence, via_fallback: true, via_brand_fallback: true };
+          } else if (brandFallback.reason !== 'insufficient_evidence') {
+            // Jawny konflikt (legal_entity_conflict / foreign_entity_or_country_conflict
+            // / different_entity_brand) — silniejszy, nazwany powód niż zwykłe
+            // insufficient_evidence, mimo że identityCheck.verified zostaje false
+            // (rekord i tak idzie do needs_review — to samo zachowanie DB co dziś,
+            // różnica jest wyłącznie w czytelności identity_check.reason w logu).
+            identityCheck = { verified: false, reason: brandFallback.reason, evidence: brandFallback.conflict_evidence, via_brand_fallback: true };
+          }
         }
       }
 
@@ -3845,15 +4176,14 @@ async function enrichOne(prospectId, opts = {}) {
         // Tożsamość przeliczona na pełnej treści — czysto diagnostyczne
         // (evidence w logu bogatsze), decyzja o kontynuacji już zapadła wyżej;
         // może jednak wykryć konflikt (np. zagraniczny adres) niewidoczny w
-        // wąskiej treści fast — sprawdzenie niżej (`!identityCheck.verified`)
-        // wciąż na to reaguje. Wyjątek: potwierdzenie z identity fallback (dowód
-        // z podstrony, której tekst dla AI nie zawiera) zostaje, dopóki pełna
-        // treść nie wykaże konfliktu zagranicznego adresu.
+        // wąskiej treści fast. Łączenie z dotychczasowym `identityCheck` (który
+        // w tym miejscu może już nieść potwierdzenie ze strict fallbacku LUB
+        // z V3 brand fallbacku) idzie przez resolveIdentityMonotonically —
+        // patrz komentarz przy tej funkcji: hard conflict > wcześniejsze
+        // verified > insufficient_evidence, nigdy odwrotnie.
         {
           const recomputed = computeIdentityCheck(scraped);
-          const keepFallbackVerdict = identityFallback?.verified && !recomputed.verified
-            && recomputed.reason !== 'foreign_address_conflict';
-          if (!keepFallbackVerdict) identityCheck = recomputed;
+          identityCheck = resolveIdentityMonotonically(identityCheck, recomputed);
         }
         scanStage = 'full';
       } else {
@@ -3938,9 +4268,20 @@ async function enrichOne(prospectId, opts = {}) {
         candidate_url:    websiteUrl,
         candidate_source: websiteSource || null,
         trusted_by_human: trustedByHuman,
-        decided_by: identityFallback?.verified
-          ? identityFallback.decided_by
-          : (trustedByHuman && !identityCheck.verified ? 'trusted_domain_override' : identityCheck.reason),
+        // Priorytet zgodny z resolveIdentityMonotonically: jeśli finalny
+        // identityCheck.reason to twardy konflikt NIEZNANY wcześniejszym etapom
+        // (odkryty dopiero na przeliczeniu po pełnym crawlu — patrz komentarz
+        // przy tej funkcji), decided_by musi to pokazać wprost, żeby log nie
+        // pokazywał mylącego "brand_verified"/fallback-decided_by dla rekordu,
+        // który finalnie został odrzucony.
+        decided_by: (HARD_IDENTITY_CONFLICT_REASONS.has(identityCheck.reason)
+          && identityCheck.reason !== identityFallback?.reason && identityCheck.reason !== brandFallback?.reason)
+          ? `${identityCheck.reason}@recompute_full_crawl`
+          : identityFallback?.verified
+            ? identityFallback.decided_by
+            : (brandFallback && (brandFallback.verified || brandFallback.reason !== 'insufficient_evidence'))
+              ? brandFallback.decided_by
+              : (trustedByHuman && !identityCheck.verified ? 'trusted_domain_override' : identityCheck.reason),
         fallback: identityFallback
           ? {
               attempted:  identityFallback.attempted,
@@ -3950,6 +4291,25 @@ async function enrichOne(prospectId, opts = {}) {
               decided_by: identityFallback.decided_by,
               pages_checked: identityFallback.pages_checked || [],
               sources:    identityFallback.sources || [],
+            }
+          : { attempted: false, used: false },
+        // strong_brand_identity V3 (21.09) — wołany tylko gdy fallback wyżej
+        // był attempted i insufficient_evidence, patrz evaluateBrandIdentityFallback.
+        // via_brand_fallback jawnie mówi, czy TEN werdykt (verified LUB konkretny
+        // powód odrzucenia) pochodzi z V3, a nie ze strict identity check.
+        brand_fallback: brandFallback
+          ? {
+              attempted: true,
+              used: !!brandFallback.verified,
+              via_brand_fallback: true,
+              verified: brandFallback.verified,
+              reason: brandFallback.reason,
+              decided_by: brandFallback.decided_by,
+              positive_evidence: brandFallback.positive_evidence || null,
+              conflict_evidence: brandFallback.conflict_evidence || null,
+              cap_reason: brandFallback.cap_reason || null,
+              points: brandFallback.points ?? null,
+              threshold: brandFallback.threshold ?? null,
             }
           : { attempted: false, used: false },
       };
@@ -3984,6 +4344,7 @@ async function enrichOne(prospectId, opts = {}) {
              icp_bonus_signals       = NULL,
              icp_gate_points          = NULL,
              icp_gate_status          = 'needs_review',
+             icp_config_version_id     = NULL,
              icp_downgrade_flags       = $3,
              ai_summary                 = NULL,
              enriched_at                  = NOW(),
@@ -4022,6 +4383,7 @@ async function enrichOne(prospectId, opts = {}) {
                icp_bonus_signals     = NULL,
                icp_gate_points        = NULL,
                icp_gate_status        = 'needs_review',
+               icp_config_version_id   = NULL,
                ai_summary              = NULL,
                enriched_at               = NOW(),
                enrichment_log             = $2
@@ -4041,7 +4403,42 @@ async function enrichOne(prospectId, opts = {}) {
     // nie jest już wywoływane na etapie fast, patrz sekcja 3 wyżej — jeśli
     // websiteUrl istnieje, w tym miejscu websiteText to już treść pełnego
     // crawla albo pusta treść ze ścieżek bez strony/danych, nigdy sama treść fast).
-    const { result: analysis, provider: usedProvider, model: usedModel, usage: aiUsage } = await analyzeWithAi(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText);
+    //
+    // Konfiguracja ICP tenanta — pobrana RAZ, użyta i do budowy promptu
+    // (buildSystemPrompt w analyzeWithAi), i do scoringu (calcIcpScore) niżej, i do
+    // icp_config_version_id zapisywanego z wynikiem.
+    //
+    // CELOWO getPublishedConfig(), NIE getActiveConfig(): enrichment musi zawsze
+    // czytać ostatnią PUBLISHED (już zweryfikowaną jako poprawną) wersję configu,
+    // nigdy roboczy LIVE stan w tenant_icp_signals — LIVE może być CHWILOWO invalid
+    // w trakcie edycji (np. admin przenosi punkty między sygnałami: suma na chwilę
+    // 75/70), a to nie może przerywać ani psuć trwającego enrichmentu. Stara,
+    // poprawna PUBLISHED wersja (albo fallback DEFAULT_SIGNALS, jeśli tenant
+    // jeszcze nigdy niczego nie opublikował) obsługuje enrichment przez cały czas
+    // edycji — dopiero powrót LIVE do poprawnej sumy automatycznie publikuje nową
+    // wersję (tenantIcpConfigService.bumpRevisionAndMaybePublish), bez żadnego
+    // ręcznego przycisku "Publikuj".
+    const icpConfig = await tenantIcpConfigService.getPublishedConfig(company.tenant_id);
+    // Defensywna asercja, nie pierwsza linia obrony: getPublishedConfig() z
+    // konstrukcji zwraca zawsze coś, co było poprawne W MOMENCIE publikacji —
+    // to może się jedynie rozjechać, gdyby PO fakcie zmienił się globalny
+    // ICP_REQUIRED_SIGNALS_MAX_SCORE (np. deploy zmieniający wymaganą sumę, tak
+    // jak decyzja 2026-09-22 sama to zrobiła — wtedy trzeba było uruchomić
+    // src/scripts/migrateIcpSignalsTo100.js PRZED deployem, patrz ten skrypt).
+    // Zatrzymuje enrichment zamiast po cichu policzyć max_score inny niż 100.
+    const icpConfigValidity = evaluateIcpConfigValidity(icpConfig);
+    if (!icpConfigValidity.isValid) {
+      throw new Error(
+        `Opublikowana konfiguracja ICP tenanta (wersja ${icpConfig.currentVersionNumber ?? 'domyślna'}) ` +
+        `jest nieprawidłowa względem AKTUALNEGO wymogu: suma AKTYWNYCH sygnałów wynosi ` +
+        `${icpConfigValidity.signalsSum}, oczekiwano dokładnie ${icpConfigValidity.signalsMax}. ` +
+        `To nie powinno się zdarzyć dla normalnej edycji w Ustawienia aplikacji → Enrichment/ICP — sprawdź, czy ` +
+        `ICP_REQUIRED_SIGNALS_MAX_SCORE nie zmienił się w kodzie od czasu ostatniej publikacji configu tego ` +
+        `tenanta (jeśli tak, uruchom migrację przed deployem, patrz src/scripts/migrateIcpSignalsTo100.js).`
+      );
+    }
+
+    const { result: analysis, provider: usedProvider, model: usedModel, usage: aiUsage } = await analyzeWithAi(company, krsData, websiteText, icpConfig.activeSignals, fbData, linkedinText, gusData, pracujText);
 
     // Oddziały: tylko z KRS (twarde dane) — nowy prompt ICP nie zwraca już
     // branches_found (to była część starego travel-scoringu).
@@ -4065,7 +4462,7 @@ async function enrichOne(prospectId, opts = {}) {
     // bezpośrednio.
     const gates = analysis ? buildIcpGates(analysis.gates, effectiveEmploymentCount, effectiveEmploymentRange) : null;
 
-    const scoreResult   = calcIcpScore(analysis?.icp_signals);
+    const scoreResult   = calcIcpScore(analysis?.signals, icpConfig.activeSignals);
     const gateStatus    = icpGateStatus(gates);
     const gatePointsResult = calcIcpGatePoints(gates);
     const downgradeFlags = calcIcpDowngradeFlags(websiteUrl, websiteStatus);
@@ -4095,7 +4492,11 @@ async function enrichOne(prospectId, opts = {}) {
       } catch { /* bonus to dodatek, nie krytyczne jeśli się nie uda */ }
     }
 
-    const totalScore = Math.max(0, Math.min(100, scoreResult.raw + bonusResult.bonus + gatePointsResult.points - blacklistPenalty));
+    // Decyzja 2026-09-22: icp_score = wyłącznie suma trafionych sygnałów (minus
+    // kara blacklisty) — gatePointsResult/bonusResult dalej się liczą i zapisują
+    // (icp_gate_points, icp_bonus_signals — informacyjne w Inspekcji), ale już nie
+    // wchodzą do sumy wyniku.
+    const totalScore = Math.max(0, Math.min(100, scoreResult.raw - blacklistPenalty));
 
     enrichLog.claude = {
       provider:     usedProvider,
@@ -4124,7 +4525,9 @@ async function enrichOne(prospectId, opts = {}) {
         ai_value:                  analysis?.gates?.company_size ?? null,
         overridden:                (analysis?.gates?.company_size ?? null) !== (gates?.company_size ?? null),
       },
-      signal_reasoning: analysis?.signal_reasoning || null,
+      signal_reasoning: buildSignalReasoningMap(analysis?.signals, icpConfig.activeSignals),
+      icp_config_version_id: icpConfig.currentVersionId,
+      icp_config_is_default: icpConfig.isDefault,
       prompt_tokens:            aiUsage?.prompt_tokens ?? null,
       completion_tokens:        aiUsage?.completion_tokens ?? null,
       prompt_cache_hit_tokens:  aiUsage?.prompt_cache_hit_tokens ?? null,
@@ -4166,6 +4569,7 @@ async function enrichOne(prospectId, opts = {}) {
         gus_regon                 = COALESCE($26, gus_regon),
         gus_pkd_main              = COALESCE($27, gus_pkd_main),
         icp_gate_points           = $29,
+        icp_config_version_id     = $30,
         enriched_at               = NOW(),
         enrichment_status         = 'done',
         enrichment_error          = NULL
@@ -4200,6 +4604,7 @@ async function enrichOne(prospectId, opts = {}) {
         gusData?.pkdMain || null,
         websiteSource || null,
         JSON.stringify(gatePointsResult.breakdown),
+        icpConfig.currentVersionId,
       ]
     );
 
@@ -4213,6 +4618,7 @@ async function enrichOne(prospectId, opts = {}) {
         icp_gate_status: gateStatus,
         icp_gate_points: gatePointsResult.breakdown,
         icp_downgrade_flags: downgradeFlags,
+        icp_config_version_id: icpConfig.currentVersionId,
         ai_summary: analysis?.ai_summary || null,
         enrichment_log: enrichLog,
       } : {}),
@@ -4360,7 +4766,7 @@ module.exports = {
   // audytu menu nawigacyjnego, reużywa scrapingu zamiast duplikować go.
   fetchKRS, findWebsiteUrl, scrapeWebsite, normalizeName, fetchPage, extractText, extractInternalLinks, scoreLinkRelevance,
   checkDomainIdentity, isDomainParkingPage, isDomainTrustedForThisRun,
-  matchesIcpBlacklist, getIcpScoringRules, calcIcpScore,
+  matchesIcpBlacklist, getIcpScoringRules, calcIcpScore, buildSignalReasoningMap,
   // Eksport na potrzeby ręcznego/testowego wywołania fallbacku drugiej domeny
   // w izolacji (audyt 21.08) — enrichOne woła resolveDomainFallback()
   // wewnętrznie (patrz gałąź "domena niepotwierdzona i nie zaufana"), ten
@@ -4368,7 +4774,17 @@ module.exports = {
   guessFallbackDomains, resolveDomainFallback, scrapeWebsiteFast,
   // Eksport na potrzeby audytu jakości sygnałów ICP (regresja treści promptu +
   // replay realnych wywołań DeepSeek poza pełnym przebiegiem enrichmentu).
-  SYSTEM_PROMPT, buildUserMessage, callDeepSeek,
+  // SYSTEM_PROMPT nie istnieje już jako stały string (ETAP B, prompt dynamiczny
+  // per tenant) — buildSystemPrompt(activeSignals) go zastępuje.
+  buildSystemPrompt, PROMPT_STATIC_HEADER, buildSignalPromptBlock, buildJsonContractSection,
+  validateAiSignalsResponse, IcpAiResponseValidationError,
+  // Wymagana suma punktów sygnałów WYLICZONA z gates/bonus (nie hardkodowana) +
+  // helper oceniający config tenanta względem niej — jedyne źródło prawdy dla
+  // wszystkiego, co musi znać "ile to ma być 70/100" (enrichOne, getIcpScoringRules,
+  // przyszłe API Tenant → Enrichment/ICP).
+  ICP_MAX_GATE_SCORE, ICP_BONUS_MAX_SCORE, ICP_TOTAL_MAX_SCORE, ICP_REQUIRED_SIGNALS_MAX_SCORE,
+  evaluateIcpConfigValidity,
+  buildUserMessage, callDeepSeek,
   // Eksport na potrzeby testów regresyjnych retrievalu (19.09, druga tura —
   // limit różnorodności kandydatów, wykluczenie dokumentów prawnych z budżetu
   // klasyfikacyjnego, dwupoziomowe scorowanie "partner").
@@ -4392,4 +4808,12 @@ module.exports = {
   // Fallback company_size z LinkedIn JSON-LD (21.09) — czysta funkcja
   // parsująca schema.org QuantitativeValue, testowalna bez sieci.
   parseNumberOfEmployees,
+  // strong_brand_identity V3 (21.09) — konserwatywny brand-identity fallback,
+  // wołany dopiero po strict identity fallback. Funkcje czyste, testowalne
+  // bez sieci; evaluateBrandIdentityFallback to punkt wejścia.
+  firstDistinctiveNameToken, findLegalEntityConflict, findForeignEntityOrCountryConflict,
+  findDifferentEntityBrand, scoreBrandConsistency, evaluateBrandIdentityFallback,
+  // Monotonic identity resolution (21.09, po benchmarku 50 firm) — czysta
+  // funkcja, testowalna bez sieci/AI.
+  resolveIdentityMonotonically, HARD_IDENTITY_CONFLICT_REASONS,
 };

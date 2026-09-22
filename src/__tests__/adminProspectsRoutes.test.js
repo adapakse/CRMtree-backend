@@ -62,7 +62,7 @@ describe('GET /api/admin/prospects/scoring-rules', () => {
       source: expect.stringContaining('employment_count'),
       threshold: 15,
     });
-    expect(res.body.signals.definitions.find(s => s.id === 'dzial_handlowy')).toMatchObject({ points: 15 });
+    expect(res.body.signals.definitions.find(s => s.id === 'dzial_handlowy')).toMatchObject({ points: 30 });
     expect(res.body.bonus_signals).toHaveProperty('max_points');
     expect(res.body.blacklist).toHaveProperty('keywords');
     expect(res.body.max_possible_score).toBe(100);

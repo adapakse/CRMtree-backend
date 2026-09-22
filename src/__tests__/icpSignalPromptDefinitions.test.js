@@ -1,28 +1,44 @@
-// Testy regresyjne dla definicji 8 sygnałów ICP w SYSTEM_PROMPT.
+// Testy regresyjne dla definicji 8 domyślnych sygnałów ICP (ai_definition).
 //
-// SYSTEM_PROMPT steruje niedeterministycznym modelem (DeepSeek), więc te testy
-// NIE weryfikują faktycznej klasyfikacji AI (do tego służy osobny, ręcznie
-// odpalany replay na realnych firmach — patrz raport audytu). Weryfikują, że
-// prompt jawnie dokumentuje rozpoznawanie każdej KLASY dowodu (w tym
-// synonimów) i jawnie odrzuca każdą klasę dowodu granicznego/niewystarczającego
-// — to zapobiega przyszłej regresji polegającej na przypadkowym usunięciu
-// synonimu albo guardrailu przy kolejnej edycji promptu.
+// Od ETAPU B (dynamiczny ICP per tenant) definicje nie żyją już w statycznym
+// SYSTEM_PROMPT, tylko w tenantIcpConfigService.DEFAULT_SIGNALS[].ai_definition
+// — dokładnie ten sam tekst, 1:1 skopiowany z dawnego promptu przy migracji
+// 0285 (zero parafrazowania). Ten plik testuje WYŁĄCZNIE treść definicji, nie
+// faktyczną klasyfikację AI (do tego służy osobny, ręcznie odpalany replay na
+// realnych firmach — patrz raport audytu): że jawnie dokumentuje rozpoznawanie
+// każdej KLASY dowodu (w tym synonimów) i jawnie odrzuca każdą klasę dowodu
+// granicznego/niewystarczającego — zapobiega to przyszłej regresji polegającej
+// na przypadkowym usunięciu synonimu albo guardrailu przy edycji definicji.
 //
 // Każdy blok ma min. 2 klasy dowodu pozytywnego (w tym synonimy) i min. 2
 // klasy dowodu granicznego/negatywnego, zgodnie z metodyką audytu z 18.09.2026.
 
-const { SYSTEM_PROMPT } = require('../services/prospectEnrichmentService');
+const { DEFAULT_SIGNALS } = require('../services/tenantIcpConfigService');
 
-// Zwraca blok definicji z whitespace (w tym zawijanie linii) znormalizowanym
+// Dawne promptKey (nazwy pól w kontrakcie JSON z AI, np. "field_sales_team")
+// zmapowane na dzisiejsze, stabilne tenant_icp_signals.key (np. "dzial_handlowy")
+// — patrz komentarz przy tej kolumnie w migracji 0285. Mapa istnieje wyłącznie
+// po to, żeby nie przepisywać wszystkich testów niżej pod nowe nazwy.
+const KEY_BY_PROMPT_KEY = {
+  field_sales_team: 'dzial_handlowy',
+  custom_quote_process: 'zlozony_proces_sprzedazy',
+  consultation_demo_needs_analysis: 'konsultacja_demo',
+  dedicated_customer_care_b2b: 'opieka_nad_klientem',
+  tender_bidding_department: 'przetargi',
+  distributed_sales_structure: 'rozproszona_struktura',
+  partner_dealer_network: 'siec_partnerow',
+  ecommerce_b2b: 'ecommerce_b2b',
+};
+
+// Zwraca ai_definition z whitespace (w tym zawijanie linii) znormalizowanym
 // do pojedynczych spacji, żeby dopasowania fraz nie zależały od tego, gdzie
-// akurat przechodzi łamanie wiersza w źródle promptu.
+// akurat przechodzi łamanie wiersza w źródle.
 function definitionBlockFor(promptKey) {
-  const start = SYSTEM_PROMPT.indexOf(`${promptKey} (`);
-  expect(start).toBeGreaterThan(-1);
-  const rest = SYSTEM_PROMPT.slice(start);
-  const nextBlank = rest.indexOf('\n\n');
-  const raw = rest.slice(0, nextBlank === -1 ? rest.length : nextBlank);
-  return raw.replace(/\s+/g, ' ');
+  const key = KEY_BY_PROMPT_KEY[promptKey];
+  expect(key).toBeDefined();
+  const signal = DEFAULT_SIGNALS.find(s => s.key === key);
+  expect(signal).toBeDefined();
+  return signal.ai_definition.replace(/\s+/g, ' ');
 }
 
 describe('field_sales_team — klasy dowodu', () => {

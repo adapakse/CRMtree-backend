@@ -36,6 +36,8 @@ const { getMissingRequiredFields } = require('../config/emailProviderRequiredFie
 const { clearTrainingModeCache } = require('../utils/trainingMode');
 const { isSlugAllowed } = require('../config/tenantHost');
 const whatsappService = require('../services/whatsappService');
+const tenantIcpConfigService = require('../services/tenantIcpConfigService');
+const enrichSvc = require('../services/prospectEnrichmentService');
 
 // A secret field consisting only of mask characters (e.g. "********",
 // "••••••••", "●●●●●●", "······", optionally with surrounding whitespace) is
@@ -170,6 +172,16 @@ router.post('/',
         `INSERT INTO tenant_auth_configs (tenant_id, provider, is_enabled) VALUES ($1, 'password', true)`,
         [tenant.id]
       );
+
+      // ── ICP config: kopiuj z gold (albo DEFAULT_SIGNALS, gdy gold nie ma
+      // jeszcze własnego configu/nie istnieje) — sam wzorzec co feature flags/
+      // app_settings/group_profiles wyżej. Bez tego nowy tenant enrichowałby
+      // wyłącznie dzięki fallbackowi DEFAULT_SIGNALS w kodzie, a zakładka
+      // Tenant → Enrichment/ICP byłaby pusta (brak wierszy do pokazania/edycji).
+      await tenantIcpConfigService.seedDefaultConfigForTenant(client, tenant.id, {
+        sourceTenantId: goldId,
+        actorUserId: req.user.id,
+      });
 
       await client.query('COMMIT');
       logger.info('Super admin created tenant', {
@@ -1083,5 +1095,224 @@ router.delete('/:id/whatsapp-config',
     } catch (err) { next(err); }
   }
 );
+
+// ── ICP / Enrichment config (dynamiczne sygnały per tenant) ───────────────
+// Wzorzec identyczny jak WhatsApp config wyżej: super-admin only, findAliveTenant
+// guard, logger.info audit line, `if (err.status) res.status(err.status)...`
+// dla błędów rzucanych przez tenantIcpConfigService (badRequest/notFound/
+// ConfigRevisionConflictError mają już ustawione `.status`).
+//
+// LIVE vs PUBLISHED: GET zwraca LIVE (roboczy stan admina, `tenantIcpConfigService
+// .getActiveConfig()`) — może być chwilowo invalid, to normalne w trakcie edycji.
+// Każda mutacja publikuje nową wersję TYLKO gdy wynik jest poprawny (patrz
+// bumpRevisionAndMaybePublish w tenantIcpConfigService.js) — `published: false`
+// w odpowiedzi znaczy "zapisano roboczo, ale enrichment nadal używa poprzedniej,
+// wciąż poprawnej wersji". Concurrency dla LIVE edycji idzie przez
+// `expected_revision`/`config_revision` (NIE numer opublikowanej wersji —
+// te dwa liczniki są od siebie niezależne).
+
+// ── GET /:id/icp-config — pełna LIVE konfiguracja (wszystkie sygnały, aktywne
+// i nieaktywne — admin edytuje obie) + walidacja sumy punktów + numer aktywnej
+// (opublikowanej) wersji, do której enrichment realnie się odwołuje ─────────
+router.get('/:id/icp-config',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      if (!(await findAliveTenant(req.params.id))) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const cfg = await tenantIcpConfigService.getActiveConfig(req.params.id);
+      const validity = enrichSvc.evaluateIcpConfigValidity(cfg);
+
+      res.json({
+        qualification_threshold: cfg.qualificationThreshold,
+        config_revision: cfg.configRevision,
+        current_version_id: cfg.currentVersionId,
+        current_version: cfg.currentVersionId
+          ? (await tenantIcpConfigService.getConfigVersionById(req.params.id, cfg.currentVersionId))?.version ?? null
+          : null,
+        is_default: cfg.isDefault,
+        signals: cfg.signals,
+        signals_sum: validity.signalsSum,
+        signals_max: validity.signalsMax,
+        is_valid: validity.isValid,
+        final_max_score: validity.finalMaxScore,
+      });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /:id/icp-signals — dodaj sygnał ───────────────────────────────────
+router.post('/:id/icp-signals',
+  [
+    param('id').isUUID(),
+    body('label').isString().trim().notEmpty().isLength({ max: 255 }),
+    body('ai_definition').isString().trim().notEmpty(),
+    body('short_description').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+    body('points').isInt({ min: 0 }).toInt(),
+    body('tier').optional({ nullable: true }).isString().trim(),
+    body('active').optional().isBoolean(),
+    body('sort_order').optional({ nullable: true }).isInt().toInt(),
+    body('requires_any_of').optional({ nullable: true }).isArray(),
+    body('requires_any_of.*').optional().isUUID(),
+    body('key').optional({ nullable: true }).isString().trim()
+      .matches(/^[a-z][a-z0-9_]*$/).withMessage('key: tylko [a-z0-9_], musi zaczynać się literą'),
+    body('expected_revision').optional({ nullable: true }).isInt({ min: 0 }).toInt(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      if (!(await findAliveTenant(req.params.id))) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      // Jeśli tenant jest jeszcze na fallbacku DEFAULT_SIGNALS (0 własnych wierszy),
+      // materializuj 8 defaultów jako realne wiersze PRZED dodaniem nowego —
+      // inaczej "+ Dodaj sygnał" sprawiłoby, że pozostałe 7 "widocznych" w UI
+      // defaultów zniknęłoby po kolejnym odświeżeniu (patrz tenantIcpConfigService.js).
+      // Tania no-op dla tenanta, który już ma własne wiersze.
+      await tenantIcpConfigService.materializeDefaultsIfFallback(req.params.id, req.user.id);
+
+      const { signal, configRevision, published, version } = await tenantIcpConfigService.addSignal(req.params.id, {
+        label: req.body.label,
+        aiDefinition: req.body.ai_definition,
+        shortDescription: req.body.short_description ?? null,
+        points: req.body.points,
+        tier: req.body.tier ?? null,
+        active: req.body.active,
+        sortOrder: req.body.sort_order,
+        requiresAnyOf: req.body.requires_any_of,
+        key: req.body.key,
+      }, {
+        expectedRevision: req.body.expected_revision,
+        actorUserId: req.user.id,
+      });
+
+      logger.info('Super admin added ICP signal', { tenantId: req.params.id, signalKey: signal.key, published, by: req.user.email });
+      res.status(201).json({ signal, config_revision: configRevision, published, version: version?.version ?? null });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  }
+);
+
+// ── PUT /:id/icp-signals/:signalId — edytuj sygnał (label/definicja/punkty/
+// tier/active/sort_order/requires_any_of — NIGDY key, patrz tenantIcpConfigService) ─
+router.put('/:id/icp-signals/:signalId',
+  [
+    param('id').isUUID(),
+    param('signalId').isUUID(),
+    body('label').optional().isString().trim().notEmpty().isLength({ max: 255 }),
+    body('ai_definition').optional().isString().trim().notEmpty(),
+    body('short_description').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+    body('points').optional().isInt({ min: 0 }).toInt(),
+    body('tier').optional({ nullable: true }).isString().trim(),
+    body('active').optional().isBoolean(),
+    body('sort_order').optional().isInt().toInt(),
+    body('requires_any_of').optional({ nullable: true }).isArray(),
+    body('requires_any_of.*').optional().isUUID(),
+    body('expected_revision').optional({ nullable: true }).isInt({ min: 0 }).toInt(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      if (!(await findAliveTenant(req.params.id))) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const patch = {};
+      // "key" przechodzi też, mimo że nie ma walidatora w tej trasie i
+      // tenantIcpConfigService go zawsze odrzuci (key jest niezmienny) —
+      // celowo, żeby caller dostał precyzyjny błąd "key jest niezmienny",
+      // nie mylące "brak pól do zmiany" przy body={key:...} bez innych pól.
+      if ('key' in req.body) patch.key = req.body.key;
+      if ('label' in req.body) patch.label = req.body.label;
+      if ('ai_definition' in req.body) patch.aiDefinition = req.body.ai_definition;
+      if ('short_description' in req.body) patch.shortDescription = req.body.short_description;
+      if ('points' in req.body) patch.points = req.body.points;
+      if ('tier' in req.body) patch.tier = req.body.tier;
+      if ('active' in req.body) patch.active = req.body.active;
+      if ('sort_order' in req.body) patch.sortOrder = req.body.sort_order;
+      if ('requires_any_of' in req.body) patch.requiresAnyOf = req.body.requires_any_of;
+
+      const { signal, configRevision, published, version } = await tenantIcpConfigService.updateSignal(
+        req.params.id, req.params.signalId, patch,
+        { expectedRevision: req.body.expected_revision, actorUserId: req.user.id },
+      );
+
+      logger.info('Super admin updated ICP signal', { tenantId: req.params.id, signalKey: signal.key, published, by: req.user.email });
+      res.json({ signal, config_revision: configRevision, published, version: version?.version ?? null });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  }
+);
+
+// ── POST /:id/icp-signals/reorder — ustaw kolejność (pełna, deduplikowana
+// lista WSZYSTKICH id sygnałów tenanta w nowej kolejności) ─────────────────
+router.post('/:id/icp-signals/reorder',
+  [
+    param('id').isUUID(),
+    body('ordered_signal_ids').isArray({ min: 1 }),
+    body('ordered_signal_ids.*').isUUID(),
+    body('expected_revision').optional({ nullable: true }).isInt({ min: 0 }).toInt(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      if (!(await findAliveTenant(req.params.id))) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const { configRevision, published, version } = await tenantIcpConfigService.reorderSignals(
+        req.params.id, req.body.ordered_signal_ids,
+        { expectedRevision: req.body.expected_revision, actorUserId: req.user.id },
+      );
+
+      logger.info('Super admin reordered ICP signals', { tenantId: req.params.id, published, by: req.user.email });
+      res.json({ config_revision: configRevision, published, version: version?.version ?? null });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  }
+);
+
+// ── DELETE /:id/icp-signals/:signalId — soft delete (active=false) jeśli
+// sygnał kiedykolwiek został opublikowany, inaczej hard delete ─────────────
+router.delete('/:id/icp-signals/:signalId',
+  [
+    param('id').isUUID(),
+    param('signalId').isUUID(),
+    body('expected_revision').optional({ nullable: true }).isInt({ min: 0 }).toInt(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      if (!(await findAliveTenant(req.params.id))) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const { softDeleted, configRevision, published, version } = await tenantIcpConfigService.deleteSignal(
+        req.params.id, req.params.signalId,
+        { expectedRevision: req.body?.expected_revision, actorUserId: req.user.id },
+      );
+
+      logger.info('Super admin deleted ICP signal', {
+        tenantId: req.params.id, signalId: req.params.signalId, softDeleted, published, by: req.user.email,
+      });
+      res.json({ soft_deleted: softDeleted, config_revision: configRevision, published, version: version?.version ?? null });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  }
+);
+
+// PUT /:id/icp-threshold USUNIĘTE (2026-09, po audycie) — qualification_threshold
+// nie jest już niezależnie edytowalny stąd. Jedynym źródłem prawdy jest
+// app_settings.prospect_lead_min_score (edytowalny w Ustawieniach aplikacji,
+// kategoria CRM) — patrz getTenantQualificationThreshold() w
+// tenantIcpConfigService.js. GET /:id/icp-config nadal zwraca
+// qualification_threshold do wyświetlenia (informacyjnie), ale tylko do odczytu.
 
 module.exports = router;
