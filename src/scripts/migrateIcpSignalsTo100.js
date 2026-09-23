@@ -12,18 +12,27 @@
 // Trzy ścieżki per tenant:
 //   1. Brak wierszy w tenant_icp_signals (czysty fallback) — nic nie robimy,
 //      automatycznie dostanie nowy DEFAULT_SIGNALS przy najbliższym odczycie.
-//   2. CRMtree Gold (slug 'crmtree-gold') — jawny override: wyłącz
-//      rozproszona_struktura i ecommerce_b2b (reszta punktów już się zgadza
-//      z ustalonym schematem, patrz plan migracji).
+//   2. CRMtree Gold (slug 'crmtree-gold') — tenant referencyjny, ZAWSZE
+//      resynchronizowany key-po-key do DEFAULT_SIGNALS (patrz
+//      syncSignalsToDefault), niezależnie od tego w jakim stanie akurat są
+//      jego live sygnały. Naprawione 2026-09-23 (audyt Enrichment V2, H2) —
+//      poprzednio ta gałąź TYLKO dezaktywowała rozproszona_struktura/
+//      ecommerce_b2b i zakładała bez weryfikacji, że reszta punktów już się
+//      zgadza z nowym schematem; jeśli Gold miał jeszcze stare punkty
+//      (suma 70), aktywna suma po samej dezaktywacji wynosiła 60 — LIVE
+//      config nigdy się nie publikował (bumpRevisionAndMaybePublish wymaga
+//      dokładnie 100), a seedDefaultConfigForTenant() kopiuje PUBLISHED
+//      snapshot Gold jako bazę dla KAŻDEGO nowego tenanta.
 //   3. Config identyczny 1:1 ze STARYM DEFAULT_SIGNALS (8 sygnałów, te same
-//      key/points/active) — resynchronizuj key-po-key do NOWEGO
-//      DEFAULT_SIGNALS (tenantIcpConfigService.DEFAULT_SIGNALS), dodając
-//      brakujący 9. sygnał (cykliczna_obsluga_klienta_odnowienia).
+//      key/points/active) — ta sama resynchronizacja co Gold.
 //   4. Wszystko inne (realnie dostosowany config, nie Gold) — POMIŃ, wypisz
 //      do ręcznego przeglądu. Nigdy nie zgaduje nowych wag za admina/tenanta.
 //
-// Skrypt jest idempotentny — po migracji żaden tenant nie jest już "pristine
-// ze starym configiem", więc drugie uruchomienie nic więcej nie zmieni.
+// Skrypt jest idempotentny — syncSignalsToDefault aktualizuje tylko klucze,
+// których points/active różnią się od DEFAULT_SIGNALS, i dodaje brakujący
+// klucz co najwyżej raz (po key, nie tworzy duplikatów); po migracji żaden
+// tenant nie jest już "pristine ze starym configiem", więc drugie
+// uruchomienie nic więcej nie zmieni (ani dla Gold, ani dla pristine).
 // ─────────────────────────────────────────────────────────────────
 
 const db = require('../config/database');
@@ -51,7 +60,28 @@ function isPristineOldDefault(rows) {
 }
 
 const GOLD_SLUG = 'crmtree-gold';
-const GOLD_DEACTIVATE_KEYS = ['rozproszona_struktura', 'ecommerce_b2b'];
+
+// Zsynchronizuj LIVE sygnały tenanta 1:1 z aktualnym svc.DEFAULT_SIGNALS,
+// key-po-key: update points/active dla istniejących kluczy (tylko gdy
+// faktycznie się różnią), dodanie brakującego klucza. Operuje po key więc
+// nigdy nie tworzy duplikatu; nic nie robi dla klucza już zgodnego z
+// DEFAULT_SIGNALS — stąd idempotencja przy powtórnym uruchomieniu.
+async function syncSignalsToDefault(tenantId, liveSignals) {
+  const byKey = new Map(liveSignals.map((r) => [r.key, r]));
+  for (const def of svc.DEFAULT_SIGNALS) {
+    const row = byKey.get(def.key);
+    if (row) {
+      if (row.active !== def.active || Number(row.points) !== def.points) {
+        await svc.updateSignal(tenantId, row.id, { points: def.points, active: def.active });
+      }
+    } else {
+      await svc.addSignal(tenantId, {
+        key: def.key, label: def.label, aiDefinition: def.ai_definition,
+        points: def.points, tier: def.tier, active: def.active,
+      });
+    }
+  }
+}
 
 async function migrateTenant(tenant) {
   const { rows: liveSignals } = await db.query(
@@ -64,30 +94,12 @@ async function migrateTenant(tenant) {
   }
 
   if (tenant.slug === GOLD_SLUG) {
-    for (const key of GOLD_DEACTIVATE_KEYS) {
-      const row = liveSignals.find((r) => r.key === key);
-      if (row && row.active) {
-        await svc.setSignalActive(tenant.id, row.id, false);
-      }
-    }
+    await syncSignalsToDefault(tenant.id, liveSignals);
     return { tenant: tenant.name, action: 'migrated_gold' };
   }
 
   if (isPristineOldDefault(liveSignals)) {
-    const byKey = new Map(liveSignals.map((r) => [r.key, r]));
-    for (const def of svc.DEFAULT_SIGNALS) {
-      const row = byKey.get(def.key);
-      if (row) {
-        if (row.active !== def.active || Number(row.points) !== def.points) {
-          await svc.updateSignal(tenant.id, row.id, { points: def.points, active: def.active });
-        }
-      } else {
-        await svc.addSignal(tenant.id, {
-          key: def.key, label: def.label, aiDefinition: def.ai_definition,
-          points: def.points, tier: def.tier, active: def.active,
-        });
-      }
-    }
+    await syncSignalsToDefault(tenant.id, liveSignals);
     return { tenant: tenant.name, action: 'migrated_pristine' };
   }
 
@@ -137,4 +149,11 @@ async function main() {
   process.exit(allOk ? 0 : 1);
 }
 
-main().catch((err) => { console.error(err); process.exit(1); });
+// Eksport na potrzeby testu regresyjnego (audyt Enrichment V2, H2, 23.09) —
+// require() tego pliku NIE uruchamia już migracji na realnej bazie, tylko
+// gdy jest wywołany bezpośrednio (`node src/scripts/migrateIcpSignalsTo100.js`).
+module.exports = { migrateTenant, syncSignalsToDefault, isPristineOldDefault, OLD_DEFAULT_SIGNALS, GOLD_SLUG };
+
+if (require.main === module) {
+  main().catch((err) => { console.error(err); process.exit(1); });
+}
