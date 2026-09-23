@@ -69,21 +69,35 @@ const DEFAULT_SIGNALS = Object.freeze([
     key: 'dzial_handlowy',
     label: 'Dział handlowy',
     ai_definition:
-      'RÓWNOWAŻNE nazwy tej samej struktury — traktuj jako identyczny dowód, nie tylko dosłowne ' +
-      '"dział handlowy": "dział handlowy", "dział sprzedaży", "sales team", "sales department", ' +
-      '"zespół sprzedaży", "przedstawiciele handlowi" jako nazwana sekcja/nagłówek. ' +
-      'Główny dowód: jawnie nazwany dział/zespół sprzedażowy (nagłówek podstrony, sekcja "Nasz ' +
-      'zespół sprzedaży", nazwa działu w strukturze firmy, pod dowolną z powyższych równoważnych ' +
-      'nazw) — WYSTARCZA nawet przy JEDNEJ widocznej, nazwanej osobie pod tym nagłówkiem, bo ' +
-      'dowodem jest nazwana struktura organizacyjna, nie liczba osób. LUB: podstrona ' +
-      'zespołu/kontaktu BEZ nazwanego nagłówka działu, ale z co najmniej 2-3 nazwanymi osobami ' +
-      'pełniącymi role stricte handlowe (przedstawiciel handlowy, sprzedawca, account manager — ' +
-      'nie zarząd) — to alternatywny, słabszy dowód używany tylko gdy nagłówka działu brak. ' +
-      'NIE wystarcza: jedna nazwana osoba na stanowisku dyrektorskim ("Dyrektor Handlowy", ' +
-      '"Dyrektor ds. Handlowych", "Sales Director") BEZ nazwanego działu/zespołu obok niej i bez ' +
-      'innych wymienionych handlowców — to może być jedna osoba w zarządzie, nie dowód na ' +
-      'istnienie sformalizowanego działu. ' +
-      'Drugorzędne wsparcie: sam adres sprzedaz@/sales@ — może być zwykłą skrzynką ogólną.',
+      'TRUE oznacza REALNĄ funkcję sprzedażową — nie dowolny ślad biznesowy (poprawka 23.09, ' +
+      'trzecia tura). Interpretuj semantycznie, nie wymagaj dosłownego zwrotu "dział handlowy": ' +
+      '"dział sprzedaży", "sales team", "sales department", "zespół sprzedaży", "przedstawiciele ' +
+      'handlowi" i ich funkcjonalne odpowiedniki liczą się tak samo. ' +
+      'Główny dowód, dowolne z poniższych: (a) jawnie nazwany dział/zespół sprzedaży lub handlowy ' +
+      '(nagłówek podstrony, sekcja, nazwa w strukturze firmy) — wystarcza nawet przy jednej ' +
+      'widocznej osobie pod tym nagłówkiem, bo dowodem jest nazwana struktura, nie liczba osób; ' +
+      '(b) co najmniej DWÓCH nazwanych handlowców/przedstawicieli/account managerów, nawet bez ' +
+      'nagłówka działu; (c) POJEDYNCZA osoba sprzedażowa, JEŚLI kontekst (opis roli, zakres ' +
+      'obowiązków, sposób przedstawienia — nie sam tytuł) pokazuje, że REALNIE prowadzi sprzedaż/ ' +
+      'ofertowanie/pozyskiwanie klientów; (d) struktura funkcjonalnie pełniąca rolę sprzedaży mimo ' +
+      'innej nazwy, jeśli jest OSOBNO opisana jako odpowiedzialna za pozyskiwanie/finalizowanie ' +
+      'zamówień klientów (nie tylko nazwana podobnie z nazwy). ' +
+      'NIE WYSTARCZA SAMODZIELNIE, nawet jeśli to jedyny dostępny ślad (poprawka 23.09, trzecia ' +
+      'tura): sama osoba "Dyrektor Handlowy"/"Dyrektor ds. Handlowych" wymieniona np. w składzie ' +
+      'zarządu, BEZ żadnego opisu, że realnie prowadzi sprzedaż — sam tytuł członka zarządu bez ' +
+      'opisu roli to za mało, mogła objąć funkcję czysto nadzorczą; sekcja/strona "Dla firm"/"Dla ' +
+      'biznesu" (to oferta kierowana do biznesu, nie dowód na istnienie działu sprzedaży); sam ' +
+      'formularz kontaktowy lub formularz wyceny; sam adres sprzedaz@/sales@ (może być zwykłą ' +
+      'ogólną skrzynką); ogólne "biuro"/"obsługa zleceń" (to może być administracja/logistyka, nie ' +
+      'sprzedaż); samo Biuro Obsługi Klienta (BOK); samo biuro projektowe/dział B+R/dział techniczny ' +
+      '(to zdolność projektowo-inżynierska, nie sprzedażowa); ogólne hasło "doradztwo techniczno- ' +
+      'handlowe" BEZ wskazania konkretnych ludzi lub struktury odpowiedzialnej za sprzedaż. ' +
+      'Powyższe wykluczenia mogą się WZAJEMNIE WSPIERAĆ tylko jeśli razem opisują TĘ SAMĄ, realną ' +
+      'funkcję sprzedażową (np. "dział handlowy: sprzedaz@firma.pl" — dział już nazwany, adres to ' +
+      'tylko dodatkowy kontakt do niego) — żadne z nich osobno nie zastępuje głównego dowodu, i nie ' +
+      'sumuj kilku wykluczeń w nadzieję, że razem złożą się na dowód, jeśli żadne nie opisuje realnej ' +
+      'sprzedaży. ZWRÓĆ FALSE, gdy jedyne dostępne ślady to wyłącznie pozycje z listy wykluczeń, bez ' +
+      'żadnego głównego dowodu obok nich.',
     short_description: 'Jawnie nazwany dział/zespół sprzedaży albo kilka konkretnych osób pełniących role handlowe.',
     points: 30,
     tier: 'wysoka',
@@ -94,39 +108,35 @@ const DEFAULT_SIGNALS = Object.freeze([
   {
     id: '00000000-0000-4000-8000-000000000002',
     key: 'zlozony_proces_sprzedazy',
-    label: 'Złożony proces sprzedaży / indywidualna wycena',
+    label: 'Indywidualna wycena',
     ai_definition:
       'Relacyjny, projektowy lub negocjacyjny model PROCESU SPRZEDAŻY, nie zakup impulsowy. ' +
-      'KLUCZOWA GRANICA: cena musi być ustalana INDYWIDUALNIE, PO stronie firmy, na podstawie ' +
-      'potrzeb/specyfikacji konkretnego klienta — nie może być z góry jawnie podana jako stała ' +
-      'kwota za standardowy produkt/usługę. Sam fakt sprzedaży B2B, posiadania formularza ' +
-      'kontaktowego lub możliwości "skontaktowania się ze sprzedażą" NIE wystarcza, jeśli nie ' +
-      'towarzyszy temu informacja, że wycena/oferta jest przygotowywana indywidualnie. ' +
-      'Główny dowód — wymagany KONKRETNY dowód PROCESU OFERTOWEGO, jedno z poniższych: ' +
-      'indywidualna oferta; indywidualna wycena; przygotowanie oferty PO poznaniu wymagań klienta ' +
-      '(indywidualna kalkulacja); RFQ / zapytanie ofertowe PROWADZĄCE DO przygotowania oferty; ' +
-      'negocjowanie indywidualnych warunków/ceny; frazy CTA równoważne powyższym — "zapytaj o ' +
-      'ofertę", "poproś o wycenę", "przygotujemy ofertę", "wycena indywidualna", "wyślij zapytanie ' +
-      'ofertowe". NIE WYSTARCZA (to osobne sygnały, nie ten): sama konsultacja, sam dobór/ ' +
-      'rekomendacja rozwiązania czy konfiguracji pod potrzeby klienta bez wzmianki o etapie ' +
-      'oferty/wyceny (to dowód dla konsultacja_demo, nie tego sygnału — dobór rozwiązania SAM W ' +
-      'SOBIE nie implikuje indywidualnej kalkulacji ceny); sam projekt "pod klienta"; sam brak ' +
-      'jawnego cennika bez żadnej z powyższych fraz. ' +
-      'ZWRÓĆ FALSE: jawna, stała cena konkretnego produktu/usługi (cennik, cena jednostkowa przy ' +
-      'produkcie w sklepie/katalogu) — to standardowa sprzedaż, nie indywidualna wycena, NAWET ' +
-      'jeśli produkt jest sprzedawany firmom; format "od X zł" przy produkcie/usłudze/pokoju/pakiecie ' +
-      '— to publiczny cennik z progami cenowymi, nie dowód indywidualnej kalkulacji dla ' +
-      'konkretnego klienta; standardowa, jawnie podana cena pokoju/usługi/pakietu (np. cennik ' +
-      'hotelowy, konsumencki cennik pakietów) — nawet jeśli firma osobno obsługuje też klientów ' +
-      'biznesowych, sam TEN dowód tego nie potwierdza. UWAGA: jeśli firma ma OSOBNY, jawny ' +
-      'cennik dla JEDNEJ usługi (np. standardowy nocleg) ORAZ oddzielnie opisany proces ofertowy ' +
-      'dla INNEJ, odrębnej usługi (np. eventy/konferencje B2B, zamówienia produkcyjne) — oceniaj ' +
-      'dowód dla tej DRUGIEJ usługi niezależnie; jawny cennik jednej usługi nie dyskwalifikuje ' +
-      'automatycznie dowodu dla innej; sam kontakt do działu sprzedaży / formularz kontaktowy / ' +
-      '"skontaktuj się z nami" BEZ jawnej informacji, że oferta/cena jest przygotowywana ' +
-      'indywidualnie dla klienta — to zwykły kanał kontaktu, nie dowód procesu ofertowego. ' +
-      'Drugorzędne wsparcie (NIE wystarcza samo): sam brak jawnego cennika bez którejś z ' +
-      'powyższych fraz — brak ceny sam w sobie nie jest dowodem złożonego procesu sprzedaży.',
+      'GRANICA (interpretuj semantycznie, nie tylko dosłownie): cena/oferta jest ustalana w jakimś ' +
+      'stopniu INDYWIDUALNIE, na podstawie potrzeb/specyfikacji konkretnego klienta — nie musi być ' +
+      'to jawnie nazwane "wyceną indywidualną", wystarczy wiarygodny opis wskazujący na ten sam ' +
+      'mechanizm innymi słowami. ' +
+      'Główny dowód (wystarcza sam), dowolne z poniższych LUB semantyczny odpowiednik: indywidualna ' +
+      'oferta/wycena; przygotowanie oferty po poznaniu wymagań klienta; RFQ/zapytanie ofertowe ' +
+      'prowadzące do oferty; negocjowanie warunków/ceny; elastyczne/dostosowywane do klienta ' +
+      'warunki współpracy, umowy "szyte na miarę". ' +
+      'Drugorzędne wsparcie (poprawka 23.09, druga tura — NIE wystarcza samo, potrzebuje obok ' +
+      'siebie choć śladu, że oferta/cena faktycznie jest przygotowywana indywidualnie, nie ' +
+      'standardowo): generyczne frazy CTA typu "zapytaj o ofertę", "poproś o wycenę", ' +
+      '"przygotujemy ofertę", "skontaktuj się w sprawie oferty/wyceny", "zapytaj o warunki ' +
+      'współpracy", sam kontakt do działu sprzedaży/ofert bez dalszego kontekstu — te wskazują na ' +
+      'kanał kontaktu, ale same nie potwierdzają, że wycena jest indywidualna, a nie standardowa ' +
+      'odpowiedź na zapytanie. ' +
+      'Jeśli jedyny dostępny dowód to sam dobór/rekomendacja rozwiązania bez ŻADNEJ wzmianki o ' +
+      'etapie oferty/ceny — to wciąż przede wszystkim dowód dla konsultacja_demo; ale gdy tekst ' +
+      'łączy dobór rozwiązania Z choćby pośrednią wzmianką o dalszym etapie wyceny/umowy, licz to ' +
+      'też tutaj. ' +
+      'ZWRÓĆ FALSE: jawna, stała cena KONKRETNEGO produktu/usługi (cennik, cena jednostkowa w ' +
+      'sklepie/katalogu) — to nadal standardowa sprzedaż, NAWET jeśli produkt jest sprzedawany ' +
+      'firmom, chyba że firma OSOBNO opisuje proces ofertowy dla innej usługi (wtedy oceniaj tę ' +
+      'drugą niezależnie). Przy braku jawnego cennika ORAZ przy braku jakiejkolwiek wzmianki o ' +
+      'procesie ofertowym — przechyl się w stronę TRUE, jeśli firma jednoznacznie sprzedaje B2B ' +
+      'produkty/usługi o charakterze projektowym, złożonym lub wymagającym dopasowania (nie dla ' +
+      'prostych, jednorodnych produktów/usług o oczywistej standardowej cenie).',
     short_description: 'Firma przygotowuje ofertę, wycenę lub warunki indywidualnie dla konkretnego klienta.',
     points: 25,
     tier: 'wysoka',
@@ -137,58 +147,45 @@ const DEFAULT_SIGNALS = Object.freeze([
   {
     id: '00000000-0000-4000-8000-000000000003',
     key: 'konsultacja_demo',
-    label: 'Konsultacja, demo lub analiza potrzeb',
+    label: 'Konsultacja / demo',
     ai_definition:
-      'Sprzedaż wymaga rozmowy przed zakupem, nie samoobsługowego checkoutu — łapie też firmy z ' +
-      'jawnym cennikiem, które mimo to sprzedają przez rozmowę (częste w SaaS/usługach). ' +
-      'RÓWNOWAŻNE określenia tego samego etapu procesu — traktuj jako ten sam dowód: konsultacja, ' +
-      'demo, dobór rozwiązania, analiza potrzeb, dobór techniczny, doradztwo przedsprzedażowe, ' +
-      'projektowanie pod klienta/indywidualnego klienta. ' +
-      'Główny dowód (dosłowna fraza LUB funkcjonalny odpowiednik — oba liczą się tak samo): ' +
-      'dosłowne: "umów demo", "zamów prezentację", "bezpłatna konsultacja", "dobór rozwiązania"; ' +
-      'przypisany doradca/opiekun/dyrektor regionalny opisany jako doradztwo PRZEDSPRZEDAŻOWE, ' +
-      'projektowe lub techniczne PRZY DOBORZE ROZWIĄZANIA (np. "Doradcy Twojego projektu"), nawet ' +
-      'bez słowa "konsultacja"; formularz zbierający szczegółowe parametry rozwiązania/zamówienia ' +
-      '(RFQ, zapytanie ofertowe z polami technicznymi), nie sam formularz kontaktowy ogólnego ' +
-      'typu; sprzedaż oparta na indywidualnym projekcie technicznym/architektonicznym/ ' +
-      'inżynierskim, gdzie analiza wymagań klienta jest jawnie opisanym etapem procesu (nie samym ' +
-      'typem działalności — patrz zastrzeżenie niżej); doradztwo opisane jako DOSTOSOWANE do ' +
-      'indywidualnych wymagań klienta (np. "doradztwo w [obszarze]" połączone w tym samym opisie ' +
-      'z "dostosowujemy usługi do indywidualnych wymagań klienta") — to funkcjonalny odpowiednik ' +
-      'doradztwa przedsprzedażowego, nawet jeśli samo słowo "doradztwo" bez tego dopełnienia ' +
-      'byłoby zbyt ogólne. ' +
-      'Drugorzędne wsparcie (nie wystarcza samo): ogólne hasło "indywidualne podejście do ' +
-      'klienta" bez opisu konkretnego procesu, etapu lub osoby. ' +
-      'NIE LICZY SIĘ (mimo słowa "doradca"/"konsultacja" w tekście): doradca/opiekun ds. ' +
-      'likwidacji szkód, ubezpieczeniowy, reklamacji lub gwarancji — to obsługa posprzedażowa/ ' +
-      'roszczeniowa, nie doradztwo przy wyborze zakupu; serwisant, doradca serwisowy/techniczny ' +
-      'wsparcia posprzedażowego, opiekun serwisu — to wsparcie techniczne dla już kupionego ' +
-      'produktu, nie etap sprzedaży; ogólny, poradnikowy tekst nieopisujący WŁASNEGO procesu tej ' +
-      'firmy (np. blogowa porada "na co zwrócić uwagę kupując X" bez odniesienia do konkretnej ' +
-      'usługi/osoby/etapu w tej firmie) — to nie jest dowód konsultacji sprzedażowej, tylko treść ' +
-      'informacyjna; sama produkcja/wykonanie "na wymiar", "na życzenie klienta", "według ' +
-      'dokumentacji/wytycznych/specyfikacji klienta" — to opis MOŻLIWOŚCI PRODUKCYJNYCH ' +
-      '(elastyczność wytwarzania), NIE dowód rozmowy doradczej, i NIE liczy się automatycznie ani ' +
-      'dla tego sygnału, ani dla custom_quote_process; elastyczność produkcyjna i "możliwość ' +
-      'personalizacji" produktu/usługi same w sobie — to opis ZDOLNOŚCI firmy, nie opis PROCESU ' +
-      'rozmowy z klientem przed zakupem; realizacja projektu/dokumentacji DOSTARCZONEJ JUŻ przez ' +
-      'klienta (firma tylko wykonuje to, co klient sam zaprojektował/określił) — brak tu żadnego ' +
-      'etapu doboru/doradztwa PO stronie badanej firmy; fraza w stylu "uwzględniamy wymagania ' +
-      'klienta w produkcji"/"od koncepcji, przez prototyp, aż po finalną produkcję"/"wspólnie ' +
-      'stworzymy rozwiązania"/"projekt od pomysłu do realizacji" — to WCIĄŻ tylko opis zdolności ' +
-      'produkcyjnej lub ogólne hasło o współpracy, dopóki nie jest OSOBNO opisany etap ROZMOWY/DORADZTWA/ANALIZY POTRZEB ' +
-      'PRZED złożeniem zamówienia (kto, kiedy, w jakiej formie ustala z ' +
-      'klientem właściwe rozwiązanie) — sam fakt, że produkt powstaje "pod klienta" lub hasło o ' +
-      'wspólnej pracy nad projektem, nigdy nie wystarcza samo w sobie bez opisanego etapu doboru/ ' +
-      'doradztwa; sam formularz kontaktowy ogólnego typu (imię, e-mail, wiadomość) — to nie jest ' +
-      'dowód konsultacji/analizy potrzeb, nawet jeśli firma go używa jako jedynego kanału ' +
-      'kontaktu. ZASTRZEŻENIE: nie ustawiaj true wyłącznie na podstawie branży/typu działalności ' +
-      'ani z domysłu "każdy proces projektowy wymaga analizy potrzeb" — musi być konkretny ' +
-      'tekstowy sygnał z listy powyżej, nie sama inferencja z rodzaju firmy. Jeśli jedyny dostępny ' +
-      'dowód to opis elastyczności/personalizacji PRODUKCJI (bez osobno opisanego etapu rozmowy ' +
-      'doradczej przed zamówieniem), zwróć false. Jeśli to ten sam fragment tekstu co dowód dla ' +
-      'custom_quote_process, oceń oba sygnały niezależnie, ale nie licz jednego zdania jako dwóch ' +
-      'niezależnych, mocniejszych dowodów.',
+      'TRUE wymaga choć JEDNEJ realnej interakcji przedsprzedażowej z klientem — rozmowy/analizy/ ' +
+      'doboru PRZED złożeniem zamówienia, nie samej możliwości kontaktu (poprawka 23.09, trzecia ' +
+      'tura). Interpretuj semantycznie: jeśli kontekst rzeczywiście opisuje interakcję i ' +
+      'dopasowywanie rozwiązania do klienta, wybieraj TRUE nawet bez słowa "konsultacja" — ale sama ' +
+      'możliwość kontaktu, bez opisu, że ktoś faktycznie analizuje/dobiera rozwiązanie, to za mało. ' +
+      'Główny dowód (dosłowna fraza LUB semantyczny odpowiednik): analiza potrzeb klienta; dobór ' +
+      'rozwiązania/produktu do wymagań klienta; konsultacja (płatna lub bezpłatna); doradztwo przy ' +
+      'wyborze; wizja lokalna przed realizacją; demo/prezentacja produktu; wspólne projektowanie/ ' +
+      'ustalanie rozwiązania z klientem; kontakt ze specjalistą/doradcą W CELU dobrania rozwiązania ' +
+      '(nie ogólny kontakt handlowy); przypisany doradca/opiekun/dyrektor regionalny opisany jako ' +
+      'wspierający wybór rozwiązania, nawet bez słowa "konsultacja"; formularz zbierający ' +
+      'SZCZEGÓŁOWE parametry techniczne zamówienia (RFQ) — nie sam ogólny formularz kontaktowy. ' +
+      'NIE WYSTARCZA SAMODZIELNIE, nawet jeśli to jedyny dostępny ślad (poprawka 23.09, trzecia ' +
+      'tura): samo "skontaktuj się z nami"/"przedstawimy ofertę"/"zapytaj o ofertę" — to zaproszenie ' +
+      'do kontaktu, nie dowód analizy/doboru; sam formularz kontaktowy lub ofertowy bez opisu, że ' +
+      'ktoś po drugiej stronie faktycznie analizuje/dobiera rozwiązanie; samo istnienie biura ' +
+      'projektowego (to zdolność projektowa, nie opisany etap rozmowy z klientem — chyba że tekst ' +
+      'OSOBNO opisuje, że biuro projektowe prowadzi rozmowę/analizę z klientem przed realizacją, nie ' +
+      'tylko projektuje); sam produkt "na wymiar"/"pod klienta" bez opisanej interakcji (patrz ' +
+      'GRANICA niżej); ogólne marketingowe hasło "indywidualne podejście do klienta" bez opisu ' +
+      'konkretnego etapu/osoby/procesu. ' +
+      'GRANICA (produkcja na wymiar): produkcja/usługa "na wymiar", "pod klienta", "na życzenie ' +
+      'klienta" NIE WYSTARCZA SAMA jako opis samej zdolności produkcyjnej — musi towarzyszyć jej ' +
+      'choć przesłanka INTERAKCJI z klientem przed realizacją (np. "ustalamy z klientem", "po ' +
+      'konsultacji", "na podstawie zgłoszonych wymagań", "dobieramy rozwiązanie", "analizujemy ' +
+      'potrzeby klienta") — wtedy liczy się nawet bez opisanego wprost odrębnego „etapu rozmowy”. ' +
+      'NIE LICZY SIĘ (to inny etap obsługi, nie sprzedażowy): doradca/opiekun ds. likwidacji ' +
+      'szkód, ubezpieczeniowy, reklamacji lub gwarancji, serwisant, doradca serwisowy wsparcia ' +
+      'posprzedażowego — to obsługa PO zakupie, nie etap decyzji o zakupie; ogólny, poradnikowy ' +
+      'tekst nieopisujący WŁASNEGO procesu tej firmy (np. blogowa porada niezwiązana z konkretną ' +
+      'usługą/osobą w tej firmie). ' +
+      'ZASTRZEŻENIE: nie ustawiaj true wyłącznie z samej nazwy branży bez żadnego punktu ' +
+      'zaczepienia w tekście. Jeśli to ten sam fragment tekstu co dowód dla zlozony_proces_sprzedazy ' +
+      'lub dzial_handlowy, oceń każdy sygnał NIEZALEŻNIE — licz go dla więcej niż jednego sygnału ' +
+      'TYLKO jeśli fragment faktycznie opisuje osobne zjawiska biznesowe dla każdego z nich; sama ' +
+      'ogólna wzmianka o biurze projektowym/obsłudze klienta/doradztwie nie może automatycznie ' +
+      'zapalać kilku sygnałów naraz.',
     short_description: 'Przed zakupem występuje realny etap doradztwa, analizy potrzeb, doboru rozwiązania lub demo.',
     points: 15,
     tier: 'wysoka',
@@ -199,38 +196,40 @@ const DEFAULT_SIGNALS = Object.freeze([
   {
     id: '00000000-0000-4000-8000-000000000004',
     key: 'opieka_nad_klientem',
-    label: 'Dedykowana opieka nad klientem B2B',
+    label: 'Dedykowana opieka',
     ai_definition:
-      'KLUCZOWA GRANICA: sygnał wymaga OSOBY (lub zespołu) PRZYPISANEJ NA STAŁE do konkretnego ' +
-      'klienta, konta lub segmentu i odpowiedzialnej za CIĄGŁĄ relację z nim — nie samego ' +
-      'istnienia działu/zespołu sprzedaży ani jednej rozmowy sprzedażowej. Rozstrzyga to, czy ' +
-      'tekst albo (a) używa słownictwa dedykowanej opieki ("opiekun", "KAM", "Key Account ' +
-      'Manager/Advisor", "account manager", "doradca ds. kluczowych klientów"), albo (b) wprost ' +
-      'opisuje osobę jako odpowiedzialną NA STAŁE za określony obszar/segment/konto klienta — ' +
-      'sama nazwa stanowiska sprzedażowego (bez żadnego z tych dwóch elementów) NIE wystarcza. ' +
-      'RÓWNOWAŻNE określenia — traktuj jako ten sam dowód: dedykowany opiekun, Key Account ' +
-      'Manager (KAM), account manager, customer success, opieka handlowa B2B, opiekun biznesowy. ' +
-      'Główny dowód: "dedykowany opiekun", "opiekun biznesowy", "Key Account Manager", "account ' +
-      'manager", "Customer Success", "stała opieka nad klientem", LUB osoba jawnie opisana jako ' +
-      'odpowiedzialna na stałe za dany segment/branżę/konto ' +
-      'klienta (np. "kontakt z konsultantem odpowiedzialnym za daną branżę"), nawet ' +
-      'bez słowa "opiekun"/"KAM" wprost. Stanowiska/oferty pracy "Specjalista ds. klientów ' +
-      'kluczowych", "Key Account Manager", "opiekun klienta biznesowego" i ich jednoznaczne ' +
-      'odpowiedniki to RÓWNIEŻ mocny dowód — ogłoszenie o pracę na taką rolę liczy się tak samo ' +
-      'jak opis usługi na stronie. ' +
-      'ZWRÓĆ FALSE: samo Biuro Obsługi Klienta (BOK), sama infolinia, LUB nazwany kierownik/osoba ' +
-      'zarządzająca BOK — to nadal ogólna, niezróżnicowana obsługa, nie opieka przypisana do ' +
-      'konkretnego klienta/konta; zwykły handlowiec/przedstawiciel handlowy przypisany do ' +
-      'REGIONU/terytorium — to pozyskiwanie sprzedaży na obszarze, nie opieka nad już ' +
-      'pozyskanym, konkretnym klientem — chyba że tekst wprost nazywa tę osobę opiekunem/KAM lub ' +
-      'opisuje ją jako odpowiedzialną na stałe za konkretne konto (nie tylko za "sprzedaż w ' +
-      'regionie X"); Kierownik/Dyrektor Działu Sprzedaży — to funkcja zarządcza zespołu ' +
-      'sprzedaży, nie osobista, ciągła opieka nad klientem; sam kontakt do działu sprzedaży ' +
-      '(telefon/e-mail działu) bez informacji o stałej, przypisanej opiece nad konkretnym ' +
-      'klientem/kontem; sama opieka powdrożeniowa, serwis, utrzymanie, aktualizacje, przeglądy ' +
-      'czy odnowienia umów/usług BEZ wzmianki o przypisanym opiekunie/KAM — to dowód dla ' +
-      'cykliczna_obsluga_klienta_odnowienia (CO się powtarzalnie dzieje z klientem), nie dla tego ' +
-      'sygnału (KTO jest za niego stale odpowiedzialny) — oceniaj oba sygnały niezależnie.',
+      'TRUE oznacza REALNĄ, TRWAŁĄ odpowiedzialność za KONKRETNEGO klienta/konto/relację — nie ' +
+      'dowolną formę kontaktu z klientem (poprawka 23.09, czwarta tura). Interpretuj semantycznie: ' +
+      'nie wymagaj dosłownego słowa "opiekun"/"KAM", wystarczy wiarygodny opis pełniący tę samą ' +
+      'funkcję — ale musi z niego wynikać, że ktoś POZOSTAJE odpowiedzialny za danego klienta, a ' +
+      'nie tylko z nim rozmawia, sprzedaje mu albo obsługuje jego zlecenie. ' +
+      'Główny dowód (dowolne z poniższych, także bez słowa "opiekun"): "dedykowany opiekun", ' +
+      '"opiekun biznesowy", "opiekun klienta", Key Account Manager (KAM), account manager, ' +
+      '"Specjalista ds. Kluczowych Klientów", Customer Success, "stała opieka nad klientem", ' +
+      'opieka handlowa B2B; osoba prowadząca konto klienta; dedykowany/stały kontakt przypisany do ' +
+      'konkretnego klienta; specjalista/konsultant PRZYPISANY do konkretnego klienta lub jego ' +
+      'branży (np. "kontakt z konsultantem odpowiedzialnym za daną branżę"). ' +
+      'NIE WYSTARCZA SAMODZIELNIE (poprawka 23.09, czwarta tura — każdy z tych przypadków realnie ' +
+      'wystąpił w benchmarku jako fałszywe TRUE): przypisanie przedstawiciela/handlowca TYLKO do ' +
+      'REGIONU/terytorium/województwa — to podział rynku dla pozyskiwania sprzedaży, nie trwała ' +
+      'odpowiedzialność za już pozyskanego klienta (dotyczy to także osoby nazwanej "opiekunem ' +
+      'regionalnym"/"terytorialnym" — liczy się dopiero, gdy z tekstu OSOBNO wynika opieka nad ' +
+      'KLIENTEM, nie nad obszarem); ogólne hasło "stała współpraca"/"wieloletnia współpraca" bez ' +
+      'wskazania osoby lub roli odpowiedzialnej za klienta; "partner biznesowy"/"dedykowany ' +
+      'partner"/"trusted partner" bez informacji, kto i w jakiej formie opiekuje się konkretnym ' +
+      'klientem; rola OPERACYJNA (dyspozytor, koordynator transportu, planista, obsługa zleceń) — ' +
+      'to prowadzenie procesu/zlecenia, nie relacji z klientem; rola TECHNICZNA (serwisant, ' +
+      'wdrożeniowiec, tester, inżynier wsparcia) — to obsługa produktu, nie konta klienta; zwykły ' +
+      'handlowiec/sprzedawca BEZ żadnej przesłanki, że pozostaje odpowiedzialny za klienta PO ' +
+      'pozyskaniu; sama funkcja Kierownika/Dyrektora Sprzedaży — to zarządzanie zespołem. ' +
+      'Każdy z powyższych liczy się DOPIERO wtedy, gdy tekst DODATKOWO wskazuje na ciągłą ' +
+      'odpowiedzialność za konkretnego klienta/konto. Oferty pracy na role z głównego dowodu liczą ' +
+      'się tak samo jak opis usługi na stronie. ' +
+      'ZWRÓĆ FALSE: ogólne, niezróżnicowane Biuro Obsługi Klienta/infolinia BEZ wzmianki o ' +
+      'przypisanej osobie/koncie. Sama opieka powdrożeniowa/serwis/odnowienia BEZ żadnej wzmianki ' +
+      'o osobie odpowiedzialnej to przede wszystkim dowód dla cykliczna_obsluga_klienta_odnowienia ' +
+      '(CO się dzieje), nie dla tego sygnału (KTO jest odpowiedzialny) — oceniaj oba niezależnie, ' +
+      'ale gdy tekst łączy oba wątki, oba mogą wyjść true.',
     short_description: 'Konkretny opiekun/KAM/osoba lub zespół jest stale odpowiedzialny za klienta, konto albo segment.',
     points: 10,
     tier: 'wysoka',
@@ -241,21 +240,25 @@ const DEFAULT_SIGNALS = Object.freeze([
   {
     id: '00000000-0000-4000-8000-000000000005',
     key: 'przetargi',
-    label: 'Przetargi / dział ofertowania',
+    label: 'Przetargi',
     ai_definition:
       'Firma SPRZEDAJE w przetargach jako wykonawca/dostawca — UWAGA, częsta pomyłka w obie ' +
-      'strony: Dowód pozytywny (true): jawny język REALNEGO udziału w postępowaniu przetargowym ' +
-      'JAKO WYKONAWCA/OFERENT/DOSTAWCA — "realizujemy zamówienia publiczne", "oferta dla sektora ' +
-      'publicznego", "doświadczenie w przetargach", "specjalista ds. przetargów/ofertowania", ' +
-      '"startujemy w przetargach", "oferty przetargowe", "wygraliśmy przetarg", "wygraliśmy ' +
-      'wiele przetargów". NIE WYSTARCZA samo posiadanie klientów/zamawiających publicznych w ' +
-      'portfolio realizacji (gmina, muzeum, biblioteka, urząd jako "Inwestor:" zrealizowanego ' +
-      'projektu) — to dowód na OBSŁUGĘ sektora publicznego, nie na SPOSÓB pozyskania tego ' +
-      'kontraktu. Bez jawnego słowa "przetarg"/"zamówienie publiczne"/"PZP" użytego w kontekście ' +
-      'SPRZEDAŻY/WYGRANIA (nie samego faktu posiadania takiego klienta), zwróć false. NIE liczy ' +
-      'się, nawet jeśli słowo "przetarg" występuje (to firma KUPUJĄCA, zwróć false): ' +
-      '"postępowania zakupowe", "zamówienia dla dostawców", "przetargi organizowane przez nas", ' +
-      '"profil nabywcy".',
+      'strony (KIERUNEK jest tu logiczną sprzecznością, nie kwestią interpretacji — nie zmieniaj ' +
+      'go mimo ogólnej zasady recall-first). Dowód pozytywny (true): jawny lub semantycznie ' +
+      'równoważny opis REALNEGO udziału w postępowaniu przetargowym JAKO WYKONAWCA/OFERENT/ ' +
+      'DOSTAWCA — "realizujemy zamówienia publiczne", "oferta dla sektora publicznego", ' +
+      '"doświadczenie w przetargach", "specjalista ds. przetargów/ofertowania", "startujemy w ' +
+      'przetargach", "oferty przetargowe", "wygraliśmy przetarg" — nie wymagaj dosłownie słowa ' +
+      '"przetarg", ale wymagaj choć POŚREDNIEJ wzmianki o trybie postępowania/zamówienia/konkursu ' +
+      'ofert (np. "wygrany konkurs ofert", "zamówienie w trybie ustawy PZP", "postępowanie o ' +
+      'udzielenie zamówienia"). ' +
+      'NIE WYSTARCZA (poprawka 23.09, druga tura): samo duże/liczne portfolio klientów/ ' +
+      'zamawiających publicznych (gminy, urzędy, spółki Skarbu Państwa) BEZ ŻADNEJ wzmianki o ' +
+      'trybie pozyskania kontraktu — to nadal dowód na OBSŁUGĘ sektora publicznego, nie na SPOSÓB ' +
+      'jego pozyskania, niezależnie od liczby takich klientów; firma mogła ich zdobyć bez żadnego ' +
+      'przetargu. NIE liczy się, nawet jeśli słowo "przetarg" występuje (to firma ' +
+      'KUPUJĄCA, zwróć false): "postępowania zakupowe", "zamówienia dla dostawców", "przetargi ' +
+      'organizowane przez nas", "profil nabywcy".',
     short_description: 'Firma występuje jako wykonawca/dostawca w przetargach, nie jako zamawiający.',
     points: 5,
     tier: 'wysoka',
@@ -266,7 +269,7 @@ const DEFAULT_SIGNALS = Object.freeze([
   {
     id: '00000000-0000-4000-8000-000000000006',
     key: 'rozproszona_struktura',
-    label: 'Rozproszona struktura sprzedaży / wiele oddziałów',
+    label: 'Rozproszona struktura',
     ai_definition:
       'Zespół lub sieć sprzedaży fizycznie rozproszona terytorialnie, WYŁĄCZNIE WŁASNA (ten sam ' +
       'podmiot/firma — nie osobne podmioty, nawet powiązane kapitałowo). Oddział/przedstawicielstwo ' +
@@ -302,14 +305,17 @@ const DEFAULT_SIGNALS = Object.freeze([
   {
     id: '00000000-0000-4000-8000-000000000007',
     key: 'siec_partnerow',
-    label: 'Sieć partnerów / dealerów',
+    label: 'Sieć partnerów',
     ai_definition:
-      'KLUCZOWY WARUNEK — KIERUNEK RELACJI: sygnał dotyczy WYŁĄCZNIE sytuacji, w której BADANA ' +
-      'FIRMA jest DOSTAWCĄ posiadającym/organizującym WŁASNĄ, zewnętrzną sieć sprzedaży — ' +
-      'niezależne podmioty (dealerzy, dystrybutorzy, resellerzy, partnerzy handlowi), które ' +
-      'ODSPRZEDAJĄ PRODUKTY LUB USŁUGI TEJ FIRMY. Zanim uznasz dowód za wystarczający, ustal kto ' +
-      'jest dostawcą, a kto odsprzedawcą w opisanej relacji — sam fakt użycia słowa "partner"/ ' +
+      'KLUCZOWY WARUNEK — KIERUNEK RELACJI (to logiczna sprzeczność, nie kwestia interpretacji — ' +
+      'nie zmieniaj tego mimo ogólnej zasady recall-first): sygnał dotyczy WYŁĄCZNIE sytuacji, w ' +
+      'której BADANA FIRMA jest DOSTAWCĄ posiadającym/organizującym WŁASNĄ, zewnętrzną sieć ' +
+      'sprzedaży — niezależne podmioty (dealerzy, dystrybutorzy, resellerzy, partnerzy handlowi), ' +
+      'które ODSPRZEDAJĄ PRODUKTY LUB USŁUGI TEJ FIRMY. Zanim uznasz dowód za wystarczający, ustal ' +
+      'kto jest dostawcą, a kto odsprzedawcą w opisanej relacji — sam fakt użycia słowa "partner"/ ' +
       '"dealer"/"dystrybutor" NIE wystarcza, jeśli kierunek relacji jest inny albo niesprzedażowy. ' +
+      'Poza tym warunkiem kierunku, resztę oceniaj semantycznie i liberalnie — nie wymagaj ' +
+      'dosłownych fraz z listy niżej, wystarczy wiarygodny opis tego samego mechanizmu. ' +
       'Główny dowód: "zostań partnerem", "sieć dealerska", "dla dystrybutorów", "strefa partnera" ' +
       'w domenie firmy — w kontekście rekrutacji odsprzedawców JEJ WŁASNYCH produktów/usług — LUB ' +
       'jawnie wymieniona lista niezależnych dystrybutorów/przedstawicieli na rynkach ' +
@@ -348,7 +354,7 @@ const DEFAULT_SIGNALS = Object.freeze([
   {
     id: '00000000-0000-4000-8000-000000000008',
     key: 'ecommerce_b2b',
-    label: 'Sprzedaż e-commerce (B2B)',
+    label: 'E-commerce B2B',
     ai_definition:
       'Realny sklep/panel zamówieniowy w domenie firmy skierowany do klientów BIZNESOWYCH, nie ' +
       'zwykły sklep konsumencki (D2C) z możliwością wpisania NIP-u na fakturze. ' +
@@ -379,16 +385,24 @@ const DEFAULT_SIGNALS = Object.freeze([
   {
     id: '00000000-0000-4000-8000-000000000009',
     key: 'cykliczna_obsluga_klienta_odnowienia',
-    label: 'Cykliczna obsługa klienta / odnowienia',
+    label: 'Cykliczna obsługa',
     ai_definition:
       'Firma utrzymuje z klientem relację po pierwszej sprzedaży lub wykonaniu usługi i ' +
-      'występują kolejne zaplanowane zdarzenia wymagające obsługi.\n\n' +
+      'występują kolejne zaplanowane zdarzenia wymagające obsługi — interpretuj semantycznie, nie ' +
+      'wymagaj dosłownych fraz z listy niżej.\n\n' +
       'TRUE, gdy strona wskazuje np. regularne przeglądy, cykliczny serwis, stałą obsługę, ' +
-      'kolejne wizyty, odnawianie lub przedłużanie umów/usług, okresowe kontrole albo inne ' +
-      'powtarzalne działania dotyczące tego samego klienta.\n\n' +
-      'Nie wystarcza sama możliwość ponownego zakupu, newsletter, program lojalnościowy, ' +
-      'automatyczny abonament ani ogólne hasło „serwis". Musi istnieć realna, powtarzalna ' +
-      'obsługa relacji z klientem.',
+      'kolejne wizyty, odnawianie lub przedłużanie umów/usług, okresowe kontrole, gwarancję z ' +
+      'obowiązkowymi przeglądami, wsparcie posprzedażowe opisane jako ciągłe/długoterminowe, albo ' +
+      'inne wiarygodnie powtarzalne działania dotyczące tego samego klienta — także gdy wynika to ' +
+      'tylko pośrednio z charakteru usługi (np. serwis urządzeń/instalacji zwykle wymaga ' +
+      'okresowych przeglądów, nawet bez wprost opisanego harmonogramu).\n\n' +
+      'Nie wystarcza sama możliwość ponownego zakupu, newsletter, program lojalnościowy ani samo ' +
+      'ogólne hasło „serwis" BEZ żadnego wskazania powtarzalności (poprawka 23.09, druga tura). ' +
+      'Automatyczny abonament oraz hasło „serwis" liczą się TYLKO gdy towarzyszy im choć jedno ' +
+      'konkretne słowo/fraza wskazująca powtarzalność (np. "cykliczny", "regularny", "okresowy", ' +
+      '"odnowienie", "umowa serwisowa", "przegląd co [okres]", "kolejne wizyty") — sam bierny opis ' +
+      '"oferujemy serwis" bez takiego wskaźnika to za mało. Przy niepewności, gdy jakiś wskaźnik ' +
+      'powtarzalności jest obecny (choćby słaby), wybieraj true.',
     short_description: 'Po sprzedaży występują powtarzalne zdarzenia: przeglądy, serwis, odnowienia, kolejne wizyty itp.',
     points: 10,
     tier: null,
@@ -882,9 +896,10 @@ async function materializeDefaultsIfFallback(tenantId, actorUserId = null) {
 //    invalid, stara PUBLISHED wersja zostaje aktywna). ──────────────────
 
 // CELOWO addSignal NIE materializuje defaultów automatycznie (w przeciwieństwie
-// do update/delete/reorder niżej) — zrobiłoby to niejednoznaczne: 8 defaultów
-// (70 pkt) + nowy sygnał (N pkt) da 70+N, nigdy 70, więc pierwsze dodanie
-// jakiegokolwiek sygnału na fallbackowym tenancie zawsze psułoby sumę. To
+// do update/delete/reorder niżej) — zrobiłoby to niejednoznaczne: 9 defaultów
+// (aktywne sumują się do 100) + nowy sygnał (N pkt) da 100+N, nigdy 100, więc
+// pierwsze dodanie jakiegokolwiek sygnału na fallbackowym tenancie zawsze
+// psułoby sumę. To
 // świadomie generyczny, "czysty" primitive: dodaje DOKŁADNIE ten jeden sygnał,
 // nic więcej. Materializację przy "+Dodaj sygnał" na fallbacku robi warstwa
 // tras (patrz materializeDefaultsIfFallback niżej, wołane z admin-tenants.js
@@ -1066,12 +1081,67 @@ async function deleteSignal(tenantId, signalId, { expectedRevision, actorUserId 
 // requires_any_of tłumaczone jest przez KLUCZ (key), nigdy przez id — id źródła
 // (gold albo placeholdery w DEFAULT_SIGNALS) nic nie znaczą dla nowo wstawianych
 // wierszy, które i tak dostają świeże gen_random_uuid().
+// Nowy tenant nie może dostać configu, którego bumpRevisionAndMaybePublish i
+// tak nie opublikuje. Taki config zostawiłby current_version_id = NULL, więc
+// Ustawienia → Enrichment/ICP pokazywałyby LIVE (np. sumę 70), a enrichment po
+// cichu liczyłby wg runtime'owego fallbacku DEFAULT_SIGNALS (100) — dwie różne
+// konfiguracje bez jednego widocznego błędu. Lepiej wywalić tworzenie tenanta
+// z czytelnym komunikatem (audyt multi-tenant ICP, 23.09).
+function seedSourceInvalid(message) {
+  const err = new Error(message);
+  err.status = 409;
+  return err;
+}
+
+function assertSeedSourceValid(rowsToSeed, sourceLabel) {
+  // Lazy require z tego samego powodu co w bumpRevisionAndMaybePublish.
+  const { ICP_REQUIRED_SIGNALS_MAX_SCORE } = require('./prospectEnrichmentService');
+
+  if (!Array.isArray(rowsToSeed) || rowsToSeed.length === 0) {
+    throw seedSourceInvalid(`${sourceLabel}: brak jakichkolwiek sygnałów ICP do skopiowania.`);
+  }
+
+  const seenKeys = new Set();
+  for (const r of rowsToSeed) {
+    if (typeof r.key !== 'string' || !KEY_FORMAT.test(r.key)) {
+      throw seedSourceInvalid(`${sourceLabel}: sygnał ma nieprawidłowy key ("${r.key}").`);
+    }
+    if (seenKeys.has(r.key)) {
+      throw seedSourceInvalid(`${sourceLabel}: zduplikowany key "${r.key}".`);
+    }
+    seenKeys.add(r.key);
+    if (typeof r.label !== 'string' || !r.label.trim()) {
+      throw seedSourceInvalid(`${sourceLabel}: sygnał "${r.key}" nie ma etykiety.`);
+    }
+    if (typeof r.ai_definition !== 'string' || !r.ai_definition.trim()) {
+      throw seedSourceInvalid(`${sourceLabel}: sygnał "${r.key}" nie ma definicji dla AI.`);
+    }
+    if (!Number.isInteger(Number(r.points)) || Number(r.points) < 0) {
+      throw seedSourceInvalid(`${sourceLabel}: sygnał "${r.key}" ma nieprawidłowe punkty ("${r.points}").`);
+    }
+    if (typeof r.active !== 'boolean') {
+      throw seedSourceInvalid(`${sourceLabel}: sygnał "${r.key}" ma nieprawidłową flagę active.`);
+    }
+  }
+
+  const activeSum = computeMaxScore(rowsToSeed);
+  if (activeSum !== ICP_REQUIRED_SIGNALS_MAX_SCORE) {
+    throw seedSourceInvalid(
+      `${sourceLabel}: suma punktów aktywnych sygnałów wynosi ${activeSum}, ` +
+      `a wymagane jest ${ICP_REQUIRED_SIGNALS_MAX_SCORE}. Napraw konfigurację ICP tenanta ` +
+      `źródłowego (Ustawienia aplikacji → Enrichment/ICP) i spróbuj ponownie.`,
+    );
+  }
+}
+
 async function seedDefaultConfigForTenant(client, tenantId, { sourceTenantId = null, actorUserId = null } = {}) {
   let rowsToSeed = null;
+  let sourceLabel = 'Wbudowana domyślna konfiguracja ICP (DEFAULT_SIGNALS)';
 
   if (sourceTenantId) {
     const published = await getPublishedConfig(sourceTenantId, client);
     if (!published.isDefault) {
+      sourceLabel = 'Konfiguracja ICP tenanta źródłowego (gold)';
       rowsToSeed = published.signals.map((s) => ({
         key: s.key, label: s.label, ai_definition: s.ai_definition, short_description: s.short_description,
         points: s.points, tier: s.tier, active: s.active, sort_order: s.sort_order,
@@ -1090,6 +1160,8 @@ async function seedDefaultConfigForTenant(client, tenantId, { sourceTenantId = n
       requiresAnyOfKeys: (s.requires_any_of || []).map((id) => idToKey.get(id)).filter(Boolean),
     }));
   }
+
+  assertSeedSourceValid(rowsToSeed, sourceLabel);
 
   const keyToNewId = {};
   for (const r of rowsToSeed) {
@@ -1122,8 +1194,16 @@ async function seedDefaultConfigForTenant(client, tenantId, { sourceTenantId = n
   );
 
   // Seedowane sygnały sumują się do dokładnie tego, co było poprawne u źródła
-  // (albo do 70 dla DEFAULT_SIGNALS) — ta mutacja publikuje wersję 1 od razu.
+  // (albo do 100 dla DEFAULT_SIGNALS) — ta mutacja publikuje wersję 1 od razu.
   const result = await bumpRevisionAndMaybePublish(client, tenantId, actorUserId);
+  // Ostateczna bramka: cokolwiek by się nie stało wyżej, tenant nie wychodzi z
+  // tej funkcji z nieopublikowanym configiem.
+  if (!result.published) {
+    throw seedSourceInvalid(
+      `${sourceLabel}: nie udało się opublikować startowej konfiguracji ICP nowego tenanta. ` +
+      `Tenant nie został utworzony.`,
+    );
+  }
   return { signalsSeeded: rowsToSeed.length, ...result };
 }
 

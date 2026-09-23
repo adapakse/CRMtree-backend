@@ -12,8 +12,36 @@
 //
 // Każdy blok ma min. 2 klasy dowodu pozytywnego (w tym synonimy) i min. 2
 // klasy dowodu granicznego/negatywnego, zgodnie z metodyką audytu z 18.09.2026.
+//
+// AKTUALIZACJA 23.09.2026 — decyzja biznesowa "recall-first": pracownicy CRM
+// mają na tych prospektach pracować i dzwonić — koszt false negative (brak
+// leada do zadzwonienia) jest wyższy niż koszt false positive (kilka minut
+// straconych na słabszym telefonie). Wszystkie 7 AKTYWNYCH sygnałów zostało
+// celowo poluzowanych: wiarygodna przesłanka biznesowa wystarcza do true,
+// bez wymogu literalnych fraz, ocena semantyczna, przy niepewności wybieraj
+// true — ale NIGDY bez żadnej konkretnej przesłanki w tekście (wspólna
+// zasada w PROMPT_STATIC_HEADER, patrz osobny describe-block niżej). Wiele
+// testów niżej oznaczonych "reguła cofnięta 23.09" dokumentuje ŚWIADOME
+// odwrócenie wcześniejszych, precyzyjnych guardów z 18.09/19.09 — to nie
+// regresja. Wagi (points) i próg kwalifikacji (45) NIE zostały ruszone w tej
+// zmianie — patrz tenantIcpConfigService.test.js/icpScoring.test.js.
+//
+// DRUGA TURA 23.09.2026 — po przeglądzie pierwszej tury okazało się, że kilka
+// pojedynczych, bardzo słabych faktów (sam alias sprzedaz@/sales@, sama
+// funkcja Dyrektora Sprzedaży, samo duże portfolio klientów publicznych,
+// samo hasło "serwis") mogło samodzielnie zapalać wysokopunktowe sygnały. Dla
+// 6 z 7 aktywnych sygnałów (dzial_handlowy, zlozony_proces_sprzedazy,
+// konsultacja_demo, opieka_nad_klientem, przetargi, cykliczna_obsluga)
+// przywrócono wymóg choć minimalnego kontekstu/interakcji obok samego faktu —
+// globalna filozofia recall-first ZOSTAJE, cofnięte są tylko te konkretne
+// miejsca. siec_partnerow celowo pominięty — audyt nie znalazł tam analogicznego
+// problemu. Testy niżej oznaczone "poprawka 23.09, druga tura" dokumentują tę
+// korektę i w kilku miejscach zastępują testy "reguła cofnięta 23.09" z
+// pierwszej tury (ten sam wzorzec cofnięcia-po-przeglądzie co dla starszych
+// poprawek 19.09).
 
 const { DEFAULT_SIGNALS } = require('../services/tenantIcpConfigService');
+const { PROMPT_STATIC_HEADER } = require('../services/prospectEnrichmentService');
 
 // Dawne promptKey (nazwy pól w kontrakcie JSON z AI, np. "field_sales_team")
 // zmapowane na dzisiejsze, stabilne tenant_icp_signals.key (np. "dzial_handlowy")
@@ -54,16 +82,66 @@ describe('field_sales_team — klasy dowodu', () => {
   });
 
   test('jawnie nazwany dział wystarcza nawet przy jednej osobie', () => {
-    expect(block).toMatch(/WYSTARCZA nawet przy JEDNEJ/);
+    expect(block).toMatch(/wystarcza nawet przy jednej widocznej osobie pod tym nagłówkiem/);
   });
 
-  test('graniczny przypadek: sam dyrektor bez nazwanego działu NIE wystarcza', () => {
-    expect(block).toMatch(/NIE wystarcza: jedna nazwana osoba na stanowisku dyrektorskim/);
-    expect(block).toContain('Dyrektor Handlowy');
+  // TRZECIA TURA (23.09) — po benchmarku na 100 firmach 63% wyników miało
+  // dokładnie ten sam tercet dzial_handlowy+zlozony_proces_sprzedazy+
+  // konsultacja_demo, a 81% przekraczało próg 45. Ta granica jest teraz
+  // NAJWĘŻSZA ze wszystkich trzech tur: pojedyncza osoba liczy się TYLKO gdy
+  // kontekst (nie sam tytuł) pokazuje realne prowadzenie sprzedaży, a nie
+  // "kontekst w postaci tytułu stanowiska" jak w drugiej turze.
+  test('trzecia tura: pojedyncza osoba wymaga kontekstu roli, NIE samego tytułu stanowiska', () => {
+    expect(block).toMatch(/POJEDYNCZA osoba sprzedażowa, JEŚLI kontekst \(opis roli, zakres\s+obowiązków, sposób przedstawienia — nie sam tytuł\) pokazuje, że REALNIE prowadzi sprzedaż/);
   });
 
-  test('graniczny przypadek: sam adres sprzedaz@/sales@ to za mało', () => {
-    expect(block).toMatch(/sprzedaz@\/sales@/);
+  test('trzecia tura: dwóch nazwanych handlowców wystarcza nawet bez nagłówka działu (przywrócone z 18.09)', () => {
+    expect(block).toMatch(/co najmniej DWÓCH nazwanych handlowców\/przedstawicieli\/account managerów, nawet bez\s+nagłówka działu/);
+  });
+
+  test('trzecia tura: sam adres sprzedaz@/sales@ NIE wystarcza samodzielnie', () => {
+    expect(block).toMatch(/sam adres sprzedaz@\/sales@ \(może być zwykłą\s+ogólną skrzynką\)/);
+  });
+
+  // Regresja: case Energokessel (benchmark 100 firm) — "Janusz Gajda –
+  // Dyrektor ds. Handlowych w zarządzie" bez opisu roli błędnie dało TRUE.
+  test('REGRESJA (case Energokessel): sam Dyrektor ds. Handlowych wymieniony w zarządzie, bez opisu roli, NIE wystarcza', () => {
+    expect(block).toMatch(/sama osoba "Dyrektor Handlowy"\/"Dyrektor ds\. Handlowych" wymieniona np\. w składzie\s+zarządu, BEZ żadnego opisu, że realnie prowadzi sprzedaż/);
+    expect(block).toMatch(/sam tytuł członka zarządu bez\s+opisu roli to za mało, mogła objąć funkcję czysto nadzorczą/);
+  });
+
+  // Regresja: case Telbeskid — sekcja "Dla biznesu" błędnie dała TRUE.
+  test('REGRESJA (case Telbeskid): sekcja "Dla firm"/"Dla biznesu" NIE wystarcza do dzial_handlowy', () => {
+    expect(block).toMatch(/sekcja\/strona "Dla firm"\/"Dla\s+biznesu" \(to oferta kierowana do biznesu, nie dowód na istnienie działu sprzedaży\)/);
+  });
+
+  // Regresja: case Budrem — "kontakt biurowy, obsługa zleceń" błędnie dało TRUE.
+  test('REGRESJA (case Budrem): ogólne "biuro"/"obsługa zleceń" NIE wystarcza (to może być administracja, nie sprzedaż)', () => {
+    expect(block).toMatch(/ogólne "biuro"\/"obsługa zleceń" \(to może być\s+administracja\/logistyka, nie\s+sprzedaż\)/);
+  });
+
+  // Regresja: case Posadzki Przemysłowe — "doradztwo techniczno-handlowe"
+  // bez nazwanych ludzi/struktury błędnie dało TRUE.
+  test('REGRESJA (case Posadzki Przemysłowe): ogólne "doradztwo techniczno-handlowe" bez struktury/ludzi NIE wystarcza', () => {
+    expect(block).toMatch(/ogólne hasło "doradztwo techniczno-\s*handlowe" BEZ wskazania konkretnych ludzi lub struktury\s+odpowiedzialnej za sprzedaż/);
+  });
+
+  test('sama sekcja/strona "Dla firm" oraz formularz kontaktowy/wyceny NIE wystarczają', () => {
+    expect(block).toMatch(/sam formularz kontaktowy lub formularz wyceny/);
+  });
+
+  test('samo BOK oraz samo biuro projektowe/dział B+R/dział techniczny NIE wystarczają', () => {
+    expect(block).toMatch(/samo Biuro Obsługi Klienta \(BOK\); samo biuro projektowe\/dział B\+R\/dział techniczny/);
+    expect(block).toMatch(/to zdolność projektowo-inżynierska, nie sprzedażowa/);
+  });
+
+  test('wykluczenia mogą się wzajemnie wspierać TYLKO jeśli opisują tę samą, realną funkcję sprzedażową', () => {
+    expect(block).toMatch(/Powyższe wykluczenia mogą się WZAJEMNIE WSPIERAĆ tylko jeśli razem opisują TĘ SAMĄ, realną\s+funkcję sprzedażową/);
+    expect(block).toMatch(/nie sumuj kilku wykluczeń w nadzieję, że razem złożą się na dowód/);
+  });
+
+  test('podłoga recall-first zostaje: FALSE tylko gdy jedyne ślady to wyłącznie wykluczenia, bez głównego dowodu', () => {
+    expect(block).toMatch(/ZWRÓĆ FALSE, gdy jedyne dostępne ślady to wyłącznie pozycje z listy wykluczeń, bez\s+żadnego głównego dowodu obok nich/);
   });
 });
 
@@ -79,52 +157,55 @@ describe('custom_quote_process — klasy dowodu', () => {
     expect(block.toLowerCase()).toContain(phrase.toLowerCase());
   });
 
-  test('graniczny przypadek: sam brak cennika bez frazy CTA NIE wystarcza', () => {
-    expect(block).toMatch(/NIE wystarcza samo\): sam brak jawnego cennika/);
+  // Zaktualizowano 23.09 (decyzja recall-first, 3. poprawka po Enrichment V2
+  // audycie). Cały ten describe-block dokumentował poprzednią, precyzyjną
+  // granicę (poprawki 19.09) — WIELE z tych guardów zostało teraz CELOWO
+  // cofniętych, bo produkt ma priorytetyzować recall nad precyzją (koszt
+  // zbędnego telefonu < koszt pominiętego klienta). To NIE jest przypadkowa
+  // regresja — poniższe testy sprawdzają AKTUALNĄ, świadomą granicę.
+
+  test('reguła cofnięta 23.09: brak cennika + złożony/projektowy produkt B2B TERAZ przechyla się w stronę true', () => {
+    expect(block).toMatch(/Przy braku jawnego cennika ORAZ przy braku jakiejkolwiek wzmianki o procesie ofertowym — przechyl się w stronę TRUE/);
+    expect(block).not.toMatch(/brak ceny sam w sobie nie jest dowodem złożonego procesu sprzedaży/);
   });
 
-  // Poprawka 19.09 (szósta tura) — model czasem uznawał zwykły publiczny
-  // cennik/standardową cenę produktu za dowód indywidualnego ofertowania
-  // (case Dtm System: ceny wprost przy produktach; case Warszawianka: cennik
-  // pakietów "od X zł"). Doprecyzowanie granicy, nie nowe synonimy.
-  test('KLUCZOWA GRANICA: cena musi być ustalana indywidualnie PO stronie firmy, nie z góry podana', () => {
-    expect(block).toMatch(/KLUCZOWA GRANICA: cena musi być ustalana INDYWIDUALNIE/);
+  test('GRANICA interpretowana semantycznie, nie dosłownie', () => {
+    expect(block).toMatch(/GRANICA \(interpretuj semantycznie, nie tylko dosłownie\): cena\/oferta jest ustalana w jakimś stopniu INDYWIDUALNIE/);
   });
 
-  test('graniczny przypadek (case Dtm System): jawna, stała cena produktu w katalogu NIE wystarcza', () => {
-    expect(block).toMatch(/jawna, stała cena konkretnego produktu\/usługi \(cennik, cena jednostkowa przy\s+produkcie w sklepie\/katalogu\)/);
+  // Poprawka 19.09 (szósta tura, case Dtm System/Warszawianka) nadal
+  // obowiązuje w OGÓLNEJ formie: to nie precyzja tylko logika — jawny, stały
+  // cennik KONKRETNEGO produktu jest wprost sprzeczny z "ceną ustalaną
+  // indywidualnie". Poprzednie osobne bullety "format od X zł"/"cennik
+  // pokoju" są teraz jednym, ogólniejszym guardem.
+  test('logiczna sprzeczność (nie precyzja): jawna, stała cena KONKRETNEGO produktu/usługi nadal NIE wystarcza', () => {
+    expect(block).toMatch(/ZWRÓĆ FALSE: jawna, stała cena KONKRETNEGO produktu\/usługi \(cennik, cena jednostkowa w sklepie\/katalogu\)/);
     expect(block).toMatch(/NAWET jeśli produkt jest sprzedawany firmom/);
   });
 
-  test('graniczny przypadek (case Warszawianka): format "od X zł" NIE wystarcza', () => {
-    expect(block).toMatch(/format "od X zł" przy produkcie\/usłudze\/pokoju\/pakiecie/);
+  test('poprawka 23.09, druga tura: sam kontakt do działu sprzedaży/formularz PONOWNIE nie wystarcza samodzielnie', () => {
+    expect(block).toMatch(/sam kontakt do działu sprzedaży\/ofert bez dalszego kontekstu — te wskazują na\s+kanał kontaktu, ale same nie potwierdzają, że wycena jest indywidualna/);
   });
 
-  test('graniczny przypadek: standardowy cennik pokoju\/usługi\/pakietu NIE wystarcza mimo obsługi klientów biznesowych', () => {
-    expect(block).toMatch(/standardowa, jawnie podana cena pokoju\/usługi\/pakietu/);
+  // Granica względem konsultacja_demo ZOSTAJE (to podział koncepcyjny, nie
+  // guard precyzyjny) — ale wymóg dowodu złagodzony: dawniej "bez wzmianki",
+  // teraz "bez ŻADNEJ wzmianki", i przy połączeniu z choćby pośrednim
+  // wątkiem wyceny liczy się w obu sygnałach.
+  test('podział koncepcyjny z konsultacja_demo ZOSTAJE, ale próg złagodzony do "bez ŻADNEJ wzmianki"', () => {
+    expect(block).toMatch(/sam dobór\/rekomendacja rozwiązania bez ŻADNEJ wzmianki o etapie oferty\/ceny/);
+    expect(block).toMatch(/to wciąż przede wszystkim dowód dla konsultacja_demo/);
+    expect(block).toMatch(/gdy tekst łączy dobór rozwiązania Z choćby pośrednią wzmianką.*licz to też tutaj/);
   });
 
-  test('graniczny przypadek: sam formularz kontaktowy\/kontakt ze sprzedażą bez wzmianki o indywidualnej wycenie NIE wystarcza', () => {
-    expect(block).toMatch(/sam kontakt do działu sprzedaży \/ formularz kontaktowy \/ "skontaktuj się z nami" BEZ/);
-  });
-
-  // Poprawka 19.09 (dziewiąta tura) — po pełnym replayu 40 firm precision
-  // sygnału trafiło 100%, ale recall spadł (Terrano, Kolumnapark, Gas Trading,
-  // Uds błędnie false mimo realnego dowodu). Nie cofamy poprawki (DTM/
-  // Warszawianka mają zostać false) — dodajemy węższe rozpoznanie
-  // funkcjonalnego odpowiednika: aktywny dobór parametrów PRZEZ firmę oraz
-  // spersonalizowane CTA, plus rozdzielenie cennika jednej usługi od procesu
-  // ofertowego innej (case Kolumnapark: cennik pokoi vs oferta eventowa B2B).
-  test('funkcjonalny odpowiednik: aktywny dobór wariantu/parametrów PRZEZ firmę liczy się bez słowa "wycena"', () => {
-    expect(block).toMatch(/firma AKTYWNIE DOBIERA\/REKOMENDUJE\s+konkretny wariant\/parametry\/konfigurację/);
-  });
-
-  test('funkcjonalny odpowiednik: spersonalizowane CTA ("jakie rozwiązania możemy Ci zaproponować") liczy się, nie tylko neutralny link "kontakt"', () => {
-    expect(block).toMatch(/dowiedz się, jakie rozwiązania możemy Ci zaproponować/);
+  test('poprawka 23.09, druga tura: frazy CTA przesunięte z "głównego dowodu" do "drugorzędnego wsparcia"', () => {
+    expect(block).toMatch(/Drugorzędne wsparcie \(poprawka 23\.09, druga tura — NIE wystarcza samo/);
+    expect(block).toContain('zapytaj o ofertę');
+    expect(block).toContain('poproś o wycenę');
+    expect(block).not.toMatch(/TO PRZYKŁADY, nie zamknięta lista/);
   });
 
   test('graniczny przypadek (case Kolumnapark): jawny cennik JEDNEJ usługi nie dyskwalifikuje dowodu dla INNEJ, odrębnej usługi B2B', () => {
-    expect(block).toMatch(/jeśli firma ma OSOBNY, jawny\s+cennik dla JEDNEJ usługi.*ORAZ oddzielnie opisany proces\s+ofertowy dla INNEJ/s);
+    expect(block).toMatch(/chyba że firma OSOBNO opisuje proces ofertowy dla innej usługi \(wtedy oceniaj tę drugą niezależnie\)/);
   });
 });
 
@@ -132,59 +213,67 @@ describe('consultation_demo_needs_analysis — klasy dowodu', () => {
   const block = definitionBlockFor('consultation_demo_needs_analysis');
 
   test.each([
-    ['konsultacja/demo', 'demo'],
+    ['demo/prezentacja', 'demo'],
     ['dobór rozwiązania', 'dobór rozwiązania'],
     ['analiza potrzeb', 'analiza potrzeb'],
-    ['dobór techniczny', 'dobór techniczny'],
-    ['doradztwo przedsprzedażowe', 'doradztwo przedsprzedażowe'],
-    ['projektowanie pod klienta', 'projektowanie pod klienta'],
+    ['doradztwo przy wyborze', 'doradztwo przy wyborze'],
+    ['wizja lokalna', 'wizja lokalna'],
+    ['wspólne projektowanie/ustalanie rozwiązania', 'wspólne projektowanie'],
   ])('rozpoznaje klasę pozytywną: %s', (_label, phrase) => {
     expect(block.toLowerCase()).toContain(phrase.toLowerCase());
   });
 
-  test('graniczny przypadek: zwykły formularz kontaktowy NIE wystarcza', () => {
-    expect(block).toMatch(/sam formularz kontaktowy ogólnego typu/);
+  // Zaktualizowano 23.09 (decyzja recall-first). Poniższe guardy z poprawek
+  // 18.09/19.09 (Euronyl, Postęp) były precyzyjnymi wykluczeniami dokładnie
+  // tej klasy dowodu, którą recall-first ma teraz ZALICZAĆ: produkcja "na
+  // wymiar"/"pod klienta" bez osobno opisanego etapu rozmowy. To CELOWE
+  // cofnięcie, nie regresja — testy niżej sprawdzają nową, świadomą granicę.
+
+  test('serwis/wsparcie posprzedażowe nadal NIE liczy się (podział koncepcyjny PRZED/PO zakupie zostaje)', () => {
+    expect(block).toMatch(/to obsługa PO zakupie, nie etap decyzji o zakupie/);
   });
 
-  test('graniczny przypadek: serwis/wsparcie posprzedażowe NIE liczy się', () => {
-    expect(block).toMatch(/wsparcie techniczne dla już kupionego produktu, nie etap sprzedaży/);
+  // Poprawka 23.09 (druga tura) — pełne złagodzenie z pierwszej tury cofało
+  // sprawdzoną wcześniej poprawkę (case Euronyl/Postęp: "na wymiar" bez
+  // żadnej przesłanki interakcji dawało realny false positive w benchmarku).
+  // Przywrócony wymóg: potrzebna choć przesłanka INTERAKCJI, nie pełny,
+  // osobno opisany "etap rozmowy" jak w oryginalnej (18.09) wersji.
+  test('poprawka 23.09 (druga/trzecia tura): produkcja "na wymiar" BEZ przesłanki interakcji z klientem PONOWNIE nie wystarcza', () => {
+    expect(block).toMatch(/NIE WYSTARCZA SAMA jako opis samej zdolności produkcyjnej — musi towarzyszyć jej\s+choć przesłanka INTERAKCJI z klientem przed realizacją/);
+    expect(block).toMatch(/sam produkt "na wymiar"\/"pod klienta" bez opisanej interakcji/);
   });
 
-  test('graniczny przypadek (18.09, Euronyl): "uwzględnianie wymagań klienta" w produkcji, bez osobnego etapu rozmowy, NIE liczy się', () => {
-    expect(block).toMatch(/opis MOŻLIWOŚCI PRODUKCYJNYCH/);
-    expect(block).toMatch(/sam fakt, że produkt powstaje "pod klienta"/);
+  test('poprawka 23.09: z choćby minimalną przesłanką interakcji ("ustalamy z klientem" itp.) nadal liczy się bez osobnego opisanego etapu rozmowy', () => {
+    expect(block).toMatch(/"ustalamy z klientem", "po\s+konsultacji", "na podstawie zgłoszonych wymagań", "dobieramy rozwiązanie"/);
+    expect(block).toMatch(/wtedy liczy się nawet bez opisanego wprost odrębnego „etapu rozmowy”/);
   });
 
-  // Poprawka 19.09 (ósma tura, case Postęp) — usunięto sprzeczny bullet
-  // dowodu pozytywnego ("funkcjonalne: personalizacja/dostosowanie do
-  // indywidualnych potrzeb"), który wprost kolidował z wykluczeniem
-  // "elastyczność produkcyjna" dodanym już wcześniej (case Euronyl) — model
-  // miał w tym samym bloku sprzeczne instrukcje na ten sam wzorzec tekstu.
-  test('nie zawiera już sprzecznego bullet-a pozytywnego o "personalizacji/dostosowaniu" (usunięty)', () => {
-    expect(block).not.toMatch(/funkcjonalne: oferta personalizacji\/dostosowania produktu/);
+  // Regresja: case Tank Mark — "Osobom zainteresowanym przedstawimy ofertę"
+  // (czysty boilerplate "skontaktuj się") błędnie dało TRUE.
+  test('REGRESJA (case Tank Mark): samo "przedstawimy ofertę"/"skontaktuj się" NIE wystarcza do konsultacji', () => {
+    expect(block).toMatch(/samo "skontaktuj się z nami"\/"przedstawimy ofertę"\/"zapytaj o ofertę" — to zaproszenie\s+do kontaktu, nie dowód analizy\/doboru/);
   });
 
-  test('graniczny przypadek (case Postęp): "elastyczność produkcyjna" i "możliwość personalizacji" same w sobie NIE wystarczają', () => {
-    expect(block).toMatch(/elastyczność produkcyjna i "możliwość personalizacji" produktu\/usługi same w sobie/);
-    expect(block).toMatch(/to opis ZDOLNOŚCI firmy, nie opis PROCESU rozmowy z klientem przed zakupem/);
+  // Regresja: case Izoserwis — to samo "biuro projektowe" uzasadniło JEDNOCZEŚNIE
+  // dzial_handlowy i konsultacja_demo (35 pkt z jednego faktu).
+  test('REGRESJA (case Izoserwis): samo istnienie biura projektowego NIE wystarcza (chyba że osobno opisuje rozmowę z klientem)', () => {
+    expect(block).toMatch(/samo istnienie biura\s+projektowego \(to zdolność projektowa, nie opisany etap rozmowy z klientem — chyba że tekst\s+OSOBNO opisuje, że biuro projektowe prowadzi rozmowę\/analizę z klientem przed realizacją/);
   });
 
-  test('graniczny przypadek (case Postęp): realizacja projektu dostarczonego JUŻ przez klienta NIE liczy się', () => {
-    expect(block).toMatch(/realizacja projektu\/dokumentacji DOSTARCZONEJ JUŻ przez klienta/);
+  test('zasada niezależności dowodu: jeden fragment zapala kilka sygnałów TYLKO gdy opisuje osobne zjawiska', () => {
+    expect(block).toMatch(/oceń każdy sygnał NIEZALEŻNIE — licz go dla więcej niż jednego sygnału\s+TYLKO jeśli fragment faktycznie opisuje osobne zjawiska biznesowe/);
+    expect(block).toMatch(/sama\s+ogólna wzmianka o biurze projektowym\/obsłudze klienta\/doradztwie nie może automatycznie\s+zapalać kilku sygnałów naraz/);
   });
 
-  test('graniczny przypadek (case Postęp): hasła "wspólnie stworzymy rozwiązania"\/"od koncepcji po produkcję" bez osobnego etapu doradztwa NIE wystarczają', () => {
-    expect(block).toMatch(/"wspólnie stworzymy rozwiązania"\/"projekt od\s+pomysłu do realizacji"/);
-    expect(block).toMatch(/dopóki nie jest OSOBNO opisany etap ROZMOWY\/DORADZTWA\/ANALIZY POTRZEB/);
+  test('zastrzeżenie zostaje: sama nazwa branży bez punktu zaczepienia w tekście nadal NIE wystarcza', () => {
+    expect(block).toMatch(/nie ustawiaj true wyłącznie z samej nazwy branży bez żadnego punktu zaczepienia w tekście/);
   });
 
-  // Punkt "aktywny dobór wariantu/parametrów" (9. tura) cofnięty decyzją
-  // użytkownika — powodował systematyczne Postęp=true. Zostaje tylko punkt Elmex.
-  test('funkcjonalny odpowiednik (case Elmex): doradztwo jawnie dostosowane do indywidualnych wymagań klienta liczy się', () => {
-    expect(block).toMatch(/doradztwo opisane jako DOSTOSOWANE do indywidualnych wymagań klienta/);
+  test('przy niepewności (recall-first): gdy kontekst opisuje interakcję/dopasowywanie rozwiązania, wybieraj true nawet bez słowa "konsultacja"', () => {
+    expect(block).toMatch(/jeśli kontekst rzeczywiście opisuje interakcję i\s+dopasowywanie rozwiązania do klienta, wybieraj TRUE nawet bez słowa "konsultacja"/);
   });
 
-  test('reguła "aktywny dobór" (cofnięta) nie występuje w definicji consultation', () => {
+  test('reguła "aktywny dobór" (cofnięta wcześniej, 19.09) nadal nie występuje w definicji', () => {
     expect(block).not.toMatch(/AKTYWNIE DOBIERA\/REKOMENDUJE klientowi/);
     expect(block).not.toMatch(/Rozstrzyga kierunek/);
   });
@@ -203,36 +292,60 @@ describe('dedicated_customer_care_b2b — klasy dowodu', () => {
     expect(block.toLowerCase()).toContain(phrase.toLowerCase());
   });
 
-  test('graniczny przypadek: samo BOK/infolinia (nawet z nazwanym kierownikiem) NIE wystarcza', () => {
-    expect(block).toMatch(/samo Biuro Obsługi Klienta \(BOK\), sama infolinia, LUB nazwany kierownik/);
+  // Zaktualizowano 23.09 (decyzja recall-first). Poprawka 19.09 (piąta tura)
+  // wprowadziła twardy wymóg "NA STAŁE przypisanej" osoby i odrzucała m.in.
+  // zwykłego handlowca regionalnego czy Dyrektora Sprzedaży bez dodatkowych
+  // elementów. Recall-first CELOWO obniża ten próg: wystarczy, że klient ma
+  // JEDNĄ wskazaną osobę do kontaktu zamiast ogólnej infolinii.
+  test('BOK/infolinia BEZ wzmianki o przypisanej osobie nadal NIE wystarcza (podłoga zostaje)', () => {
+    expect(block).toMatch(/ZWRÓĆ FALSE: ogólne, niezróżnicowane Biuro Obsługi Klienta\/infolinia BEZ wzmianki o\s+przypisanej osobie\/koncie/);
   });
 
-  // Poprawka 19.09 (piąta tura) — doprecyzowanie granicy semantycznej po
-  // znalezieniu FN (Sps Electronics: named consultants "odpowiedzialny za daną
-  // branżę" bez słowa opiekun/KAM) i powtarzającej się niejednoznaczności
-  // (Dtm System, Uds: regionalny handlowiec vs KAM) w benchmarku na świeżej
-  // próbce workend_ola_14001-15000. Nie hardcoduje tych firm — testuje samą
-  // zasadę.
-  test('KLUCZOWA GRANICA: wymaga przypisania NA STAŁE do konkretnego klienta/konta/segmentu, nie samego działu sprzedaży', () => {
-    expect(block).toMatch(/KLUCZOWA GRANICA: sygnał wymaga OSOBY \(lub zespołu\) PRZYPISANEJ NA STAŁE/);
+  // CZWARTA TURA (23.09) — benchmark 100 firm pokazał 38% miękkich TRUE na tym
+  // sygnale (najwyższy odsetek ze wszystkich siedmiu). Zaostrzone: TRUE musi
+  // oznaczać TRWAŁĄ odpowiedzialność za konkretnego klienta, nie dowolną formę
+  // kontaktu. Recall-first (semantyczne odpowiedniki bez słowa "opiekun")
+  // ZOSTAJE — zawężona jest tylko klasa dowodu.
+  test('czwarta tura: TRUE wymaga TRWAŁEJ odpowiedzialności za KONKRETNEGO klienta, nie dowolnego kontaktu', () => {
+    expect(block).toMatch(/TRUE oznacza REALNĄ, TRWAŁĄ odpowiedzialność za KONKRETNEGO klienta\/konto\/relację/);
+    expect(block).toMatch(/musi z niego wynikać, że ktoś POZOSTAJE odpowiedzialny za danego klienta, a\s+nie tylko z nim rozmawia, sprzedaje mu albo obsługuje jego zlecenie/);
   });
 
-  test('pozytywna zasada: osoba opisana jako odpowiedzialna na stałe za segment/branżę liczy się bez słowa "opiekun"/"KAM"', () => {
-    expect(block).toMatch(/osoba jawnie opisana jako odpowiedzialna na stałe za\s+dany segment\/branżę\/konto klienta/);
+  test('czwarta tura: semantyczne odpowiedniki bez słowa "opiekun" nadal liczą się (recall zachowany)', () => {
+    expect(block).toMatch(/osoba prowadząca konto klienta; dedykowany\/stały kontakt przypisany do\s+konkretnego klienta/);
     expect(block).toMatch(/kontakt z konsultantem odpowiedzialnym za daną\s+branżę/);
+    expect(block).toMatch(/Specjalista ds\. Kluczowych Klientów/);
   });
 
-  test('graniczny przypadek: zwykły handlowiec regionalny (bez słowa opiekun\/KAM) NIE wystarcza', () => {
-    expect(block).toMatch(/zwykły handlowiec\/przedstawiciel handlowy przypisany do\s+REGIONU\/terytorium/);
-    expect(block).toMatch(/nie tylko za "sprzedaż w regionie X"/);
+  // REGRESJA (case Pharma Nord, benchmark 100): "Przedstawiciel handlowy
+  // przypisany do regionu klienta" dało TRUE mimo że reguła z drugiej tury
+  // już to wykluczała — bo "opiekun regionalny/terytorialny" figurował
+  // jednocześnie na liście RÓWNOWAŻNYCH określeń. Sprzeczność usunięta.
+  test('REGRESJA (Pharma Nord): przypisanie TYLKO do regionu nie wystarcza, nawet gdy nazwane "opiekunem regionalnym"', () => {
+    expect(block).toMatch(/przypisanie przedstawiciela\/handlowca TYLKO do\s+REGIONU\/terytorium\/województwa/);
+    expect(block).toMatch(/dotyczy to także osoby nazwanej "opiekunem\s+regionalnym"\/"terytorialnym"/);
+    expect(block).not.toMatch(/RÓWNOWAŻNE określenia.*opiekun regionalny\/terytorialny/s);
   });
 
-  test('graniczny przypadek: Kierownik\/Dyrektor Działu Sprzedaży sam w sobie NIE wystarcza', () => {
-    expect(block).toMatch(/Kierownik\/Dyrektor Działu Sprzedaży — to funkcja zarządcza/);
+  test('REGRESJA (Top Promotion): ogólna "stała współpraca" bez wskazanej osoby NIE wystarcza', () => {
+    expect(block).toMatch(/ogólne hasło "stała współpraca"\/"wieloletnia współpraca" bez\s+wskazania osoby lub roli odpowiedzialnej za klienta/);
   });
 
-  test('graniczny przypadek: sam kontakt do działu sprzedaży bez stałej opieki NIE wystarcza', () => {
-    expect(block).toMatch(/sam kontakt do działu sprzedaży \(telefon\/e-mail działu\) bez informacji/);
+  test('REGRESJA (Lacroix): "partner biznesowy"/"trusted partner" bez informacji o opiece NIE wystarcza', () => {
+    expect(block).toMatch(/"partner biznesowy"\/"dedykowany\s+partner"\/"trusted partner" bez informacji, kto i w jakiej formie opiekuje się konkretnym\s+klientem/);
+  });
+
+  test('REGRESJA (Polski Transport): rola OPERACYJNA (dyspozytor/koordynator) NIE wystarcza', () => {
+    expect(block).toMatch(/rola OPERACYJNA \(dyspozytor, koordynator transportu, planista, obsługa zleceń\) —\s+to prowadzenie procesu\/zlecenia, nie relacji z klientem/);
+  });
+
+  test('REGRESJA (Nuuxe): rola TECHNICZNA (tester/serwisant/wdrożeniowiec) NIE wystarcza', () => {
+    expect(block).toMatch(/rola TECHNICZNA \(serwisant,\s+wdrożeniowiec, tester, inżynier wsparcia\) — to obsługa produktu, nie konta klienta/);
+  });
+
+  test('czwarta tura: zwykły handlowiec bez przesłanki odpowiedzialności PO pozyskaniu NIE wystarcza', () => {
+    expect(block).toMatch(/zwykły\s+handlowiec\/sprzedawca BEZ żadnej przesłanki, że pozostaje odpowiedzialny za klienta PO\s+pozyskaniu/);
+    expect(block).toMatch(/sama funkcja Kierownika\/Dyrektora Sprzedaży — to zarządzanie zespołem/);
   });
 });
 
@@ -246,8 +359,23 @@ describe('tender_bidding_department — klasy dowodu', () => {
     expect(block.toLowerCase()).toContain(phrase.toLowerCase());
   });
 
-  test('graniczny przypadek: sam klient publiczny w portfolio NIE wystarcza', () => {
-    expect(block).toMatch(/NIE WYSTARCZA samo posiadanie klientów\/zamawiających publicznych/);
+  // Poprawka 23.09 (druga tura) — pierwsza tura pozwalała samej SKALI
+  // portfolio klientów publicznych wystarczyć bez żadnej wzmianki o trybie
+  // pozyskania kontraktu; to dokładnie ta różnica, którą oryginalna (18.09)
+  // definicja explicite odróżniała: dowód na OBSŁUGĘ sektora publicznego ≠
+  // dowód na SPOSÓB pozyskania kontraktu. Przywrócony wymóg choć pośredniej
+  // wzmianki o trybie postępowania/zamówienia.
+  test('poprawka 23.09, druga tura: samo duże/liczne portfolio klientów publicznych PONOWNIE nie wystarcza bez wzmianki o trybie', () => {
+    expect(block).toMatch(/samo duże\/liczne portfolio klientów\/\s+zamawiających publicznych.*BEZ ŻADNEJ wzmianki o\s+trybie pozyskania kontraktu/s);
+    expect(block).toMatch(/to nadal dowód na OBSŁUGĘ sektora publicznego, nie na SPOSÓB\s+jego pozyskania, niezależnie od liczby takich klientów/);
+  });
+
+  test('nie wymaga dosłownego słowa "przetarg", ale wymaga choć pośredniej wzmianki o trybie postępowania', () => {
+    expect(block).toMatch(/nie wymagaj dosłownie słowa\s+"przetarg", ale wymagaj choć POŚREDNIEJ wzmianki o trybie postępowania\/zamówienia\/konkursu\s+ofert/);
+  });
+
+  test('kierunek sprzedawca vs kupujący ZOSTAJE jako logiczna sprzeczność, nie guard precyzyjny', () => {
+    expect(block).toMatch(/KIERUNEK jest tu logiczną sprzecznością, nie kwestią interpretacji — nie zmieniaj go mimo ogólnej zasady recall-first/);
   });
 
   test('graniczny przypadek: firma kupująca w przetargach NIE liczy się', () => {
@@ -327,6 +455,13 @@ describe('partner_dealer_network — klasy dowodu', () => {
     expect(block).toMatch(/ustal kto jest dostawcą, a kto odsprzedawcą/);
   });
 
+  // 23.09 (recall-first): kierunek relacji ZOSTAJE (logiczna sprzeczność),
+  // ale poza tym warunkiem sygnał ma być oceniany liberalnie/semantycznie —
+  // dodane explicite, żeby nie zgubić tego przy przyszłych edycjach.
+  test('poza warunkiem kierunku: reszta oceniana liberalnie/semantycznie (23.09)', () => {
+    expect(block).toMatch(/Poza tym warunkiem kierunku, resztę oceniaj semantycznie i liberalnie/);
+  });
+
   test('graniczny przypadek (case CCI): firma będąca SAMA dealerem/dystrybutorem cudzej marki zwraca false', () => {
     expect(block).toMatch(/firma SAMA jest dealerem\/dystrybutorem\/autoryzowanym partnerem CUDZEJ marki/);
     expect(block).toMatch(/WŁASNY dział montażu\/instalacji\/serwisu również\s+się nie liczy/);
@@ -377,7 +512,78 @@ describe('ecommerce_b2b — klasy dowodu', () => {
     expect(block).toMatch(/sama etykieta menu\/link "Platforma B2B"\/"B2B" bez żadnego dalszego opisu/);
   });
 
-  test('zachowuje zależność scoringu od dzial_handlowy/opieki B2B (dokumentacyjnie, logika w kodzie)', () => {
-    expect(block).toMatch(/TYLKO razem z dzial_handlowy lub dedicated_customer_care_b2b/);
+  // Zaktualizowano 23.09 (audyt Enrichment V2) — usunięto asercję zależności
+  // scoringu od dzial_handlowy/dedicated_customer_care_b2b: Decyzja
+  // 2026-09-22 (prospectEnrichmentService.js calcIcpScore, komentarz przy
+  // rawHits/requires_any_of) wyłączyła requires_any_of ze scoringu — każdy
+  // sygnał, w tym ecommerce_b2b, liczy punkty NIEZALEŻNIE od innych. Aktualna
+  // definicja to teraz wprost potwierdza własnym zdaniem końcowym, zamiast
+  // starego "TYLKO razem z...". Ten sam fakt sprawdza już
+  // tenantIcpConfigService.test.js/icpScoring.test.js na poziomie logiki
+  // scoringu — tu tylko dokumentacyjnie, przez treść promptu.
+  test('dokumentuje niezależność scoringu od innych sygnałów (decyzja 2026-09-22 usunęła requires_any_of ze scoringu)', () => {
+    expect(block).toMatch(/Oceniaj ten sygnał niezależnie od pozostałych, wyłącznie na podstawie dowodu na stronie/);
+    expect(block).not.toMatch(/TYLKO razem z/);
+  });
+});
+
+// 9. sygnał (dodany po 0285/0288, poza starą mapą promptKey) — nie miał
+// dotąd własnego describe-bloku w tym pliku. Dodane przy okazji audytu
+// recall-first 23.09, żeby wszystkie 7 AKTYWNYCH sygnałów miały pokrycie.
+describe('cykliczna_obsluga_klienta_odnowienia — klasy dowodu', () => {
+  const signal = DEFAULT_SIGNALS.find(s => s.key === 'cykliczna_obsluga_klienta_odnowienia');
+  const block = signal.ai_definition.replace(/\s+/g, ' ');
+
+  test.each([
+    ['regularne przeglądy', 'regularne przeglądy'],
+    ['cykliczny serwis', 'cykliczny serwis'],
+    ['odnawianie lub przedłużanie umów/usług', 'odnawianie lub przedłużanie umów'],
+  ])('rozpoznaje klasę pozytywną: %s', (_label, phrase) => {
+    expect(block.toLowerCase()).toContain(phrase.toLowerCase());
+  });
+
+  test('graniczny przypadek: sama możliwość ponownego zakupu/newsletter/program lojalnościowy NIE wystarcza', () => {
+    expect(block).toMatch(/Nie wystarcza sama możliwość ponownego zakupu, newsletter, program lojalnościowy ani samo\s+ogólne hasło „serwis" BEZ żadnego wskazania powtarzalności/);
+  });
+
+  // Poprawka 23.09 (druga tura) — pierwsza tura pozwalała samemu ogólnemu
+  // hasłu "serwis" wystarczyć przy "choćby minimalnym opisie powtarzalności"
+  // (mgliste w praktyce). Przywrócony konkretny wymóg: musi paść choć jedno
+  // słowo/fraza jawnie wskazująca powtarzalność.
+  test('poprawka 23.09, druga tura: samo ogólne "serwis" bez konkretnego wskaźnika powtarzalności PONOWNIE nie wystarcza', () => {
+    expect(block).toMatch(/Automatyczny abonament oraz hasło „serwis" liczą się TYLKO gdy towarzyszy im choć jedno\s+konkretne słowo\/fraza wskazująca powtarzalność/);
+    expect(block).toMatch(/sam bierny opis\s+"oferujemy serwis" bez takiego wskaźnika to za mało/);
+  });
+
+  test('przy niepewności: liczy się obecność JAKIEGOKOLWIEK wskaźnika powtarzalności (choćby słabego)', () => {
+    expect(block).toMatch(/Przy niepewności, gdy jakiś wskaźnik\s+powtarzalności jest obecny \(choćby słaby\), wybieraj true/);
+  });
+});
+
+// Zasada recall-first (23.09) żyje RAZ, w nagłówku promptu wspólnym dla
+// wszystkich sygnałów tenanta (PROMPT_STATIC_HEADER) — nie duplikowana w
+// każdej definicji z osobna. Ten blok pilnuje, żeby nikt jej stamtąd
+// przypadkiem nie usunął przy przyszłej edycji.
+describe('PROMPT_STATIC_HEADER — wspólna zasada recall-first (23.09)', () => {
+  test('nakazuje ocenę semantyczną i preferencję TRUE przy rozsądnej niepewności', () => {
+    expect(PROMPT_STATIC_HEADER).toMatch(/recall-first — decyzja biznesowa 2026-09-23/);
+    expect(PROMPT_STATIC_HEADER).toMatch(/Wiarygodna, konkretna przesłanka biznesowa WYSTARCZA do true/);
+    expect(PROMPT_STATIC_HEADER).toMatch(/Przy rozsądnej niepewności.*wybieraj TRUE, nie FALSE/s);
+  });
+
+  test('zachowuje podłogę: zero konkretnej przesłanki w tekście nadal NIE wystarcza', () => {
+    expect(PROMPT_STATIC_HEADER).toMatch(/NIGDY nie ustawiaj true bez ŻADNEJ konkretnej przesłanki z treści/);
+  });
+
+  test('nie zawiera już starej, precyzyjnej zasady głównej ("każdy sygnał potrzebuje KONKRETNEGO DOWODU... nie zgaduj w żadną stronę")', () => {
+    expect(PROMPT_STATIC_HEADER).not.toMatch(/Nie zgaduj w żadną stronę/);
+  });
+
+  // Trzecia tura (23.09) — dodana po benchmarku 100 firm: case Izoserwis
+  // pokazał, że jeden fakt ("biuro projektowe") uzasadniał jednocześnie dwa
+  // różne sygnały. Zasada żyje RAZ w nagłówku, nie duplikowana per sygnał.
+  test('ZASADA NIEZALEŻNOŚCI DOWODU (trzecia tura): jeden fragment zapala kilka sygnałów tylko przy osobnym sensie biznesowym', () => {
+    expect(PROMPT_STATIC_HEADER).toMatch(/ZASADA NIEZALEŻNOŚCI DOWODU \(2026-09-23, trzecia tura\)/);
+    expect(PROMPT_STATIC_HEADER).toMatch(/nie może automatycznie\s+zapalać kilku różnych\s+sygnałów naraz/);
   });
 });

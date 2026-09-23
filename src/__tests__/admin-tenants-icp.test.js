@@ -49,16 +49,23 @@ function auth(req) {
 }
 
 describe('GET /:id/icp-config', () => {
-  test('tenant bez własnego configu dostaje fallback DEFAULT_SIGNALS (is_default=true, valid, 70/70/100)', async () => {
+  // Zaktualizowano 23.09 (audyt Enrichment V2) — DEFAULT_SIGNALS to od decyzji
+  // 2026-09-22 9 sygnałów (7 aktywnych sumujących się do 100, 2 nieaktywne:
+  // rozproszona_struktura, ecommerce_b2b — patrz tenantIcpConfigService.js),
+  // nie 8 sygnałów sumujących się do 70. signals_max = ICP_REQUIRED_SIGNALS_MAX_SCORE
+  // (globalna stała, prospectEnrichmentService.js) = 100, nie tenant-specific 70.
+  // final_max_score = wyłącznie signalsSum (bez +gate/+bonus, usuniętych tą samą
+  // decyzją) — przy poprawnym configu równe signals_sum, czyli też 100.
+  test('tenant bez własnego configu dostaje fallback DEFAULT_SIGNALS (is_default=true, valid, 100/100/100)', async () => {
     const res = await auth(request(app).get(`${API}/${tenantId}/icp-config`));
     expect(res.status).toBe(200);
     expect(res.body.is_default).toBe(true);
-    expect(res.body.signals).toHaveLength(8);
+    expect(res.body.signals).toHaveLength(9);
     expect(res.body.qualification_threshold).toBe(45);
     expect(res.body.config_revision).toBe(0);
     expect(res.body.is_valid).toBe(true);
-    expect(res.body.signals_sum).toBe(70);
-    expect(res.body.signals_max).toBe(70);
+    expect(res.body.signals_sum).toBe(100);
+    expect(res.body.signals_max).toBe(100);
     expect(res.body.final_max_score).toBe(100);
     expect(res.body.current_version).toBeNull();
   });
@@ -72,42 +79,45 @@ describe('GET /:id/icp-config', () => {
 describe('CRUD sygnałów — pełny cykl życia (LIVE vs PUBLISHED)', () => {
   let signalId;
 
-  test('POST na fallbackowym tenancie najpierw materializuje 8 defaultów, potem dodaje sygnał — suma 140, invalid, published=false', async () => {
+  test('POST na fallbackowym tenancie najpierw materializuje 9 defaultów, potem dodaje sygnał — suma 200, invalid, published=false', async () => {
     // Route /:id/icp-signals woła materializeDefaultsIfFallback PRZED addSignal
     // (patrz admin-tenants.js) — tenant startuje tu w prawdziwym fallbacku (0
     // wierszy, insert SQL-em w głównym beforeAll tego pliku), więc POST realnie
-    // materializuje najpierw 8 defaultowych sygnałów (suma 70), a dopiero potem
-    // dodaje nowy (70) — razem 140, nie 70. To jest oczekiwane: fallbackowy
-    // tenant "ma" już 70 punktów w defaultach, więc dodanie kolejnego sygnału
+    // materializuje najpierw 9 defaultowych sygnałów (7 aktywnych, suma 100 —
+    // patrz DEFAULT_SIGNALS w tenantIcpConfigService.js), a dopiero potem dodaje
+    // nowy (100 pkt, dobrane celowo — patrz test DELETE niżej, gdzie po
+    // usunięciu 9 defaultów ma zostać dokładnie ten jeden sygnał o poprawnej
+    // sumie) — razem 200, nie 100. To jest oczekiwane: fallbackowy tenant "ma"
+    // już 100 punktów w aktywnych defaultach, więc dodanie kolejnego sygnału
     // bez odjęcia punktów gdzie indziej musi zostać invalid, nie automagicznie
     // się zbilansować.
     const res = await auth(request(app).post(`${API}/${tenantId}/icp-signals`)).send({
       label: 'Własna flota transportowa',
       ai_definition: 'Firma posiada własną flotę pojazdów.',
-      points: 70,
+      points: 100,
     });
     expect(res.status).toBe(201);
     expect(res.body.signal.key).toBe('wlasna_flota_transportowa');
-    expect(res.body.signal.points).toBe(70);
+    expect(res.body.signal.points).toBe(100);
     expect(res.body.published).toBe(false);
     expect(res.body.version).toBeNull();
     expect(res.body.config_revision).toBe(1);
     signalId = res.body.signal.id;
   });
 
-  test('GET pokazuje 9 sygnałów (8 zmaterializowanych defaultów + nowy), LIVE invalid, PUBLISHED nadal fallback', async () => {
+  test('GET pokazuje 10 sygnałów (9 zmaterializowanych defaultów + nowy), LIVE invalid, PUBLISHED nadal fallback', async () => {
     const res = await auth(request(app).get(`${API}/${tenantId}/icp-config`));
     expect(res.body.is_default).toBe(false); // realne wiersze już istnieją (zmaterializowane)
-    expect(res.body.signals).toHaveLength(9);
+    expect(res.body.signals).toHaveLength(10);
     expect(res.body.is_valid).toBe(false);
-    expect(res.body.signals_sum).toBe(140);
+    expect(res.body.signals_sum).toBe(200);
     expect(res.body.current_version).toBeNull(); // nic jeszcze nie opublikowano
   });
 
-  test('DELETE 8 zmaterializowanych defaultów (nigdy niepublikowanych → hard delete) sprowadza sumę do 70 i automatycznie publikuje v1', async () => {
+  test('DELETE 9 zmaterializowanych defaultów (nigdy niepublikowanych → hard delete) sprowadza sumę do 100 i automatycznie publikuje v1', async () => {
     const cfg = await auth(request(app).get(`${API}/${tenantId}/icp-config`));
     const defaultIds = cfg.body.signals.filter((s) => s.id !== signalId).map((s) => s.id);
-    expect(defaultIds).toHaveLength(8);
+    expect(defaultIds).toHaveLength(9);
 
     let lastRes;
     for (const id of defaultIds) {
@@ -117,39 +127,39 @@ describe('CRUD sygnałów — pełny cykl życia (LIVE vs PUBLISHED)', () => {
     }
     expect(lastRes.body.published).toBe(true);
     expect(lastRes.body.version).toBe(1);
-    expect(lastRes.body.config_revision).toBe(9); // 1 (POST) + 8 (delete)
+    expect(lastRes.body.config_revision).toBe(10); // 1 (POST) + 9 (delete)
   });
 
-  test('GET pokazuje LIVE=PUBLISHED, poprawny (70/70/100), current_version=1', async () => {
+  test('GET pokazuje LIVE=PUBLISHED, poprawny (100/100/100), current_version=1', async () => {
     const res = await auth(request(app).get(`${API}/${tenantId}/icp-config`));
     expect(res.body.is_default).toBe(false);
     expect(res.body.signals).toHaveLength(1);
     expect(res.body.is_valid).toBe(true);
-    expect(res.body.signals_sum).toBe(70);
+    expect(res.body.signals_sum).toBe(100);
     expect(res.body.final_max_score).toBe(100);
     expect(res.body.current_version).toBe(1);
   });
 
-  test('PUT punkty na 75 — LIVE staje się invalid, current_version NIE zmienia się (nadal 1)', async () => {
-    const res = await auth(request(app).put(`${API}/${tenantId}/icp-signals/${signalId}`)).send({ points: 75 });
+  test('PUT punkty na 105 — LIVE staje się invalid, current_version NIE zmienia się (nadal 1)', async () => {
+    const res = await auth(request(app).put(`${API}/${tenantId}/icp-signals/${signalId}`)).send({ points: 105 });
     expect(res.status).toBe(200);
-    expect(res.body.signal.points).toBe(75);
+    expect(res.body.signal.points).toBe(105);
     expect(res.body.published).toBe(false);
     expect(res.body.version).toBeNull();
-    expect(res.body.config_revision).toBe(10);
+    expect(res.body.config_revision).toBe(11);
 
     const cfg = await auth(request(app).get(`${API}/${tenantId}/icp-config`));
     expect(cfg.body.is_valid).toBe(false);
-    expect(cfg.body.signals_sum).toBe(75);
+    expect(cfg.body.signals_sum).toBe(105);
     expect(cfg.body.current_version).toBe(1); // enrichment nadal używa v1, bez zmian
   });
 
-  test('PUT z powrotem na 70 — automatycznie publikuje nową wersję (v2), bez przycisku "Publikuj"', async () => {
-    const res = await auth(request(app).put(`${API}/${tenantId}/icp-signals/${signalId}`)).send({ points: 70 });
+  test('PUT z powrotem na 100 — automatycznie publikuje nową wersję (v2), bez przycisku "Publikuj"', async () => {
+    const res = await auth(request(app).put(`${API}/${tenantId}/icp-signals/${signalId}`)).send({ points: 100 });
     expect(res.status).toBe(200);
     expect(res.body.published).toBe(true);
     expect(res.body.version).toBe(2);
-    expect(res.body.config_revision).toBe(11);
+    expect(res.body.config_revision).toBe(12);
 
     const cfg = await auth(request(app).get(`${API}/${tenantId}/icp-config`));
     expect(cfg.body.is_valid).toBe(true);
@@ -174,7 +184,7 @@ describe('CRUD sygnałów — pełny cykl życia (LIVE vs PUBLISHED)', () => {
   });
 
   test('PUT z nieaktualnym expected_revision → 409 (optimistic concurrency, niezależne od numeru wersji)', async () => {
-    // aktualny config_revision to 11 po poprzednich mutacjach — 1 jest na pewno stary.
+    // aktualny config_revision to 12 po poprzednich mutacjach — 1 jest na pewno stary.
     const res = await auth(request(app).put(`${API}/${tenantId}/icp-signals/${signalId}`)).send({
       points: 71, expected_revision: 1,
     });
