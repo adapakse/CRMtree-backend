@@ -248,6 +248,17 @@ const GENERIC_NAME_WORDS = new Set([
   'serwis', 'service', 'uslugi',
   // Spójniki
   'i', 'z', 'w', 'na', 'do', 'dla', 'oraz', 'a',
+  // Formy prawne (bugfix 23.09). normalizeName() obcina formę prawną TYLKO na
+  // KOŃCU nazwy (kotwica `\s*$`). Gdy siedzi w środku — a w tych danych to
+  // bardzo częste, bo opis działalności idzie po formie ("Zimnik sp. z o.o.
+  // Kopalnia Granitu") — tokeny 'sp'/'z'/'o' zostają i wchodzą do nazwy
+  // domeny. Efekt: zimniksp.com.pl / zimnik-sp.pl zamiast zimnik.pl, czyli
+  // WSZYSCY czterej kandydaci bezużyteczni. Zmierzone na batchu
+  // workend_ola_9001-10000: 63 firmy z 1096 (5,7%) miały zerową szansę.
+  // Świadomie NIE ma tu 'zoo' — "z o.o." nigdy nie tokenizuje się do 'zoo'
+  // (rozpada się na 'z','o','o'), więc filtr trafiałby wyłącznie w prawdziwe
+  // nazwy typu "Zoo Wrocław".
+  'sp', 'spzoo', 'ltd', 'gmbh', 'inc', 'llc',
   // "Euro" jako pierwszy człon nazwy jest zbyt generyczny, żeby samodzielnie
   // potwierdzać domenę (strong_brand_identity V3, 21.09) — case Euro-Net →
   // euro.com.pl dawał fałszywe dopasowanie tokenu "euro" do dowolnej domeny
@@ -887,7 +898,33 @@ function scoreBrandConsistency({ company, candidateUrl, homepageTitle, sources }
 //   verified:false, reason='insufficient_evidence' → bez zmian względem stanu
 //     przed V3, ewentualnie z cap_reason gdy punkty by wystarczyły, ale
 //     zadziałało ograniczenie (Tier B bez polish link, portal grupy/marki)
-function evaluateBrandIdentityFallback({ company, krsData, gusData, candidateUrl, candidateSource, homepageTitle, sources }) {
+// Straż klasy "przejęta/wygasła domena" (23.09). Brand fallback przyznaje do
+// 10 pkt przy progu 7, ale WSZYSTKIE cztery składniki (domainStrong, titleMatch,
+// pagesWithBrand, onasKontaktHit) wywodzą się z jednego faktu — obecności tokenu
+// marki. Gdy domena nazywa się tak jak firma, token jest w domenie i w szablonie
+// <title>, a szablon powtarza się na każdej podstronie, więc `pagesWithBrand`
+// liczy JEDEN dowód wielokrotnie. Efekt: każda żywa strona pod domeną zgodną
+// z nazwą przechodzi — dokładnie taki jest profil wygasłej domeny przejętej pod
+// SEO (squatter zachowuje nazwę, bo jest w domenie).
+//
+// Straż jest systemowa, bez żadnych wyjątków dla konkretnych domen: marka musi
+// wystąpić w TREŚCI po ekstrakcji (bez nawigacji i stopki), nie tylko
+// w szablonie tytułu.
+//
+// Zmierzone na całym batchu workend_ola_9001-10000 (251 done z potwierdzonym
+// identity, 10 przez brand fallback): blokuje 3 rekordy = 1,2% wszystkich done,
+// i KAŻDY z tych trzech ma icp_score = 0 — czyli zero realnej straty dla
+// handlowca. Zachowuje wszystkie wartościowe (score 70/80/95).
+const BRAND_CONTENT_MIN_HITS = 2;
+
+function brandAppearsInContent(token, contentText) {
+  if (!token) return false;
+  if (typeof contentText !== 'string' || !contentText) return false;
+  const rx = new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+  return (normalizeName(contentText).match(rx) || []).length >= BRAND_CONTENT_MIN_HITS;
+}
+
+function evaluateBrandIdentityFallback({ company, krsData, gusData, candidateUrl, candidateSource, homepageTitle, sources, contentText }) {
   if (!sources || !sources.length) {
     return { verified: false, reason: 'insufficient_evidence', decided_by: 'no_sources_for_brand_fallback', positive_evidence: null, conflict_evidence: null, cap_reason: null };
   }
@@ -916,12 +953,22 @@ function evaluateBrandIdentityFallback({ company, krsData, gusData, candidateUrl
     };
   }
 
-  const { points, detail } = scoreBrandConsistency({ company, candidateUrl, homepageTitle, sources });
+  // `token` jest RODZEŃSTWEM `detail`, nie jego polem — dotąd `detail.token`
+  // w positive_evidence niżej zapisywało się jako undefined.
+  const { token, points, detail } = scoreBrandConsistency({ company, candidateUrl, homepageTitle, sources });
   const threshold = candidateSource === 'resolver' ? 9 : 7;
   const hardRequiredForResolver = candidateSource === 'resolver' ? (detail.domainStrong || detail.domainWeak) && detail.titleMatch : true;
   let verified = detail.maxChars >= 1000 && points >= threshold && hardRequiredForResolver;
 
   let capReason = null;
+  // Straż przejętych domen — patrz komentarz przy BRAND_CONTENT_MIN_HITS.
+  // `contentText === undefined` oznacza wywołanie spoza enrichOne (testy
+  // jednostkowe scoringu) — wtedy straż się nie uruchamia, żeby nie zmieniać
+  // kontraktu samego scoreBrandConsistency.
+  if (verified && contentText !== undefined && !brandAppearsInContent(token, contentText)) {
+    verified = false;
+    capReason = `brand_only_in_template: token "${token}" nie występuje w treści strony (min. ${BRAND_CONTENT_MIN_HITS}x) — profil przejętej/wygasłej domeny`;
+  }
   if (verified && foreignConflict && foreignConflict.tier === 'B' && !foreignConflict.polishLinkEvidence) {
     verified = false;
     capReason = `foreign_entity_or_country_conflict tier B (${foreignConflict.evidence}) bez POLISH_LINK_EVIDENCE`;
@@ -935,7 +982,7 @@ function evaluateBrandIdentityFallback({ company, krsData, gusData, candidateUrl
     verified,
     reason: verified ? 'brand_verified' : 'insufficient_evidence',
     decided_by: verified ? `brand_verified@points_${points}_${threshold}` : 'brand_consistency_below_threshold',
-    positive_evidence: verified ? { token: detail.token, points, threshold, detail } : null,
+    positive_evidence: verified ? { token, points, threshold, detail } : null,
     conflict_evidence: null,
     cap_reason: capReason,
     points, threshold,
@@ -1011,6 +1058,10 @@ function isBotChallengePage(html) {
 // wystawiony dla home.pl, monipol.pl — strona-parking; oba eskalowały do
 // pełnego crawlu mimo że wynik nie mógł się zmienić).
 const DETERMINISTIC_FETCH_ERROR = /certificate|altnames|ERR_TLS|CERT_HAS_EXPIRED|UNABLE_TO_VERIFY_LEAF|SELF_SIGNED|ENOTFOUND|EAI_AGAIN/i;
+// Awaria na poziomie połączenia — dotyczy KONKRETNEGO hosta, nie domeny jako
+// takiej (w odróżnieniu od ENOTFOUND/TLS). Uzasadnia jednorazową próbę
+// wariantu www ↔ apex, patrz fetchPageForCrawl.
+const CONNECTION_LEVEL_ERROR = /socket hang up|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|ECONNABORTED|timeout of \d+ms exceeded/i;
 
 // Podzbiór DETERMINISTIC_FETCH_ERROR dotyczący WYŁĄCZNIE certyfikatu (nie DNS)
 // — ENOTFOUND/EAI_AGAIN celowo wykluczone, bo pominięcie walidacji certyfikatu
@@ -1028,6 +1079,10 @@ const TLS_CERT_ERROR = /certificate|altnames|ERR_TLS|CERT_HAS_EXPIRED|UNABLE_TO_
 function isConfirmedDeadDomain(deterministicFailure) {
   if (!deterministicFailure) return false;
   if (deterministicFailure.type === 'domain_parking') return true;
+  // Cała treść strony to przekierowanie client-side na lander parkingu albo
+  // webmail (etap 4, 23.09) — pod tym adresem nie ma strony firmy i ponowna
+  // próba zobaczy dokładnie to samo, tak samo jak przy parkingu.
+  if (deterministicFailure.type === 'client_side_redirect_only') return true;
   if (deterministicFailure.type === 'tls_dns') {
     return !TLS_CERT_ERROR.test(deterministicFailure.reason || '');
   }
@@ -1677,23 +1732,99 @@ function guessDomainsFromName(name) {
 // verifyFirstOf są deterministyczne: pierwszy odpowiadający kandydat zawsze ten
 // sam). GENERIC_NAME_WORDS (definicja przy nameTokensMatch, na początku pliku)
 // pomija te same opisowe/prawne/spójnikowe człony przy zgadywaniu domeny.
-const FALLBACK_MAX_HOSTS       = 4;
+// 4 → 6 (23.09, krok 2 poprawy generatora). Sam token marki NIE mieści się w
+// limicie 4 — przy nim wypycha formy dwusłowne i hit-rate SPADA (zmierzone:
+// 49,3% vs 51,2%). Dopiero limit 6 daje 58,6%. Arytmetyka budżetu zostaje
+// spełniona: 6 kandydatów / FALLBACK_CONCURRENCY = 2 partie ×
+// FALLBACK_CANDIDATE_BUDGET_MS (6 s) = 12 s < FALLBACK_TIME_BUDGET_MS (15 s).
+// Limit 8 dawałby 60,6%, ale to 3 partie = 18 s > budżet — świadomie odrzucone,
+// różnica to 4 firmy na 203.
+const FALLBACK_MAX_HOSTS       = 6;
 const FALLBACK_CONCURRENCY     = 3;
-const FALLBACK_TIME_BUDGET_MS  = 8_000;
+// Budżet CAŁEJ operacji fallbacku. Poprawka 23.09 (audyt 47 firm bez `done`):
+// wcześniej 8 s przy koszcie do 12 s na JEDNEGO kandydata (verifyUrl robił
+// HEAD 6 s + GET 6 s) — jeden wolny host wyczerpywał budżet całej operacji,
+// zanim skończyła się pierwsza partia. W benchmarku 100 firm 10 z 37
+// needs_review kończyło się `method: 'timeout'`. Teraz budżet globalny jest
+// większy od najgorszego przypadku pojedynczej partii
+// (FALLBACK_VERIFY_TIMEOUT_MS * 2 na kandydata + scrape), więc timeout oznacza
+// realne wyczerpanie czasu, a nie arytmetyczną niemożliwość.
+const FALLBACK_TIME_BUDGET_MS  = 15_000;
+// Timeout POJEDYNCZEJ próby HTTP w verifyUrl wewnątrz fallbacku (HEAD, potem
+// GET) — świadomie krótszy niż domyślne 6 s verifyUrl używane poza fallbackiem,
+// bo tu liczy się przejście przez kilku kandydatów w ramach budżetu, a nie
+// cierpliwość wobec jednego wolnego hosta.
+const FALLBACK_VERIFY_TIMEOUT_MS = 3_000;
+// Twardy limit na CAŁEGO kandydata (verifyUrl + scrapeWebsiteFast razem).
+// Bez niego wolny scrape jednego kandydata potrafi wyczerpać budżet globalny
+// mimo krótkiego verify (case Artmed, pomiar 23.09). Dobrany tak, by cała
+// partia FALLBACK_CONCURRENCY zmieściła się w budżecie globalnym z zapasem.
+const FALLBACK_CANDIDATE_BUDGET_MS = 6_000;
 
-// Do FALLBACK_MAX_HOSTS unikalnych hostów z DWÓCH znaczących słów nazwy (po
-// odfiltrowaniu GENERIC_NAME_WORDS) — wersja bez myślnika i z myślnikiem, TLD
-// .com.pl/.pl/.com. Jeden URL na host (bez oddzielnych wariantów www/http/
-// https — verifyUrl (maxRedirects) i tak podąży za przekierowaniem na
-// kanoniczny wariant). Pętla idzie TLD-najpierw z obiema formami na zmianę
-// (nie forma-najpierw) — inaczej przy FALLBACK_MAX_HOSTS=4 wariant z
-// myślnikiem nigdy nie dociera do dalszych TLD (case: Ostróda Yacht,
-// Star-Dust — poprawna domena to hyphenated+.com.pl, obcięta przy formie
-// jako zewnętrznej pętli). `excludeUrls` (zawsze zawiera już odrzucony URL)
-// wycina kandydatów wskazujących na tę samą domenę rejestrowalną — nie ma
-// sensu ponownie próbować URL-a, który identity-check już odrzucił.
+// Do FALLBACK_MAX_HOSTS unikalnych hostów. Jeden URL na host (bez oddzielnych
+// wariantów www/http/https — verifyUrl (maxRedirects) i tak podąży za
+// przekierowaniem na kanoniczny wariant). `excludeUrls` (zawsze zawiera już
+// odrzucony URL) wycina kandydatów wskazujących na tę samą domenę
+// rejestrowalną — nie ma sensu ponownie próbować URL-a, który identity-check
+// już odrzucił.
+//
+// KOLEJNOŚĆ (wariant "H", 23.09 — zmierzony na 203 firmach z potwierdzoną
+// domeną z batcha workend_ola_9001-10000):
+//   1. marka × .pl        2. formy dwusłowne × .pl
+//   3. marka × .com.pl/.com   4. formy dwusłowne × .com.pl/.com
+//
+// "Marka" to token, którego generator dotąd NIE próbował: pierwszy znaczący
+// człon nazwy, plus marka w cudzysłowie, jeśli jest. Case źródłowy: Airtificial
+// Intelligent Robots Poland — prawdziwa domena to airtificial.com, a generator
+// próbował wyłącznie airtificial-intelligent.*.
+//
+// Dlaczego .pl NAJPIERW, a nie TLD-po-TLD jak wcześniej: marka zajmuje pierwsze
+// miejsca, więc przy limicie 6 formy dwusłowne z myślnikiem wypadały poza limit.
+// Kolejność ".pl dla wszystkiego, potem reszta" odzyskuje połowę tych strat przy
+// TEJ SAMEJ liczbie kandydatów: 57,1% → 58,6%, i nadal mieści airtificial.com.
+// Zachowany przypadek Star-Dust/Ostróda Yacht (hyphenated+.com.pl) — dlatego w
+// krokach 2 i 4 obie formy idą razem, forma nigdy nie jest pętlą zewnętrzną.
+//
+// Bilans względem stanu sprzed zmiany: 104/203 → 119/203 (+18 zyskanych,
+// −3 zgubione: peter-schmidt.com.pl, star-dust.com.pl, chiorino-swidnica.com.pl
+// — wszystkie dwuczłonowe z myślnikiem na .com.pl, wypchnięte przez limit 6).
+
+// Bugfix 23.09 — forma prawna W ŚRODKU nazwy. normalizeName() wycina formę
+// prawną TYLKO z KOŃCA (kotwica `\s*$`), a w tych danych bardzo często idzie
+// po niej opis działalności: "Zimnik sp. z o.o. Kopalnia Granitu". Tokeny
+// 'sp'/'z'/'o' przeżywały wtedy filtr i wchodziły do nazwy domeny —
+// zimniksp.com.pl zamiast zimnik*. Zmierzone na batchu
+// workend_ola_9001-10000: 63 firmy z 1096 (5,7%) miały przez to WSZYSTKICH
+// czterech kandydatów bezużytecznych.
+//
+// Wycinamy FRAZĘ, nie pojedyncze tokeny. Pierwsza próba odfiltrowywała słowa
+// krótsze niż 2 znaki i kosztowała 4 potwierdzone domeny, w których jedna
+// litera/cyfra JEST członem marki: l-contact.pl, rytm-l.pl, sectorf.pl,
+// kanal6.pl. Dlatego tu nie ma żadnego progu długości.
+//
+// Funkcja jest lokalna dla generatora kandydatów — NIE ruszamy normalizeName(),
+// bo ten sam helper karmi identity-check (nameTokensMatch) i brand fallback V3.
+const LEGAL_FORM_ANYWHERE = /(\s|^)(spolka\s+z\s+ograniczona\s+odpowiedzialnoscia|spółka\s+z\s+ograniczoną\s+odpowiedzialnością|sp\.?\s*z\s*o\.?\s*o\.?|sp\.?\s*k\.?|sp\.?\s*j\.?)(?=\s|$|,|\.)/gi;
+
+function stripLegalFormAnywhere(name) {
+  return String(name).replace(LEGAL_FORM_ANYWHERE, ' ');
+}
+
+// Marka podana w cudzysłowie — w tych danych bardzo częsty wzorzec, gdzie
+// człony przed cudzysłowem to sam opis działalności: "Fabryka Przetworów
+// Rybnych 'mieszko'", "Przedsiębiorstwo Budowy Dróg 'bitum'". W batchu
+// workend_ola_9001-10000: 53 nazwy z cudzysłowem, w 30 pierwszy znaczący człon
+// NIE pokrywa się z marką. Próg 4 znaków — krótsze skróty ("k&w" → "kw") zbyt
+// łatwo trafiają w cudzą domenę, a identity i tak musiałby je odrzucić.
+function quotedBrandToken(name) {
+  const m = String(name).match(/["'„»]([A-Za-z0-9][^"'”«]{2,})["'”«]/);
+  if (!m) return null;
+  const token = normalizeName(m[1]).replace(/[^a-z0-9]/g, '');
+  return token.length >= 4 ? token : null;
+}
+
 function guessFallbackDomains(name, excludeUrls = []) {
-  const norm  = normalizeName(name || '');
+  const norm  = normalizeName(stripLegalFormAnywhere(name || ''));
   const words = norm.split(/[^a-z0-9]+/).filter(Boolean).filter(w => !isGenericNameWord(w));
   if (!words.length) return [];
 
@@ -1702,23 +1833,45 @@ function guessFallbackDomains(name, excludeUrls = []) {
   const hyphenated   = significant.join('-');
   const forms = [...new Set([compact, hyphenated])].filter(Boolean);
 
+  // Człony "markowe" — próbowane PRZED formami dwusłownymi (patrz komentarz
+  // o kolejności wyżej). Próg 4 znaków na pojedynczy token: krótsze ("mar",
+  // "hg") są zbyt pospolite, żeby samodzielnie wskazywać firmę, a każdy
+  // kandydat kosztuje request.
+  const brandForms = [];
+  const quoted = quotedBrandToken(name);
+  if (quoted && !forms.includes(quoted)) brandForms.push(quoted);
+  const leadToken = words[0];
+  if (leadToken && leadToken.length >= 4
+      && !forms.includes(leadToken) && !brandForms.includes(leadToken)) {
+    brandForms.push(leadToken);
+  }
+
   const excludedHosts = new Set(
     excludeUrls.filter(Boolean).map(u => {
       try { return registrableDomain(new URL(u).hostname); } catch { return null; }
     }).filter(Boolean)
   );
 
-  const tlds = ['.com.pl', '.pl', '.com'];
   const seenHosts = new Set();
   const candidates = [];
-  for (const tld of tlds) {
-    for (const form of forms) {
-      const host = `${form}${tld}`;
-      if (seenHosts.has(host) || excludedHosts.has(host)) continue;
-      seenHosts.add(host);
-      candidates.push(`https://${host}`);
-      if (candidates.length >= FALLBACK_MAX_HOSTS) return candidates;
-    }
+  // true = limit wyczerpany, przerwij całość
+  const addHost = (form, tld) => {
+    const host = `${form}${tld}`;
+    if (seenHosts.has(host) || excludedHosts.has(host)) return false;
+    seenHosts.add(host);
+    candidates.push(`https://${host}`);
+    return candidates.length >= FALLBACK_MAX_HOSTS;
+  };
+
+  const REST_TLDS = ['.com.pl', '.com'];
+  for (const form of brandForms) if (addHost(form, '.pl')) return candidates;
+  for (const form of forms)      if (addHost(form, '.pl')) return candidates;
+  for (const form of brandForms) {
+    for (const tld of REST_TLDS) if (addHost(form, tld)) return candidates;
+  }
+  // forma NIGDY jako pętla zewnętrzna — patrz case Star-Dust w komentarzu wyżej
+  for (const tld of REST_TLDS) {
+    for (const form of forms) if (addHost(form, tld)) return candidates;
   }
   return candidates;
 }
@@ -1731,8 +1884,8 @@ function guessFallbackDomains(name, excludeUrls = []) {
 // continueCrawlToFull bez ponownego pobierania strony głównej; reszta
 // kandydatów go nie potrzebuje (patrz resolveDomainFallback, gdzie jest
 // wycinany przed zapisem do `attempts`, żeby nie rozdymać enrichment_log).
-async function checkFallbackCandidate(url, { company, krsData, gusData }) {
-  const verifiedUrl = await verifyUrl(url);
+async function checkFallbackCandidate(url, { company, krsData, gusData, verifyTimeoutMs }) {
+  const verifiedUrl = await verifyUrl(url, verifyTimeoutMs ? { timeoutMs: verifyTimeoutMs } : undefined);
   if (!verifiedUrl) return { url, exists: false, verified: false };
 
   const scraped = await scrapeWebsiteFast(verifiedUrl);
@@ -1762,33 +1915,80 @@ async function checkFallbackCandidate(url, { company, krsData, gusData }) {
 async function resolveDomainFallback({ company, krsData, gusData, rejectedUrl }) {
   const candidates = guessFallbackDomains(company.company_name, [rejectedUrl]);
 
+  // WSPÓŁDZIELONA tablica (poprawka 23.09): przed poprawką gałąź timeoutu
+  // zwracała zahardkodowane `attempts: []`, przez co enrichment_log pokazywał
+  // "timeout, 0 sprawdzonych kandydatów" nawet wtedy, gdy kandydaci byli
+  // sprawdzeni — częściowe wyniki po prostu ginęły razem z przegraną gałęzią
+  // Promise.race. To był artefakt raportowania, nie realne zero prób, i mylił
+  // diagnostykę (patrz audyt 47 firm bez `done`). Teraz obie gałęzie widzą tę
+  // samą tablicę, więc timeout raportuje to, co faktycznie zdążyło się wykonać.
+  const attempts = [];
+  let timeoutHandle = null;
+
+  // Twardy limit na JEDNEGO kandydata, obejmujący verifyUrl ORAZ
+  // scrapeWebsiteFast. Poprawka 23.09 (druga iteracja etapu 1): pierwsza
+  // wersja ograniczała tylko verifyUrl, przez co budżet globalny i tak zjadał
+  // scrape (case Artmed: verify przechodził w ~0,5 s, a scrape trwał >15 s →
+  // znowu `timeout` z zerem kandydatów). Wynik każdego kandydata jest też
+  // zapisywany do `attempts` NATYCHMIAST po rozstrzygnięciu, a nie dopiero po
+  // całej partii — inaczej wisząca partia nadal raportowałaby pustkę.
+  const checkOne = async (url) => {
+    let candidateTimer = null;
+    try {
+      const result = await Promise.race([
+        checkFallbackCandidate(url, {
+          company, krsData, gusData, verifyTimeoutMs: FALLBACK_VERIFY_TIMEOUT_MS,
+        }),
+        new Promise(resolve => {
+          candidateTimer = setTimeout(
+            () => resolve({ url, exists: null, verified: false, reason: 'candidate_timeout' }),
+            FALLBACK_CANDIDATE_BUDGET_MS,
+          );
+        }),
+      ]);
+      attempts.push({ url: result.url, exists: result.exists, verified: result.verified, reason: result.reason, evidence: result.evidence });
+      return result;
+    } finally {
+      if (candidateTimer) clearTimeout(candidateTimer);
+    }
+  };
+
   const resolvePromise = (async () => {
-    const attempts = [];
     for (let i = 0; i < candidates.length; i += FALLBACK_CONCURRENCY) {
       const batch = candidates.slice(i, i + FALLBACK_CONCURRENCY);
-      const results = await Promise.all(
-        batch.map(url => checkFallbackCandidate(url, { company, krsData, gusData }))
-      );
+      const results = await Promise.all(batch.map(checkOne));
       const hit = results.find(r => r.verified);
-      attempts.push(...results.map(r => ({ url: r.url, exists: r.exists, verified: r.verified, reason: r.reason, evidence: r.evidence })));
       if (hit) return { url: hit.url, method: 'fallback_heuristic', attempts, scraped: hit.scraped };
     }
     return { url: null, method: 'none', attempts };
   })();
 
   const timeoutPromise = new Promise(resolve => {
-    setTimeout(() => resolve({ url: null, method: 'timeout', attempts: [] }), FALLBACK_TIME_BUDGET_MS);
+    timeoutHandle = setTimeout(
+      () => resolve({ url: null, method: 'timeout', attempts, timed_out_after_ms: FALLBACK_TIME_BUDGET_MS }),
+      FALLBACK_TIME_BUDGET_MS,
+    );
   });
 
-  return Promise.race([resolvePromise, timeoutPromise]);
+  try {
+    return await Promise.race([resolvePromise, timeoutPromise]);
+  } finally {
+    // Bez tego setTimeout trzyma event loop do końca budżetu nawet wtedy, gdy
+    // resolvePromise wygrał wyścig w 200 ms — przy batchu 100 firm to realny
+    // narzut czasu (i ostrzeżenia Jest o otwartych handle'ach w testach).
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
 }
 
-// Sprawdza czy URL odpowiada (HEAD, fallback GET), zwraca URL lub null
-async function verifyUrl(url) {
+// Sprawdza czy URL odpowiada (HEAD, fallback GET), zwraca URL lub null.
+// `timeoutMs` per POJEDYNCZĄ próbę HTTP (domyślnie 6 s — zachowanie sprzed
+// 23.09 dla wszystkich wywołań spoza fallbacku); resolveDomainFallback podaje
+// krótszą wartość, żeby zmieścić kilku kandydatów w swoim budżecie.
+async function verifyUrl(url, { timeoutMs = 6_000 } = {}) {
   for (const method of ['head', 'get']) {
     try {
       await axios[method](url, {
-        timeout: 6_000, maxRedirects: 4,
+        timeout: timeoutMs, maxRedirects: 4,
         // Akceptuj 403/406/429 — strona istnieje, ale blokuje boty (WAF/Cloudflare)
         validateStatus: s => s < 400 || s === 403 || s === 406 || s === 429,
         headers: { 'User-Agent': UA },
@@ -2552,18 +2752,27 @@ async function fetchHttpFallback(url, timeoutMs) {
   }
 }
 
-// Po ENOTFOUND na "www." (DNS bez rekordu dla www — apex bywa jedynym
-// skonfigurowanym hostem) próbujemy OD RAZU apex, zamiast dalej retry'ować
-// www (DNS się nie zmieni w ciągu kilku sekund). Jeśli apex też zawiedzie
-// przez błąd certyfikatu, dopina się do istniejącego TLS fallbacku. Cała
-// próba (apex + ewentualny TLS fallback) mieści się we wspólnym, malejącym
-// budżecie `deadline` przekazanym przez fetchPageForCrawl — żadnego
-// dodatkowego stałego timeoutu.
-async function fetchApexAfterWwwEnotfound(wwwUrl, hostname, deadline) {
-  const apexUrl = wwwUrl.replace(hostname, hostname.slice(4));
+// Wariant hosta: "www.x.pl" ↔ "x.pl". Bardzo często tylko JEDEN z tych dwóch
+// hostów jest realnie skonfigurowany, a URL z importu trafia w ten drugi.
+// Zwraca null, gdy wariant nie istnieje (host bez kropki, IP, localhost).
+function swapWwwHost(url) {
+  let hostname = null;
+  try { hostname = new URL(url).hostname; } catch { return null; }
+  if (!hostname || /^[\d.]+$/.test(hostname) || !hostname.includes('.')) return null;
+  const altHost = hostname.startsWith('www.') ? hostname.slice(4) : `www.${hostname}`;
+  // "www.pl" nie jest apexem domeny — po obcięciu musi zostać realna domena
+  if (altHost.split('.').length < 2) return null;
+  return { hostname, altHost, altUrl: url.replace(hostname, altHost) };
+}
+
+// Pobiera wariant hosta (www ↔ apex) w pozostałym budżecie. Jeśli wariant też
+// zawiedzie przez błąd certyfikatu, dopina się do istniejącego TLS fallbacku.
+// Cała próba mieści się we wspólnym, malejącym budżecie `deadline`
+// przekazanym przez fetchPageForCrawl — żadnego dodatkowego stałego timeoutu.
+async function fetchHostVariant(originalUrl, apexUrl, deadline, originalError) {
   const remaining = deadline - Date.now();
   if (remaining <= 0) {
-    return { html: '', finalUrl: wwwUrl, status: null, error: `getaddrinfo ENOTFOUND ${hostname}` };
+    return { html: '', finalUrl: originalUrl, status: null, error: originalError };
   }
   try {
     const resp = await axios.get(apexUrl, {
@@ -2589,24 +2798,61 @@ async function fetchApexAfterWwwEnotfound(wwwUrl, hostname, deadline) {
   }
 }
 
+// Etap 4 (23.09) — przekierowanie wykonywane po stronie KLIENTA. Serwer
+// zwraca HTTP 200 z kilkudziesięciu-bajtowym dokumentem, którego jedyną
+// treścią jest skok gdzie indziej; axios nie ma czego śledzić, więc crawler
+// widział "200, za mało treści" i ponawiał ten sam adres bez sensu.
+// Realne przypadki z audytu 47 firm:
+//   futrex.com.pl  → <META HTTP-EQUIV="Refresh" CONTENT="0;URL=http://poczta.futrex.com.pl">
+//   mieszko.com    → <script>window.onload=function(){window.location.href="/lander"}</script>
+// Celowo wąskie: TYLKO dokumenty podejrzanie krótkie (dłuższa strona z
+// window.location w kodzie to normalna nawigacja, nie przekierowanie) i tylko
+// proste przypisanie do location — bez interpretowania czegokolwiek innego.
+//
+// DLACZEGO KLASYFIKUJEMY, A NIE ŚLEDZIMY (pomiar 23.09, 17 firm): pierwsza
+// wersja tego etapu skakała pod adres docelowy. Cel praktycznie nigdy nie jest
+// stroną firmy — to lander parkingu (/lander) albo webmail (poczta.*). Crawler
+// przyjmował go za `effectiveBase` i zaczynał zgadywać tam /kontakt, /o-nas,
+// dostając 403 z retry Level 2: Futrex urósł z ~11 s do 68 s i zwrócił 62
+// znaki śmieci, a ani jeden rekord nie zyskał `done`. Sam fakt "cała treść to
+// przekierowanie" jest natomiast pewnym sygnałem, że pod tym adresem NIE MA
+// strony firmy — i to jest tu jedyny użytek z tej detekcji.
+const META_REFRESH_RE = /<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*["'][^"']*?url\s*=\s*([^"';\s]+)/i;
+const JS_LOCATION_RE = /(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']/i;
+
+function extractClientSideRedirect(html, baseUrl) {
+  if (typeof html !== 'string' || html.length >= SUSPICIOUSLY_SHORT_HTML) return null;
+  const target = (html.match(META_REFRESH_RE) || html.match(JS_LOCATION_RE) || [])[1];
+  if (!target) return null;
+  try {
+    const resolved = new URL(target, baseUrl);
+    if (!/^https?:$/.test(resolved.protocol)) return null;   // javascript:, mailto: itp.
+    if (resolved.href === baseUrl) return null;              // skok na samego siebie
+    return resolved.href;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
   const deadline = Date.now() + 10_000;
   let lastStatus = null;
   let lastError = null;
   let lastFinalUrl = url;
+  let currentUrl = url;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) await sleepJittered(500 * Math.pow(2, attempt - 1)); // 500ms, 1000ms, ...
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     try {
-      const resp = await axios.get(url, {
+      const resp = await axios.get(currentUrl, {
         timeout: remaining,
         maxRedirects: 5,
         headers: CRAWL_REQUEST_HEADERS,
         validateStatus: () => true, // sami decydujemy, co retry'ować
       });
       lastStatus = resp.status;
-      const finalUrl = resp.request?.res?.responseUrl || url;
+      const finalUrl = resp.request?.res?.responseUrl || currentUrl;
       lastFinalUrl = finalUrl;
 
       // 404 = strona faktycznie nie istnieje pod tym URL-em — nie ma sensu
@@ -2635,22 +2881,30 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
       }
 
       const html = resp.data;
-      if (typeof html === 'string' && html.length < SUSPICIOUSLY_SHORT_HTML && attempt < maxRetries) {
-        continue;
+      if (typeof html === 'string' && html.length < SUSPICIOUSLY_SHORT_HTML) {
+        // Krótki dokument, którego CAŁĄ treścią jest przekierowanie
+        // client-side, nie stanie się dłuższy po ponowieniu — retry na ten sam
+        // adres to czysta strata budżetu. Samego skoku nie gonimy (patrz
+        // komentarz przy extractClientSideRedirect) — zwracamy go wywołującemu
+        // jako sygnał do klasyfikacji.
+        const redirectTarget = extractClientSideRedirect(html, finalUrl);
+        if (redirectTarget) {
+          return { html, finalUrl, status: resp.status, attempts: attempt + 1, clientSideRedirectTo: redirectTarget };
+        }
+        if (attempt < maxRetries) continue;
       }
       return { html, finalUrl, status: resp.status, attempts: attempt + 1 };
     } catch (err) {
       lastError = err;
 
       if (/ENOTFOUND/.test(err.message)) {
-        let hostname = null;
-        try { hostname = new URL(url).hostname; } catch { /* zostaw null */ }
-        if (hostname && hostname.startsWith('www.')) {
+        const swap = swapWwwHost(currentUrl);
+        if (swap && swap.hostname.startsWith('www.')) {
           // DNS dla www się nie zmieni w kolejnych sekundach — nie ponawiamy
           // www, tylko od razu próbujemy apex w pozostałym budżecie.
-          const apexResult = await fetchApexAfterWwwEnotfound(url, hostname, deadline);
+          const apexResult = await fetchHostVariant(currentUrl, swap.altUrl, deadline, err.message);
           logger.warn('[Prospect] ENOTFOUND on www. host — tried apex without www instead of retrying', {
-            url, originalError: err.message, finalUrl: apexResult.finalUrl,
+            url: currentUrl, originalError: err.message, finalUrl: apexResult.finalUrl,
             status: apexResult.status, apexError: apexResult.error || null,
           });
           return { ...apexResult, attempts: attempt + 2 };
@@ -2658,18 +2912,40 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
       }
 
       if (attempt >= maxRetries) {
+        // Etap 3 (23.09): awaria na poziomie POŁĄCZENIA (reset/hang up/odmowa/
+        // timeout) mówi tylko tyle, że TEN host nie odpowiada — drugi wariant
+        // (www ↔ apex) bywa skonfigurowany poprawnie. Realny przypadek Micel:
+        // www.addevmaterials.pl → "socket hang up", addevmaterials.pl → HTTP
+        // 200 i redirect na addevmaterials.com/pl/. Dotąd ta ścieżka istniała
+        // WYŁĄCZNIE dla ENOTFOUND, więc taki host kończył jako needs_review
+        // bez ani jednego znaku treści. Próba jest jednorazowa i mieści się w
+        // tym samym `deadline`, więc nie wydłuża najgorszego przypadku.
+        if (CONNECTION_LEVEL_ERROR.test(err.message) && !TLS_CERT_ERROR.test(err.message)) {
+          const swap = swapWwwHost(currentUrl);
+          if (swap) {
+            const variant = await fetchHostVariant(currentUrl, swap.altUrl, deadline, err.message);
+            if (variant.html) {
+              logger.warn('[Prospect] host_variant_fallback — original host failed at connection level, www/apex variant answered', {
+                url: currentUrl, variantUrl: swap.altUrl, originalError: err.message,
+                finalUrl: variant.finalUrl, status: variant.status,
+              });
+              return { ...variant, attempts: attempt + 2, hostVariantFallback: true };
+            }
+          }
+        }
+
         if (TLS_CERT_ERROR.test(err.message)) {
-          const insecure = await fetchInsecureFallback(url, deadline - Date.now());
+          const insecure = await fetchInsecureFallback(currentUrl, deadline - Date.now());
           if (insecure) {
             logger.warn('[Prospect] tls_unverified — fetched despite TLS certificate error', {
-              url, originalError: err.message, status: insecure.status,
+              url: currentUrl, originalError: err.message, status: insecure.status,
             });
             return { ...insecure, attempts: attempt + 2, tlsUnverified: true };
           }
-          const httpFallback = await fetchHttpFallback(url, deadline - Date.now());
+          const httpFallback = await fetchHttpFallback(currentUrl, deadline - Date.now());
           if (httpFallback) {
             logger.warn('[Prospect] protocol_fallback: https_to_http — HTTPS failed on certificate, plain HTTP succeeded', {
-              url, httpUrl: httpFallback.finalUrl, originalError: err.message, status: httpFallback.status,
+              url: currentUrl, httpUrl: httpFallback.finalUrl, originalError: err.message, status: httpFallback.status,
             });
             return { ...httpFallback, attempts: attempt + 3, protocolFallback: true };
           }
@@ -2794,9 +3070,19 @@ function qualifiesForLevel2(result) {
 // sam kształt co fetchPageForCrawl(), więc wywołujący kod się nie zmienia.
 async function fetchPageResilient(url, opts) {
   const level1 = await fetchPageForCrawl(url, opts);
+  // Dokument będący wyłącznie przekierowaniem client-side kwalifikuje się do
+  // Level 2 regułą "200, ale <1000 znaków" — a hardening niczego tu nie zmieni
+  // (to nie blokada bota, tylko skok). Kończymy od razu, zachowując
+  // klasyfikację i oszczędzając całą rundę Level 2.
+  if (level1.clientSideRedirectTo) return level1;
   if (!qualifiesForLevel2(level1)) return level1;
   const level2 = await fetchPageHardened(url);
-  return level2.html ? level2 : level1;
+  if (!level2.html) return level1;
+  // fetchPageHardened to osobna ścieżka i nie zna detekcji z fetchPageForCrawl
+  // — bez tego Level 2 zwracałby ten sam stub przekierowania już BEZ
+  // klasyfikacji, a rekord wracał do needs_review z zerem znaków.
+  const redirectTarget = extractClientSideRedirect(level2.html, level2.finalUrl || url);
+  return redirectTarget ? { ...level2, clientSideRedirectTo: redirectTarget } : level2;
 }
 
 // ── Kategorie treści + budżet znaków (decyzja 19.08) ─────────────────────
@@ -3070,7 +3356,7 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     // (fetchPageForCrawl — retry+jitter, nigdy nie rzuca wyjątku) zamiast
     // jednorazowego fetchPage(), żeby przejściowe błędy (timeout, throttling)
     // dostały tę samą szansę na retry co reszta crawla (decyzja 20.08).
-    const { html, finalUrl, status: homeStatus, error: homeError, tlsUnverified: homeTlsUnverified, protocolFallback: homeProtocolFallback, level: homeFetchLevel } = await fetchPageResilient(base);
+    const { html, finalUrl, status: homeStatus, error: homeError, tlsUnverified: homeTlsUnverified, protocolFallback: homeProtocolFallback, level: homeFetchLevel, clientSideRedirectTo } = await fetchPageResilient(base);
     homepageHtml = typeof html === 'string' ? html : '';
     if (homeTlsUnverified) tlsUnverified = true;
     if (homeProtocolFallback) protocolFallback = true;
@@ -3096,6 +3382,27 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     // sam fakt lądowania na znanym hoście giełdy domen nie).
     let finalHostname = null;
     try { finalHostname = new URL(finalUrl).hostname; } catch { /* zostaw null */ }
+
+    // Etap 4 (23.09): cała treść strony wejściowej to przekierowanie
+    // client-side (meta refresh / window.location). Pod tym adresem nie ma
+    // strony firmy i kolejna próba tego nie zmieni — traktujemy to jak
+    // potwierdzoną martwą domenę, dzięki czemu rekord trafia do fallbacku
+    // domenowego (etap 2) i kończy jako `no_website` zamiast wisieć w
+    // needs_review z zerem znaków i bez powodu. Celowo NIE podążamy za skokiem
+    // — pomiar pokazał, że cel to lander parkingu albo webmail.
+    if (clientSideRedirectTo) {
+      logger.info('[Prospect] Entry page is only a client-side redirect — treating as no company site', {
+        base, finalUrl, redirectTo: clientSideRedirectTo, rawLength: homepageHtml.length,
+      });
+      return {
+        terminal: {
+          text: '', contacts: { emails: [], phones: [] },
+          diagnostics: [{ url: base, attempt: 1, http_status: homeStatus, raw_length: homepageHtml.length, extracted_length: 0, included: false, reason: 'client_side_redirect_only', redirect_to: clientSideRedirectTo }],
+          identity: { title: '', h1: '' },
+          deterministicFailure: { type: 'client_side_redirect_only', reason: `client_side_redirect_only: ${clientSideRedirectTo}` },
+        },
+      };
+    }
 
     if (isDomainParkingPage(homepageHtml) || isDomainMarketplaceHost(finalHostname)) {
       logger.info('[Prospect] Homepage looks like a domain-parking page — rejecting', { base, finalUrl, finalHostname });
@@ -3225,9 +3532,24 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     }
     fetched.add(fullHref);
 
-    const { html, status, attempts, error, level: fetchLevel } = await fetchPageResilient(fullHref);
+    const { html, status, attempts, error, level: fetchLevel, finalUrl } = await fetchPageResilient(fullHref);
     if (error || !html) {
       logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: status === 404 ? 'not_found' : 'fetch_error', fetch_level: fetchLevel || 1 });
+      await sleepJittered(400);
+      return;
+    }
+
+    // Host po redirectach musi wciąż być related wobec baseHostname — sam
+    // href w momencie discovery (extractInternalLinks/isRelatedHost) mówi
+    // tylko dokąd link WSKAZYWAŁ, nie dokąd request faktycznie wylądował po
+    // 301/302 (wygasła podstrona przejęta przez inny podmiot, migracja po
+    // przejęciu firmy). Bez tej weryfikacji treść obcej firmy mogłaby trafić
+    // do fetchedPages i dalej do promptu AI, mimo że identity-check strony
+    // głównej przeszedł poprawnie (audyt Enrichment V2, H1, 23.09).
+    let finalHostname = null;
+    try { finalHostname = new URL(finalUrl).hostname; } catch { /* zostaw null */ }
+    if (finalHostname && !isRelatedHost(finalHostname, baseHostname, `${path} ${anchor}`)) {
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: 0, included: false, reason: 'other_host', fetch_level: fetchLevel || 1, final_host: finalHostname });
       await sleepJittered(400);
       return;
     }
@@ -3276,9 +3598,20 @@ async function _crawlWebsite(baseUrl, { fast = false, resume = null } = {}) {
     }
     fetched.add(fullHref);
 
-    const { html, status, attempts, error, level: fetchLevel } = await fetchPageResilient(fullHref);
+    const { html, status, attempts, error, level: fetchLevel, finalUrl } = await fetchPageResilient(fullHref);
     if (error || !html) {
       logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: 0, extracted_length: 0, included: false, reason: 'fetch_error', fetch_level: fetchLevel || 1 });
+      await sleepJittered(400);
+      return;
+    }
+
+    // Patrz komentarz przy tym samym sprawdzeniu w fetchLevel1Candidate — host
+    // po redirectach musi wciąż być related wobec baseHostname (audyt
+    // Enrichment V2, H1, 23.09).
+    let finalHostname = null;
+    try { finalHostname = new URL(finalUrl).hostname; } catch { /* zostaw null */ }
+    if (finalHostname && !isRelatedHost(finalHostname, baseHostname, `${path} ${anchor}`)) {
+      logDiag({ url: fullHref, path, score, category, attempt: attempts, http_status: status, raw_length: html.length, extracted_length: 0, included: false, reason: 'other_host', fetch_level: fetchLevel || 1, final_host: finalHostname });
       await sleepJittered(400);
       return;
     }
@@ -3505,12 +3838,28 @@ const PROMPT_STATIC_HEADER = `Jesteś analitykiem oceniającym, czy firma B2B pa
 nie sklepu samoobsługowego czy zakupu impulsowego.
 
 ═══════════════════════════════════════
-ZASADA GŁÓWNA: każdy sygnał potrzebuje KONKRETNEGO DOWODU z treści poniżej — nie zgaduj
-na podstawie samej branży czy wielkości firmy. Przy każdym sygnale rozróżniamy:
-  • GŁÓWNY DOWÓD — wystarcza sam, żeby ustawić true.
-  • DRUGORZĘDNE WSPARCIE — NIE wystarcza samo, potrzebuje głównego dowodu obok siebie,
-    inaczej sygnał to false (np. sam brak cennika bez frazy CTA to za mało).
-Jeśli dowodu brak: bramki → "unknown", sygnały → false. Nie zgaduj w żadną stronę.
+ZASADA GŁÓWNA (recall-first — decyzja biznesowa 2026-09-23): firma ma trafić do
+handlowca nawet przy niepełnym dowodzie — koszt zbędnego telefonu jest dla nas dużo
+niższy niż koszt pominięcia realnego klienta. Oceniaj sygnały SEMANTYCZNIE, nie przez
+dopasowanie dosłownej frazy:
+  • Wiarygodna, konkretna przesłanka biznesowa WYSTARCZA do true — nie wymagaj
+    literalnej nazwy stanowiska, dokładnego sformułowania ani „podręcznikowego”
+    dowodu. Jeśli opis firmy jednoznacznie wskazuje na dany mechanizm biznesowy,
+    nawet innymi słowami niż w definicji sygnału niżej, zalicz jako dopasowanie.
+  • Przy rozsądnej niepewności (dowód jest wiarygodny, ale niepełny lub pośredni)
+    wybieraj TRUE, nie FALSE.
+  • WYJĄTEK — NIGDY nie ustawiaj true bez ŻADNEJ konkretnej przesłanki z treści: sama
+    branża, sama wielkość firmy albo czysty domysł bez punktu zaczepienia w tekście to
+    wciąż za mało. Musi być COŚ konkretnego w treści, na czym opierasz wniosek — ale
+    to „coś” nie musi być idealne, dosłowne ani jedyną możliwą interpretacją.
+  • ZASADA NIEZALEŻNOŚCI DOWODU (2026-09-23, trzecia tura): jeden fragment tekstu
+    może uzasadniać więcej niż jeden sygnał TYLKO jeśli faktycznie zawiera OSOBNY
+    sens biznesowy dla każdego z nich. Sama ogólna fraza typu "biuro projektowe",
+    "obsługa klienta", "doradztwo" nie może automatycznie zapalać kilku różnych
+    sygnałów naraz — sprawdź dla KAŻDEGO sygnału osobno, czy fragment realnie
+    opisuje TO KONKRETNE zjawisko, czy tylko przypomina je z nazwy.
+Jeśli treści brakuje CAŁKOWICIE (pusta/martwa strona, zero danych): bramki → "unknown",
+sygnały → false — to jedyny przypadek false z braku danych, nie z braku pewności.
 ═══════════════════════════════════════
 
 BRAMKI (status: "pass" / "fail" / "unknown") — WYŁĄCZNIE informacyjne. NIE wpływają na wynik
@@ -3811,9 +4160,11 @@ async function callAnthropic(userMessage, systemPrompt) {
 // odpytywać bazy drugi raz przy scoringu. Walidacja odpowiedzi rzuca
 // IcpAiResponseValidationError (niezłapane tutaj celowo — propaguje do enrichOne,
 // które oznacza enrichment jako 'error', tak jak każdy inny błąd tego kroku).
-// Całkowity brak parsowalnego JSON-a (raw nie jest JSON-em wcale) NIE jest
-// traktowany jako błąd walidacji — zachowuje dawne zachowanie: result=null,
-// calcIcpScore dostaje undefined i scoruje wszystko jako false (graceful degradation).
+// Całkowity brak parsowalnego JSON-a (raw nie jest JSON-em wcale) rzuca ten sam
+// IcpAiResponseValidationError — enrichment MUSI wejść w ścieżkę 'error' (i tym
+// samym w retry), nigdy nie zapisać się jako 'done' z syntetycznym icp_score=0
+// (naprawione 2026-09-23 — wcześniej zwracało result=null, co enrichOne cicho
+// zapisywał jako pozornie ukończony enrichment z zerowym wynikiem).
 async function analyzeWithAi(company, krsData, websiteText, activeSignals, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
   const { rows } = await db.query(
     `SELECT value FROM app_settings WHERE key = 'prospect.ai_provider' AND tenant_id = $1`,
@@ -3838,14 +4189,14 @@ async function analyzeWithAi(company, krsData, websiteText, activeSignals, fbDat
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) {
       logger.warn('[Prospect] AI returned unparseable response', { provider, preview: raw.slice(0, 200) });
-      return { result: null, provider, model: usedModel, usage };
+      throw new IcpAiResponseValidationError('Odpowiedź AI: nie udało się sparsować jako JSON (brak bloku {})');
     }
     try {
       parsed = JSON.parse(match[0]);
       logger.info('[Prospect] AI parse OK (regex fallback)', { provider, company: company.company_name, signals: parsed.signals });
     } catch {
       logger.warn('[Prospect] AI JSON malformed after regex extract', { provider, rawLength: raw.length, rawTail: raw.slice(-200), preview: match[0].slice(0, 300) });
-      return { result: null, provider, model: usedModel, usage };
+      throw new IcpAiResponseValidationError('Odpowiedź AI: JSON niepoprawny nawet po ekstrakcji bloku {}');
     }
   }
 
@@ -4135,6 +4486,10 @@ async function enrichOne(prospectId, opts = {}) {
           brandFallback = evaluateBrandIdentityFallback({
             company, krsData, gusData, candidateUrl: websiteUrl, candidateSource: websiteSource,
             homepageTitle: fallbackTitle, sources: identityFallback.raw_sources || [],
+            // Tekst PO ekstrakcji (bez nawigacji/nagłówka/stopki) — patrz
+            // BRAND_CONTENT_MIN_HITS. raw_sources zawierają boilerplate, więc
+            // nie nadają się do sprawdzenia, czy marka jest w realnej treści.
+            contentText: fastScraped.text || '',
           });
           logger.info('[Prospect] Brand identity fallback (V3) on same domain', {
             prospectId, websiteUrl, verified: brandFallback.verified, reason: brandFallback.reason, decidedBy: brandFallback.decided_by,
@@ -4154,18 +4509,64 @@ async function enrichOne(prospectId, opts = {}) {
 
       if (fastScraped.deterministicFailure) {
         // Błąd deterministyczny (TLS/DNS, potwierdzony parking domeny, zły
-        // URL) — pełny crawl zobaczyłby dokładnie to samo, więc dokańczanie
-        // crawla tylko kosztowałoby czas bez szans na inny wynik (decyzja
-        // 20.08, patrz DETERMINISTIC_FETCH_ERROR / deterministicFailure).
-        // Fallback po deterministicFailure był testowany 21.08 na stałej
-        // próbce 20 firm — 0/20 odzyskanych, +330% czasu, +225% requestów;
-        // wycofane tego samego dnia jako nieopłacalne (patrz historia).
-        logger.info('[Prospect] Fast scan hit a deterministic failure — not completing crawl', {
-          prospectId, websiteUrl, type: fastScraped.deterministicFailure.type, reason: fastScraped.deterministicFailure.reason,
-        });
-        scanStage = fastScraped.deterministicFailure.type === 'domain_parking'
-          ? 'fast_domain_parking'
-          : 'fast_deterministic_fetch_error';
+        // URL) — pełny crawl na TEJ domenie zobaczyłby dokładnie to samo,
+        // więc go nie dokańczamy (decyzja 20.08, DETERMINISTIC_FETCH_ERROR).
+        //
+        // ETAP 2 (23.09): ale zanim uznamy firmę za `no_website`, próbujemy
+        // znaleźć INNĄ domenę — dokładnie tym samym resolverem, którego używa
+        // już gałąź "domena niepotwierdzona" niżej. Wcześniej martwa domena z
+        // importu kończyła enrichment natychmiast, bez ani jednej próby
+        // alternatywy (audyt 47 firm: wszystkie 10 `no_website` miało
+        // `fallback: BRAK`, mimo że dla 3 z nich istniała żywa domena —
+        // artmed.pl, joanelektronic.pl, airtificial.com).
+        //
+        // UWAGA do historii: fallback po deterministicFailure testowano 21.08
+        // (0/20 odzyskanych, +330% czasu) i wycofano. Tamten pomiar powstał
+        // jednak PRZED naprawą budżetu resolvera (etap 1, 23.09) — przy
+        // budżecie 8 s i koszcie do 12 s na kandydata fallback potrafił
+        // zwrócić `timeout` nie sprawdziwszy nikogo, więc "0/20" mogło mierzyć
+        // zepsuty timeout, a nie brak sensu tej ścieżki. Stąd ponowna próba,
+        // tym razem z pomiarem po naprawie.
+        //
+        // Identity NIE jest osłabione: checkFallbackCandidate woła
+        // checkDomainIdentity i zwraca verified:true wyłącznie przy mocnym
+        // dowodzie (NIP/KRS/REGON albo kod+ulica). Domena z fallbacku
+        // przechodzi tę samą ścieżkę co domena z importu.
+        let deadDomainFallback = null;
+        if (!trustedByHuman) {
+          deadDomainFallback = await resolveDomainFallback({
+            company, krsData, gusData, rejectedUrl: websiteUrl,
+          });
+          enrichLog.website.dead_domain_fallback = {
+            attempted:        true,
+            rejected_url:     websiteUrl,
+            rejected_reason:  fastScraped.deterministicFailure.type,
+            candidates_tried: (deadDomainFallback.attempts || []).length,
+            found_url:        deadDomainFallback.url,
+            method:           deadDomainFallback.method,
+          };
+        }
+
+        if (deadDomainFallback?.url) {
+          logger.info('[Prospect] Dead imported domain — fallback found a verified alternate', {
+            prospectId, rejectedUrl: websiteUrl, foundUrl: deadDomainFallback.url,
+            rejectedReason: fastScraped.deterministicFailure.type,
+          });
+          websiteUrl    = deadDomainFallback.url;
+          websiteSource = 'resolver';
+          scraped       = await continueCrawlToFull(websiteUrl, deadDomainFallback.scraped.crawlState);
+          identityCheck = computeIdentityCheck(scraped);
+          scanStage     = 'full';
+          enrichLog.website.url    = websiteUrl;
+          enrichLog.website.source = websiteSource;
+        } else {
+          logger.info('[Prospect] Fast scan hit a deterministic failure — not completing crawl', {
+            prospectId, websiteUrl, type: fastScraped.deterministicFailure.type, reason: fastScraped.deterministicFailure.reason,
+          });
+          scanStage = fastScraped.deterministicFailure.type === 'domain_parking'
+            ? 'fast_domain_parking'
+            : 'fast_deterministic_fetch_error';
+        }
       } else if (identityCheck.verified || trustedByHuman) {
         // Domena potwierdzona (lub zaufana) — dokończ crawl do pełnej
         // głębokości, ponownie wykorzystując strony już pobrane w fast.
@@ -4369,7 +4770,15 @@ async function enrichOne(prospectId, opts = {}) {
           // no_website tylko dla potwierdzonego parkingu/nieistniejącej domeny na
           // niezaufanym źródle; ręcznie potwierdzona domena (manual_correction/
           // trustedDomain) po błędzie pobrania ZAWSZE ląduje jako needs_review.
-          const finalStatus = (!trustedByHuman && isConfirmedDeadDomain(fastScraped.deterministicFailure))
+          //
+          // ETAP 2 (23.09): jeśli fallback podmienił martwą domenę z importu na
+          // inną, zweryfikowaną, to `fastScraped.deterministicFailure` opisuje
+          // JUŻ NIEUŻYWANĄ domenę — nie wolno na jego podstawie orzekać
+          // `no_website` o domenie, która realnie odpowiada. Taki rekord idzie
+          // do needs_review (mamy domenę, tylko bez treści), nie do no_website.
+          const deadDomainReplaced = !!enrichLog.website?.dead_domain_fallback?.found_url;
+          const finalStatus = (!trustedByHuman && !deadDomainReplaced
+                               && isConfirmedDeadDomain(fastScraped.deterministicFailure))
             ? 'no_website'
             : 'needs_review';
           await persistUpdate(
@@ -4771,7 +5180,7 @@ module.exports = {
   // w izolacji (audyt 21.08) — enrichOne woła resolveDomainFallback()
   // wewnętrznie (patrz gałąź "domena niepotwierdzona i nie zaufana"), ten
   // eksport służy tylko testom poza pełnym przebiegiem enrichmentu.
-  guessFallbackDomains, resolveDomainFallback, scrapeWebsiteFast,
+  guessFallbackDomains, resolveDomainFallback, verifyUrl, scrapeWebsiteFast,
   // Eksport na potrzeby audytu jakości sygnałów ICP (regresja treści promptu +
   // replay realnych wywołań DeepSeek poza pełnym przebiegiem enrichmentu).
   // SYSTEM_PROMPT nie istnieje już jako stały string (ETAP B, prompt dynamiczny
@@ -4805,6 +5214,10 @@ module.exports = {
   // Level 2 hardened HTTP fallback (21.09) — qualifiesForLevel2 testowalne bez
   // sieci; fetchPageHardened/fetchPageResilient testowane przez mock axios.
   qualifiesForLevel2, fetchPageHardened, fetchPageResilient,
+  // Etap 3 (23.09) — wariant hosta www ↔ apex przy awarii połączenia
+  swapWwwHost, CONNECTION_LEVEL_ERROR,
+  // Etap 4 (23.09) — przekierowania client-side (meta refresh / window.location)
+  extractClientSideRedirect,
   // Fallback company_size z LinkedIn JSON-LD (21.09) — czysta funkcja
   // parsująca schema.org QuantitativeValue, testowalna bez sieci.
   parseNumberOfEmployees,
