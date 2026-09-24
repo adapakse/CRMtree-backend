@@ -41,7 +41,12 @@ async function connect(tenantId, siteUrl, username, appPassword, userId) {
   const base = normalizeSiteUrl(siteUrl);
   let res;
   try {
-    res = await fetch(`${base}/wp-json/wp/v2/users/me`, {
+    // Not /wp-json/wp/v2/users/me: some hosts (confirmed on cyberfolks.pl,
+    // 2026-09-24) run ModSecurity rules that blanket-block /wp-json/wp/v2/users*
+    // as anti-enumeration hardening, returning 406 even for authenticated
+    // requests. context=edit on /posts forces the same auth check (requires
+    // edit_posts capability) without touching the blocked path.
+    res = await fetch(`${base}/wp-json/wp/v2/posts?context=edit&per_page=1`, {
       headers: { ...REQUEST_HEADERS, Authorization: authHeader(username, appPassword) },
     });
   } catch (err) {
