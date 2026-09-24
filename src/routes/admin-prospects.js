@@ -22,6 +22,13 @@ const { validate } = require('../middleware/errorHandler');
 const enrichSvc = require('../services/prospectEnrichmentService');
 const { normalizeWebsiteUrl, normalizeLinkedinUrl } = require('../utils/urlUtils');
 
+// Kontakty z AI bywają dłuższe niż kolumny crm_leads/crm_lead_contacts (np. stanowisko
+// albo dwa numery w jednym polu) — bez przycięcia INSERT leciałby 22001.
+function cut(value, maxLength) {
+  const text = value == null ? '' : String(value).trim();
+  return text ? text.slice(0, maxLength) : null;
+}
+
 // ── "Prospekty" group check (mirrors the group_profiles/user_group_roles
 // pattern already used for SEO editorial access — no new permission system) ──
 async function requireProspectsAccess(req, res, next) {
@@ -893,17 +900,17 @@ router.post('/:id/to-lead',
         }
         if (Array.isArray(contacts409) && contacts409.length) {
           const { rows: existingC } = await db.query(
-            'SELECT COUNT(*) AS cnt FROM crm_lead_contacts WHERE lead_id = $1',
-            [p.crm_lead_id]
+            'SELECT COUNT(*) AS cnt FROM crm_lead_contacts WHERE lead_id = $1 AND tenant_id = $2',
+            [p.crm_lead_id, req.user.tenant_id]
           );
           if (parseInt(existingC[0].cnt) === 0) {
             for (const c of contacts409) {
-              if (!c.name && !c.email) continue;
+              if (!c.name && !c.email && !c.phone) continue;
               try {
                 await db.query(
-                  `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone)
-                   VALUES ($1, $2, $3, $4, $5)`,
-                  [p.crm_lead_id, c.name || null, c.title || null, c.email || null, c.phone || null]
+                  `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone, tenant_id)
+                   VALUES ($1, $2, $3, $4, $5, $6)`,
+                  [p.crm_lead_id, cut(c.name, 200), cut(c.title, 100), cut(c.email, 200), cut(c.phone, 50), req.user.tenant_id]
                 );
               } catch (e) {
                 logger.warn('[Prospects] Could not sync contact to existing lead', { error: e.message });
@@ -973,36 +980,12 @@ router.post('/:id/to-lead',
 
       const nipForLead = p.nip ? `PL${p.nip}` : null;
 
-      const { rows: leadRows } = await db.query(
-        `INSERT INTO crm_leads
-           (tenant_id, company, nip, notes, tags, stage, probability, source, website, assigned_to, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, 'new', $6, 'Prospekt', $7, $8, NOW(), NOW())
-         RETURNING id`,
-        [
-          req.user.tenant_id,
-          p.company_name || p.nip,
-          nipForLead,
-          notes || null,
-          tags,
-          p.icp_score != null ? p.icp_score : null,
-          p.website_url || null,
-          assignedTo,
-        ]
-      );
-      const leadId = leadRows[0].id;
-
-      await db.query(
-        `UPDATE prospect_companies
-         SET crm_lead_id = $2, enrichment_status = 'lead'
-         WHERE id = $1`,
-        [p.id, leadId]
-      );
-
-      // Zbierz kontakty: (1) osoba decyzyjna z importu, (2) kontakty znalezione przez AI
+      // Zbierz kontakty: (1) osoba decyzyjna z importu, (2) kontakty znalezione przez AI.
+      // Budowane PRZED insertem leada, bo główny kontakt leada bierzemy z tej listy.
       const allContacts = [];
 
-      // Kontakt z pliku importu
-      if (p.decision_maker_name || p.decision_maker_email) {
+      // Kontakt z pliku importu — sam telefon bez nazwiska też się liczy
+      if (p.decision_maker_name || p.decision_maker_email || p.decision_maker_phone) {
         const titleParts = [p.decision_maker_title, p.decision_maker_dept].filter(Boolean);
         allContacts.push({
           name:  p.decision_maker_name  || null,
@@ -1019,26 +1002,77 @@ router.post('/:id/to-lead',
       }
       if (Array.isArray(aiContacts)) {
         for (const c of aiContacts) {
-          if (!c.name && !c.email) continue;
+          if (!c.name && !c.email && !c.phone) continue;
           const dupEmail = c.email && allContacts.some(x => x.email && x.email.toLowerCase() === c.email.toLowerCase());
           const dupName  = c.name  && allContacts.some(x => x.name  && x.name.toLowerCase()  === c.name.toLowerCase());
           if (!dupEmail && !dupName) allContacts.push(c);
         }
       }
 
+      // Główny kontakt leada (pola contact_*/email/phone na karcie) — pierwszy kontakt
+      // z telefonem, a osoba decyzyjna z importu jest pierwsza na liście, więc ma
+      // pierwszeństwo przed kontaktami z AI.
+      const primaryContact = allContacts.find(c => c.phone) || allContacts[0] || null;
+
+      const { rows: leadRows } = await db.query(
+        `INSERT INTO crm_leads
+           (tenant_id, company, nip, notes, tags, stage, probability, source, website,
+            contact_name, contact_title, email, phone, assigned_to, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'new', $6, 'Prospekt', $7, $8, $9, $10, $11, $12, NOW(), NOW())
+         RETURNING id`,
+        [
+          req.user.tenant_id,
+          p.company_name || p.nip,
+          nipForLead,
+          notes || null,
+          tags,
+          p.icp_score != null ? p.icp_score : null,
+          p.website_url || null,
+          cut(primaryContact?.name,  150),
+          cut(primaryContact?.title, 100),
+          cut(primaryContact?.email, 200),
+          cut(primaryContact?.phone,  50),
+          assignedTo,
+        ]
+      );
+      const leadId = leadRows[0].id;
+
+      await db.query(
+        `UPDATE prospect_companies
+         SET crm_lead_id = $2, enrichment_status = 'lead'
+         WHERE id = $1`,
+        [p.id, leadId]
+      );
+
+      let contactsSaved = 0;
+      const contactErrors = [];
       for (const c of allContacts) {
         try {
           await db.query(
-            `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [leadId, c.name || null, c.title || null, c.email || null, c.phone || null]
+            `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone, tenant_id)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [leadId, cut(c.name, 200), cut(c.title, 100), cut(c.email, 200), cut(c.phone, 50), req.user.tenant_id]
           );
+          contactsSaved++;
         } catch (e) {
-          logger.warn('[Prospects] Could not insert lead contact', { error: e.message });
+          contactErrors.push(e.message);
+          logger.warn('[Prospects] Could not insert lead contact', { leadId, error: e.message });
         }
       }
+      // Nieudany zapis kontaktów nie przerywa konwersji, ale musi być widoczny w
+      // odpowiedzi — wcześniej lądował tylko w logu i UI pokazywało sam sukces.
+      if (contactErrors.length) {
+        logger.error('[Prospects] Lead contacts partially failed', {
+          leadId, failed: contactErrors.length, total: allContacts.length, firstError: contactErrors[0],
+        });
+      }
 
-      res.json({ crm_lead_id: leadId });
+      res.json({
+        crm_lead_id:     leadId,
+        contacts_total:  allContacts.length,
+        contacts_saved:  contactsSaved,
+        contacts_failed: contactErrors.length,
+      });
     } catch (err) { next(err); }
   }
 );
