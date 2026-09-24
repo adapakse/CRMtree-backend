@@ -32,7 +32,7 @@ router.get('/', async (req, res, next) => {
           COALESCE(SUM(value_pln),0)                        AS total_value,
           COALESCE(SUM(value_pln * probability / 100.0), 0) AS weighted_value
         FROM crm_leads l
-        WHERE l.tenant_id = $1 AND converted_at IS NULL ${scopeLeads}
+        WHERE l.tenant_id = $1 AND converted_at IS NULL AND NOT hold_active AND stage != 'archived' ${scopeLeads}
         GROUP BY stage
         ORDER BY CASE stage
           WHEN 'new' THEN 1 WHEN 'qualification' THEN 2 WHEN 'presentation' THEN 3
@@ -42,10 +42,11 @@ router.get('/', async (req, res, next) => {
 
       db.query(`
         SELECT l.id, l.company, l.stage, l.value_pln, l.hot, l.updated_at,
+               l.hold_active, l.hold_reason, l.hold_until,
                u.display_name AS assigned_to_name
         FROM crm_leads l
         LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
-        WHERE l.tenant_id = $1 AND l.converted_at IS NULL ${scopeLeads}
+        WHERE l.tenant_id = $1 AND l.converted_at IS NULL AND l.stage != 'archived' ${scopeLeads}
         ORDER BY l.updated_at DESC LIMIT 10
       `, params),
 

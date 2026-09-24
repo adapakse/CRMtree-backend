@@ -12,6 +12,7 @@ const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
 const { crmAuth, loadCrmScope, crmScope, requireCrmManager, assertOwnership, canOperateForOwner } = require('../middleware/crm-rbac');
 const testAccountSvc = require('../services/testAccountService');
+const crmLeadHoldSvc = require('../services/crmLeadHoldService');
 const email          = require('../utils/email');
 const { autoSaveLeadContacts } = require('../services/gmailProcessor');
 
@@ -32,6 +33,7 @@ router.get('/',
     query('created_from').optional().isDate(),
     query('created_to').optional().isDate(),
     query('lost_reason').optional().isString().trim(),
+    query('hold_only').optional().isBoolean().toBoolean(),
     query('page').optional().isInt({ min: 1 }).toInt(),
     query('limit').optional().isInt({ min: 1, max: 5000 }).toInt(),
   ],
@@ -56,6 +58,10 @@ router.get('/',
       if (req.query.stage) {
         params.push(req.query.stage);
         where += ` AND l.stage = $${params.length}`;
+      } else {
+        // Bez wybranego etapu w filtrze — Archiwum jest ukryte domyślnie wszędzie,
+        // widoczne tylko po jawnym wybraniu filtra Etap = Archiwum.
+        where += ` AND l.stage != 'archived'`;
       }
       if (req.query.source) {
         // Może być pojedyncza wartość lub lista oddzielona przecinkami (filtr grupy)
@@ -80,6 +86,9 @@ router.get('/',
       }
       if (req.query.hot === true) {
         where += ` AND l.hot = true`;
+      }
+      if (req.query.hold_only === true) {
+        where += ` AND l.hold_active = true`;
       }
       if (req.query.search) {
         params.push(`%${req.query.search}%`);
@@ -111,7 +120,9 @@ router.get('/',
 
       const [countResult, qualifiedCount, rows] = await Promise.all([
         db.query(`SELECT COUNT(*) FROM crm_leads l ${where}`, countParams),
-        db.query(`SELECT COUNT(*) FROM crm_leads l ${where} AND l.stage != 'new'`, countParams),
+        // "Okazje sprzedażowe" — Archiwum nigdy się tu nie liczy, nawet przy jawnym
+        // filtrze Etap = Archiwum (inaczej kafelek pokazywałby zarchiwizowane leady).
+        db.query(`SELECT COUNT(*) FROM crm_leads l ${where} AND l.stage NOT IN ('new','archived')`, countParams),
         db.query(`
           SELECT l.*,
             u.display_name AS assigned_to_name,
@@ -593,6 +604,11 @@ router.get('/report',
         conditions.push(`l.assigned_to = $${params.length}`);
       }
 
+      // Zarchiwizowane leady znikają ze wszystkich KPI/wykresów raportu (w tym
+      // historycznych sum Won/przychodu) — jedyny sposób ich zobaczenia to
+      // filtr Etap = Archiwum na liście Leadów, nie raport.
+      conditions.push(`l.stage != 'archived'`);
+
       const where    = conditions.length ? 'WHERE '    + conditions.join(' AND ') : '';
       const andWhere = conditions.length ? ' AND '     + conditions.join(' AND ') : '';
 
@@ -697,11 +713,11 @@ router.get('/report',
         // KPI zbiorcze — wartości przeliczane na PLN wg kursów walut
         db.query(`
           SELECT
-            COUNT(*) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost'))::int    AS active,
+            COUNT(*) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active)::int    AS active,
             COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                              AS won,
             COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                             AS lost,
-            COUNT(*) FILTER (WHERE l.hot = true AND l.stage NOT IN ('new','closed_won','closed_lost'))::int AS hot,
-            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost')),0)::numeric(14,2) AS pipeline_value,
+            COUNT(*) FILTER (WHERE l.hot = true AND l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active)::int AS hot,
+            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active),0)::numeric(14,2) AS pipeline_value,
             COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)                            AS won_value,
             ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
               NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
@@ -718,6 +734,7 @@ router.get('/report',
             -- pipeline_in_period: leady aktywne (kwalifikacja+) z close_date w wybranym przedziale
             COALESCE(SUM(${valPln}) FILTER (
               WHERE l.stage NOT IN ('new','closed_won','closed_lost')
+                AND NOT l.hold_active
                 AND l.close_date IS NOT NULL
                 AND (${closeDateFrom} IS NULL OR l.close_date >= ${closeDateFrom}::date)
                 AND (${closeDateTo}   IS NULL OR l.close_date <= ${closeDateTo}::date)
@@ -725,12 +742,13 @@ router.get('/report',
           FROM crm_leads l ${where}
         `, params),
 
-        // Lejek per etap
+        // Lejek per etap — lead na Holdzie wykluczony z etapów aktywnych, żeby nie
+        // zaburzał liczby "aktywnych szans"; w 'new'/closed_won/closed_lost Hold nie występuje.
         db.query(`
           SELECT l.stage,
                  COUNT(*)::int                                   AS count,
                  COALESCE(SUM(${valPln}),0)::numeric(14,2)   AS value
-          FROM crm_leads l ${where}
+          FROM crm_leads l ${where ? where + ' AND NOT l.hold_active' : 'WHERE NOT l.hold_active'}
           GROUP BY l.stage
           ORDER BY CASE l.stage
             WHEN 'new' THEN 1 WHEN 'qualification' THEN 2 WHEN 'presentation' THEN 3
@@ -741,7 +759,7 @@ router.get('/report',
         // Trend aktywnych — grupowanie po dacie wejścia w Kwalifikację, tylko etapy aktywne
         db.query(`
           SELECT TO_CHAR(q.qualified_at,'YYYY-MM') AS month,
-                 COUNT(*) FILTER (WHERE l.stage IN ('qualification','presentation','offer','negotiation'))::int AS active_leads
+                 COUNT(*) FILTER (WHERE l.stage IN ('qualification','presentation','offer','negotiation') AND NOT l.hold_active)::int AS active_leads
           FROM crm_leads l
           JOIN (
             SELECT (metadata->>'lead_id')::int AS lead_id,
@@ -781,10 +799,10 @@ router.get('/report',
               SELECT COALESCE(u.display_name,'— nieprzypisany —') AS rep_name,
                      u.id AS rep_id,
                      COUNT(*) FILTER (WHERE l.stage != 'new')::int                                    AS total,
-                     COUNT(*) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost'))::int    AS active,
+                     COUNT(*) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active)::int    AS active,
                      COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                              AS won,
                      COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                             AS lost,
-                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost')),0)::numeric(14,2) AS pipeline_value,
+                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active),0)::numeric(14,2) AS pipeline_value,
                      COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)  AS won_value,
                      ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
                        NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
@@ -841,8 +859,8 @@ router.get('/report',
               ))
             ))::int AS avg_days
           FROM crm_leads l
-          ${where ? where + " AND l.stage NOT IN ('closed_won','closed_lost')"
-                  : "WHERE l.stage NOT IN ('closed_won','closed_lost')"}
+          ${where ? where + " AND l.stage NOT IN ('closed_won','closed_lost') AND NOT l.hold_active"
+                  : "WHERE l.stage NOT IN ('closed_won','closed_lost') AND NOT l.hold_active"}
           GROUP BY l.stage
           ORDER BY CASE l.stage
             WHEN 'new' THEN 1 WHEN 'qualification' THEN 2 WHEN 'presentation' THEN 3
@@ -1168,8 +1186,10 @@ router.patch('/:id',
         const STAGE_LABELS = {
           new: 'Nowy', qualification: 'Kwalifikacja', presentation: 'Prezentacja',
           offer: 'Oferta', negotiation: 'Negocjacje', closed_won: 'Wygrana', closed_lost: 'Przegrana',
+          archived: 'Archiwum',
         };
         function allowedNext(cur) {
+          if (cur === 'archived')    return ['new']; // jedyne wyjście z Archiwum — analogicznie do closed_lost
           if (cur === 'closed_lost') return ['new'];
           if (cur === 'closed_won')  return ['negotiation'];
           const idx = STAGE_SEQ.indexOf(cur);
@@ -1185,6 +1205,9 @@ router.patch('/:id',
           return res.status(422).json({
             error: `Niedozwolone przejście: "${STAGE_LABELS[existing[0].stage]}" → "${STAGE_LABELS[req.body.stage]}". Dozwolone: ${allowed.map(s => STAGE_LABELS[s]).join(', ')}.`,
           });
+        }
+        if (existing[0].hold_active) {
+          return res.status(409).json({ error: 'Lead jest na Holdzie — zdejmij Hold przed zmianą etapu.' });
         }
       }
 
@@ -1253,6 +1276,170 @@ router.patch('/:id',
             ipAddress:   req.auditContext?.ipAddress,
           });
         }
+      } catch (auditErr) { /* nie blokuj odpowiedzi */ }
+
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /api/crm/leads/:id/hold — ustaw / edytuj Hold ──────────────
+// Dostępny tylko w aktywnych etapach pipeline (qualification/presentation/
+// offer/negotiation). Powód wybierany z listy app_settings.crm_hold_reasons
+// (walidowany tu jedynie jako string — tak jak lost_reason, bez FK do słownika).
+router.put('/:id/hold',
+  [
+    param('id').isInt(),
+    body('reason').isString().trim().notEmpty().isLength({ max: 200 }),
+    body('until').isDate(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { rows: existing } = await db.query(
+        'SELECT * FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]
+      );
+      if (!existing.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
+      const lead = existing[0];
+
+      try { assertOwnership(lead, req, 'assigned_to'); }
+      catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
+
+      const HOLD_STAGES = ['qualification', 'presentation', 'offer', 'negotiation'];
+      if (!HOLD_STAGES.includes(lead.stage)) {
+        return res.status(422).json({ error: 'Hold dostępny tylko dla etapów: Kwalifikacja, Prezentacja, Oferta, Negocjacje.' });
+      }
+
+      const until    = req.body.until;
+      const todayStr = new Date().toISOString().slice(0, 10);
+      if (until < todayStr) {
+        return res.status(422).json({ error: 'Data "aktywny do" nie może być w przeszłości.' });
+      }
+
+      // Zadanie-przypomnienie "wznów działania sprzedażowe" — nowe albo aktualizacja
+      // istniejącego przy edycji Holda. Termin = hold_until, przypomnienie 1 dzień wcześniej.
+      const dueAt      = new Date(`${until}T09:00:00`).toISOString();
+      const reminderAt = computeReminderAt(dueAt, '1d_before');
+      const taskTitle  = 'Wznów działania sprzedażowe — koniec Holda';
+      const taskBody   = `Hold zakończył się ${until}. Powód: ${req.body.reason}`;
+
+      let taskId = lead.hold_task_id;
+      if (taskId) {
+        const { rows: taskRows } = await db.query(
+          `UPDATE crm_lead_activities
+             SET title=$1, body=$2, activity_at=$3, reminder_type='1d_before', reminder_at=$4,
+                 reminder_sent=false, status='new', updated_at=now()
+           WHERE id=$5 AND lead_id=$6 AND tenant_id=$7
+           RETURNING id`,
+          [taskTitle, taskBody, dueAt, reminderAt, taskId, id, req.tenantId]
+        );
+        if (!taskRows.length) taskId = null; // zadanie zniknęło — utwórz nowe niżej
+      }
+      if (!taskId) {
+        const { rows: taskRows } = await db.query(
+          `INSERT INTO crm_lead_activities
+             (lead_id, type, title, body, activity_at, assigned_to, status, reminder_type, reminder_at, reminder_sent, created_by, tenant_id)
+           VALUES ($1,'task',$2,$3,$4,$5,'new','1d_before',$6,false,$7,$8)
+           RETURNING id`,
+          [id, taskTitle, taskBody, dueAt, lead.assigned_to, reminderAt, req.user.id, req.tenantId]
+        );
+        taskId = taskRows[0].id;
+      }
+
+      const { rows } = await db.query(
+        `UPDATE crm_leads
+            SET hold_active=true, hold_reason=$1, hold_until=$2,
+                hold_set_by=$3, hold_set_at=now(), hold_task_id=$4, updated_at=now()
+          WHERE id=$5 AND tenant_id=$6
+          RETURNING *`,
+        [req.body.reason, until, req.user.id, taskId, id, req.tenantId]
+      );
+
+      try {
+        await audit.log({
+          user:        req.user,
+          action:      'crm_lead_hold_set',
+          beforeState: { hold_active: lead.hold_active, hold_reason: lead.hold_reason, hold_until: lead.hold_until },
+          afterState:  { hold_active: true, hold_reason: req.body.reason, hold_until: until },
+          metadata:    { lead_id: id },
+          ipAddress:   req.auditContext?.ipAddress,
+        });
+      } catch (auditErr) { /* nie blokuj odpowiedzi */ }
+
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── DELETE /api/crm/leads/:id/hold — zdejmij Hold ───────────────────
+router.delete('/:id/hold',
+  [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { rows: existing } = await db.query(
+        'SELECT * FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]
+      );
+      if (!existing.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
+
+      try { assertOwnership(existing[0], req, 'assigned_to'); }
+      catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
+
+      if (!existing[0].hold_active) return res.status(422).json({ error: 'Lead nie jest na Holdzie.' });
+
+      const updated = await crmLeadHoldSvc.cancelHold(id, req.tenantId, { userId: req.user.id });
+      res.json(updated);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /api/crm/leads/:id/archive — archiwizuj lead ───────────────
+// Dostępne z dowolnego etapu. Lead znika domyślnie ze wszystkich list/dashboardów/
+// raportów (patrz filtr 'archived' w GET / oraz wykluczenia w crm-dashboard.js
+// i /report), widoczny tylko po jawnym filtrze Etap = Archiwum. Wyjście z
+// Archiwum wyłącznie do etapu 'new' — przez zwykły PATCH (allowedNext).
+// Aktywny Hold jest automatycznie zdejmowany (nie ma sensu trzymać Holda na
+// zarchiwizowanym leadzie).
+router.put('/:id/archive',
+  [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { rows: existing } = await db.query(
+        'SELECT * FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]
+      );
+      if (!existing.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
+      const lead = existing[0];
+
+      try { assertOwnership(lead, req, 'assigned_to'); }
+      catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
+
+      if (lead.stage === 'archived') {
+        return res.status(409).json({ error: 'Lead jest już zarchiwizowany.' });
+      }
+
+      if (lead.hold_active) {
+        await crmLeadHoldSvc.cancelHold(id, req.tenantId, { userId: req.user.id });
+      }
+
+      const { rows } = await db.query(
+        `UPDATE crm_leads
+            SET stage='archived', archived_at=now(), archived_by=$1, updated_at=now()
+          WHERE id=$2 AND tenant_id=$3
+          RETURNING *`,
+        [req.user.id, id, req.tenantId]
+      );
+
+      try {
+        await audit.log({
+          user:        req.user,
+          action:      'crm_lead_archived',
+          beforeState: { stage: lead.stage },
+          afterState:  { stage: 'archived' },
+          metadata:    { lead_id: id },
+          ipAddress:   req.auditContext?.ipAddress,
+        });
       } catch (auditErr) { /* nie blokuj odpowiedzi */ }
 
       res.json(rows[0]);
