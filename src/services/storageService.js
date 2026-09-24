@@ -97,16 +97,28 @@ async function downloadDocument(blobPath) {
   };
 }
 
+// Both SAS helpers below must go through the same client the rest of this
+// service uses (getClient()) instead of hardcoding the production
+// *.blob.core.windows.net host — otherwise a local Azurite connection string
+// (UseDevelopmentStorage=true) still produces a SAS URL pointing at a real
+// Azure DNS name that doesn't exist, and Azurite serves plain http, so a
+// SAS restricted to SASProtocol.Https would be rejected even against a
+// correctly-pointed local URL.
+function sasBaseUrlAndCredential() {
+  const client = getClient();
+  const protocol = client.url.startsWith("https")
+    ? SASProtocol.Https
+    : SASProtocol.HttpsAndHttp;
+  return { baseUrl: client.url.replace(/\/$/, ""), credential: client.credential, protocol };
+}
+
 /**
  * Generate a short-lived SAS URL (for in-app PDF preview — read only).
  * @param {string} blobPath
  * @param {number} expiresInMinutes  default 15
  */
 async function generateSasUrl(blobPath, expiresInMinutes = 15) {
-  const credential = new StorageSharedKeyCredential(
-    config.storage.accountName,
-    config.storage.accountKey,
-  );
+  const { baseUrl, credential, protocol } = sasBaseUrlAndCredential();
   const startsOn = new Date();
   const expiresOn = new Date(startsOn.getTime() + expiresInMinutes * 60 * 1000);
 
@@ -117,22 +129,19 @@ async function generateSasUrl(blobPath, expiresInMinutes = 15) {
       permissions: BlobSASPermissions.parse("r"),
       startsOn,
       expiresOn,
-      protocol: SASProtocol.Https,
+      protocol,
     },
     credential,
   );
 
-  return `https://${config.storage.accountName}.blob.core.windows.net/${config.storage.container}/${blobPath}?${sasParams}`;
+  return `${baseUrl}/${config.storage.container}/${blobPath}?${sasParams}`;
 }
 
 /**
  * Generate a SAS URL with write permissions (for Signus to retrieve document).
  */
 async function generateWriteSasUrl(blobPath, expiresInMinutes = 60) {
-  const credential = new StorageSharedKeyCredential(
-    config.storage.accountName,
-    config.storage.accountKey,
-  );
+  const { baseUrl, credential, protocol } = sasBaseUrlAndCredential();
   const expiresOn = new Date(Date.now() + expiresInMinutes * 60 * 1000);
   const sasParams = generateBlobSASQueryParameters(
     {
@@ -140,11 +149,11 @@ async function generateWriteSasUrl(blobPath, expiresInMinutes = 60) {
       blobName: blobPath,
       permissions: BlobSASPermissions.parse("rw"),
       expiresOn,
-      protocol: SASProtocol.Https,
+      protocol,
     },
     credential,
   );
-  return `https://${config.storage.accountName}.blob.core.windows.net/${config.storage.container}/${blobPath}?${sasParams}`;
+  return `${baseUrl}/${config.storage.container}/${blobPath}?${sasParams}`;
 }
 
 /**
