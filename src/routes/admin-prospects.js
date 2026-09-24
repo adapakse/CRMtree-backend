@@ -16,10 +16,11 @@ const { parse } = require('csv-parse/sync');
 const { query, param, body } = require('express-validator');
 const db      = require('../config/database');
 const logger  = require('../utils/logger');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { requireFeature } = require('../middleware/crm-rbac');
 const { validate } = require('../middleware/errorHandler');
 const enrichSvc = require('../services/prospectEnrichmentService');
+const tenantIcpConfigService = require('../services/tenantIcpConfigService');
 const { normalizeWebsiteUrl, normalizeLinkedinUrl } = require('../utils/urlUtils');
 
 // ── "Prospekty" group check (mirrors the group_profiles/user_group_roles
@@ -137,10 +138,26 @@ function buildFilters(q, tenantId) {
 
 // ── Helper: wykrywanie klucza kolumny po znormalizowanej nazwie ────
 
+// Usuwa polskie znaki diakrytyczne z nagłówka CSV przed porównaniem z listą
+// kandydatów (poprawka 21.09 — case "Wielkość"/"Branża": findColumnKey() nie
+// usuwał diakrytyki wcale, więc np. "wielkość" nigdy nie dopasowywało się do
+// kandydata "wielkosc" — sizeKey wychodził zawsze null, company_size nigdy się
+// nie zapisywał mimo poprawnie wypełnionej kolumny w pliku źródłowym).
+// Unicode NFD + usunięcie combining marks załatwia większość liter (ą/ć/ę/ń/
+// ó/ś/ź/ż dekomponują się na literę bazową + znak diakrytyczny), ale polskie
+// "ł"/"Ł" NIE dekomponują się w NFD (to odrębne punkty kodowe Unicode, nie
+// litera+znak) — stąd jawna podmiana przed normalizacją.
+function deaccentHeader(str) {
+  return String(str)
+    .replace(/[łŁ]/g, 'l')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+}
+
 function findColumnKey(rowKeys, candidates) {
   for (const c of candidates) {
-    const normCandidate = c.toLowerCase().replace(/[\s_.-]/g, '');
-    const found = rowKeys.find(k => k.toLowerCase().trim().replace(/[\s_.-]/g, '') === normCandidate);
+    const normCandidate = deaccentHeader(c).toLowerCase().replace(/[\s_.-]/g, '');
+    const found = rowKeys.find(k => deaccentHeader(k).toLowerCase().trim().replace(/[\s_.-]/g, '') === normCandidate);
     if (found) return found;
   }
   return null;
@@ -343,6 +360,12 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
       }
 
       const employmentCount = safeInt(getStr(row, employmentKey));
+      // Surowy tekst zatrudnienia (np. '10-19 osób', '250+') zachowujemy w
+      // employment_range — employment_count to tylko dolna granica takiego
+      // przedziału i sam nie odróżnia dokładnej liczby od zakresu, a od tego
+      // zależy bramka company_size (zakres przecinający próg 15 => unknown).
+      const employmentRaw   = getStr(row, employmentKey);
+      const employmentRange = employmentRaw ? employmentRaw.slice(0, 20) : null;
       // Revenue: może być z separatorami tysięcy (spacje lub kropki)
       const revenueRaw = getStr(row, revenueKey);
       const annualRevenue = revenueRaw
@@ -366,7 +389,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
         const result = await db.query(
           `INSERT INTO prospect_companies (
              tenant_id, nip, regon, company_name, krs_number, website_url, website_source,
-             employment_count, annual_revenue, founding_year, company_size,
+             employment_count, employment_range, annual_revenue, founding_year, company_size,
              industry, company_profile,
              decision_maker_name, decision_maker_title, decision_maker_dept,
              decision_maker_phone, decision_maker_email,
@@ -375,7 +398,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
              linkedin_url, decision_maker_linkedin, decision_maker_facebook,
              group_id, imported_by
            )
-           VALUES ($1,$2,$3,$4,$5,$6,$29,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+           VALUES ($1,$2,$3,$4,$5,$6,$29,$7,$30,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
            ON CONFLICT (tenant_id, nip) DO UPDATE SET
              regon                = COALESCE(EXCLUDED.regon,         prospect_companies.regon),
              company_name         = COALESCE(EXCLUDED.company_name,  prospect_companies.company_name),
@@ -394,6 +417,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
                ELSE prospect_companies.website_source
              END,
              employment_count     = COALESCE(EXCLUDED.employment_count,    prospect_companies.employment_count),
+             employment_range     = COALESCE(EXCLUDED.employment_range,    prospect_companies.employment_range),
              annual_revenue       = COALESCE(EXCLUDED.annual_revenue,      prospect_companies.annual_revenue),
              founding_year        = COALESCE(EXCLUDED.founding_year,       prospect_companies.founding_year),
              company_size         = COALESCE(EXCLUDED.company_size,        prospect_companies.company_size),
@@ -436,6 +460,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
             linkedinUrl, dmLinkedin, dmFacebook,
             importerGroupId, req.user.id,
             websiteUrl ? 'csv_import' : null,
+            employmentRange,
           ]
         );
         if (result.rows[0]?.inserted) added++;
@@ -726,9 +751,12 @@ router.post('/:id/re-process',
            branches_scope         = NULL,
            krs_website            = NULL,
            website_url            = COALESCE($2, website_url),
-           -- Admin jawnie wpisał/poprawił URL w tym request'cie — to ludzka
-           -- weryfikacja, trwałe źródło 'manual_correction' (nigdy automatycznie
-           -- nadpisywane później, patrz enrichOne/migracja 0269, decyzja 20.08).
+           -- Admin jawnie wpisał/poprawił URL w tym request'cie — etykieta
+           -- pochodzenia do wyświetlenia w UI (migracja 0269, decyzja 20.08).
+           -- UWAGA (poprawka 18.09): ta kolumna NIE jest już czytana przez
+           -- enrichOne jako bezterminowe zaufanie — o pominięciu identity-check
+           -- w TYM konkretnym uruchomieniu decyduje wyłącznie websiteChanged
+           -- niżej (patrz opts.trustedDomain przekazywane do reEnrichOne).
            website_source          = CASE WHEN $2::TEXT IS NOT NULL THEN 'manual_correction' ELSE website_source END,
            nip                    = COALESCE($3::VARCHAR, nip),
            linkedin_url           = COALESCE($4, linkedin_url),
@@ -741,8 +769,14 @@ router.post('/:id/re-process',
       if (!rows.length) return res.status(404).json({ error: 'Prospekt nie znaleziony' });
 
       // Uruchom enrichment jednej firmy w tle (ustawia batchProgress dla pollingu frontendu)
+      // trustedDomain: jednorazowe zaufanie identity-check WYŁĄCZNIE gdy TEN
+      // request faktycznie przyniósł nowy, inny URL niż zapisany wcześniej
+      // (websiteChanged) — nie dla samego ponownego użycia istniejącego URL-a,
+      // i nie dla kolejnych re-processów tego samego rekordu bez nowej zmiany
+      // (poprawka 18.09, patrz isDomainTrustedForThisRun w prospectEnrichmentService.js).
       enrichSvc.reEnrichOne(req.user.tenant_id, req.params.id, {
         processLinkedin: effectiveProcessLinkedin, skipWebsite, processPracuj: effectiveProcessPracuj,
+        trustedDomain: websiteChanged,
       });
 
       res.json({ queued: true, id: req.params.id });
@@ -796,6 +830,154 @@ router.get('/enrich-status', (req, res) => {
   res.json(enrichSvc.getBatchProgress(req.user.tenant_id));
 });
 
+// ── GET /scoring-rules — algorytm naliczania icp_score jako dane ────
+// Jeden per-tenant (nie per-prospekt) — wagi/bramki są stałe w kodzie,
+// jedyna część zależna od tenanta to blacklista ICP z app_settings.
+// Pokazywane w zakładce "Zasady naliczania punktów" w Inspekcji.
+
+router.get('/scoring-rules', async (req, res, next) => {
+  try {
+    const rules = await enrichSvc.getIcpScoringRules(req.user.tenant_id);
+    res.json(rules);
+  } catch (err) { next(err); }
+});
+
+// ── Konfiguracja sygnałów ICP — tenant-scoped, dla WŁASNEGO tenanta admina ──
+// Decyzja 2026-09-22: każdy tenant admin (is_admin, nie tylko superadmin
+// CRMTree) może teraz konfigurować ICP swojego tenanta — stąd te trasy
+// (Ustawienia aplikacji → Enrichment/ICP), osobne od superadmin-owych
+// GET/POST/PUT/DELETE /admin/tenants/:id/icp-* w admin-tenants.js (te
+// zostają, używane wyłącznie z Panelu admina → Tenants, dowolny tenant po
+// id). Celowo BRAK :id w URL — zawsze req.user.tenant_id z JWT, więc tenant
+// admin fizycznie nie ma jak zaadresować cudzego tenanta. requireAdmin
+// (dodatkowo ponad requireProspectsAccess z router.use wyżej) — edycja
+// scoringu to bardziej wrażliwa akcja niż samo przeglądanie prospektów,
+// niedostępna dla samych członków grupy "Prospekty" bez is_admin.
+
+router.get('/icp-config', requireAdmin, async (req, res, next) => {
+  try {
+    const cfg = await tenantIcpConfigService.getActiveConfig(req.user.tenant_id);
+    const validity = enrichSvc.evaluateIcpConfigValidity(cfg);
+    res.json({
+      qualification_threshold: cfg.qualificationThreshold,
+      config_revision: cfg.configRevision,
+      current_version_id: cfg.currentVersionId,
+      current_version: cfg.currentVersionId
+        ? (await tenantIcpConfigService.getConfigVersionById(req.user.tenant_id, cfg.currentVersionId))?.version ?? null
+        : null,
+      is_default: cfg.isDefault,
+      signals: cfg.signals,
+      signals_sum: validity.signalsSum,
+      signals_max: validity.signalsMax,
+      is_valid: validity.isValid,
+      final_max_score: validity.finalMaxScore,
+    });
+  } catch (err) { next(err); }
+});
+
+router.post('/icp-signals',
+  requireAdmin,
+  [
+    body('label').isString().trim().notEmpty().isLength({ max: 255 }),
+    body('ai_definition').isString().trim().notEmpty(),
+    body('short_description').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+    body('points').isInt({ min: 0 }).toInt(),
+    body('tier').optional({ nullable: true }).isString().trim(),
+    body('active').optional().isBoolean(),
+    body('sort_order').optional({ nullable: true }).isInt().toInt(),
+    body('requires_any_of').optional({ nullable: true }).isArray(),
+    body('requires_any_of.*').optional().isUUID(),
+    body('expected_revision').optional({ nullable: true }).isInt({ min: 0 }).toInt(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      await tenantIcpConfigService.materializeDefaultsIfFallback(req.user.tenant_id, req.user.id);
+      const { signal, configRevision, published, version } = await tenantIcpConfigService.addSignal(req.user.tenant_id, {
+        label: req.body.label,
+        aiDefinition: req.body.ai_definition,
+        shortDescription: req.body.short_description ?? null,
+        points: req.body.points,
+        tier: req.body.tier ?? null,
+        active: req.body.active,
+        sortOrder: req.body.sort_order,
+        requiresAnyOf: req.body.requires_any_of,
+      }, {
+        expectedRevision: req.body.expected_revision,
+        actorUserId: req.user.id,
+      });
+      logger.info('Tenant admin added ICP signal', { tenantId: req.user.tenant_id, signalKey: signal.key, published, by: req.user.email });
+      res.status(201).json({ signal, config_revision: configRevision, published, version: version?.version ?? null });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+router.put('/icp-signals/:signalId',
+  requireAdmin,
+  [
+    param('signalId').isUUID(),
+    body('label').optional().isString().trim().notEmpty().isLength({ max: 255 }),
+    body('ai_definition').optional().isString().trim().notEmpty(),
+    body('short_description').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+    body('points').optional().isInt({ min: 0 }).toInt(),
+    body('tier').optional({ nullable: true }).isString().trim(),
+    body('active').optional().isBoolean(),
+    body('sort_order').optional().isInt().toInt(),
+    body('requires_any_of').optional({ nullable: true }).isArray(),
+    body('requires_any_of.*').optional().isUUID(),
+    body('expected_revision').optional({ nullable: true }).isInt({ min: 0 }).toInt(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const patch = {};
+      if ('key' in req.body) patch.key = req.body.key;
+      if ('label' in req.body) patch.label = req.body.label;
+      if ('ai_definition' in req.body) patch.aiDefinition = req.body.ai_definition;
+      if ('short_description' in req.body) patch.shortDescription = req.body.short_description;
+      if ('points' in req.body) patch.points = req.body.points;
+      if ('tier' in req.body) patch.tier = req.body.tier;
+      if ('active' in req.body) patch.active = req.body.active;
+      if ('sort_order' in req.body) patch.sortOrder = req.body.sort_order;
+      if ('requires_any_of' in req.body) patch.requiresAnyOf = req.body.requires_any_of;
+
+      const { signal, configRevision, published, version } = await tenantIcpConfigService.updateSignal(
+        req.user.tenant_id, req.params.signalId, patch,
+        { expectedRevision: req.body.expected_revision, actorUserId: req.user.id },
+      );
+      logger.info('Tenant admin updated ICP signal', { tenantId: req.user.tenant_id, signalKey: signal.key, published, by: req.user.email });
+      res.json({ signal, config_revision: configRevision, published, version: version?.version ?? null });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+router.delete('/icp-signals/:signalId',
+  requireAdmin,
+  [
+    param('signalId').isUUID(),
+    body('expected_revision').optional({ nullable: true }).isInt({ min: 0 }).toInt(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const { softDeleted, configRevision, published, version } = await tenantIcpConfigService.deleteSignal(
+        req.user.tenant_id, req.params.signalId,
+        { expectedRevision: req.body?.expected_revision, actorUserId: req.user.id },
+      );
+      logger.info('Tenant admin deleted ICP signal', {
+        tenantId: req.user.tenant_id, signalId: req.params.signalId, softDeleted, published, by: req.user.email,
+      });
+      res.json({ soft_deleted: softDeleted, config_revision: configRevision, published, version: version?.version ?? null });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
 // ── GET /:id/prompt — rekonstrukcja promptu wysłanego do Claude ────
 
 router.get('/:id/prompt',
@@ -838,7 +1020,8 @@ router.get('/:id/prompt',
           `znajdowała się concatenacja tekstów ze wszystkich podstron.`
         : null;
 
-      const promptText = enrichSvc.buildPromptText(p, krsData, websiteStats);
+      const icpConfig = await tenantIcpConfigService.getActiveConfig(req.user.tenant_id);
+      const promptText = enrichSvc.buildPromptText(p, krsData, websiteStats, icpConfig.activeSignals);
       res.json({ prompt: promptText });
     } catch (err) { next(err); }
   }
@@ -1044,3 +1227,8 @@ router.post('/:id/to-lead',
 );
 
 module.exports = router;
+// Eksport na potrzeby testów jednostkowych normalizacji nagłówków CSV (21.09,
+// poprawka "Wielkość"→company_size) — router jest funkcją (Express), można
+// bezpiecznie dopiąć właściwości bez wpływu na app.use('/api/admin/prospects', ...).
+module.exports.findColumnKey = findColumnKey;
+module.exports.deaccentHeader = deaccentHeader;
