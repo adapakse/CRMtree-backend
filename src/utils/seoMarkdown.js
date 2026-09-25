@@ -26,6 +26,18 @@ function renderInline(text) {
   return out;
 }
 
+// Markdown table support — added when articles started requiring a
+// mandatory comparison table (AI-citation structure, 2026-09-25). A table
+// block has no blank lines within it, so it arrives as one block whose
+// first line is a header row and second line is the `|---|---|` separator.
+function isTableSeparatorRow(line) {
+  return /-/.test(line) && /^\|?[\s:-]+\|[\s:|-]*\|?$/.test(line.trim());
+}
+
+function parseTableRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+}
+
 function renderBodyHtml(body) {
   return body
     .split(/\n\n+/)
@@ -36,6 +48,13 @@ function renderBodyHtml(body) {
       const lines = trimmed.split('\n');
       if (lines.length && lines.every((l) => l.startsWith('- '))) {
         return `<ul>${lines.map((l) => `<li>${renderInline(l.slice(2))}</li>`).join('')}</ul>`;
+      }
+      if (lines.length >= 2 && lines[0].trim().startsWith('|') && isTableSeparatorRow(lines[1])) {
+        const header = parseTableRow(lines[0]);
+        const bodyRows = lines.slice(2).map(parseTableRow);
+        return `<table><thead><tr>${header.map((h) => `<th>${renderInline(h)}</th>`).join('')}</tr></thead><tbody>${bodyRows
+          .map((r) => `<tr>${r.map((c) => `<td>${renderInline(c)}</td>`).join('')}</tr>`)
+          .join('')}</tbody></table>`;
       }
       return `<p>${renderInline(trimmed)}</p>`;
     })
