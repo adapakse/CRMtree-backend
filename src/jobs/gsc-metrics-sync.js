@@ -14,6 +14,14 @@ const RUN_TIME = '07:00';
 // GSC dane finalizują się z opóźnieniem ~2-3 dni — synchronizujemy dzień T-3.
 const SYNC_LAG_DAYS = 3;
 
+// A GSC domain property ("sc-domain:crmtree.pl") isn't a URL — the page
+// dimension still reports real https:// URLs, so build those instead of
+// appending the article path to the property name.
+function pageBaseUrl(siteUrl) {
+  if (siteUrl.startsWith('sc-domain:')) return `https://${siteUrl.slice('sc-domain:'.length)}`;
+  return siteUrl.replace(/\/$/, '');
+}
+
 async function runForTenant(tenantId, siteUrl) {
   logger.info('[gsc-metrics-sync] Start', { tenantId });
   const { rows: articles } = await db.query(
@@ -28,7 +36,7 @@ async function runForTenant(tenantId, siteUrl) {
 
   let synced = 0, failed = 0;
   for (const article of articles) {
-    const pageUrl = `${siteUrl.replace(/\/$/, '')}/blog/${article.slug}`;
+    const pageUrl = `${pageBaseUrl(siteUrl)}/blog/${article.slug}`;
     try {
       await gscService.syncMetricsForContent(tenantId, article.id, pageUrl, dateStr);
       synced++;
