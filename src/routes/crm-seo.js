@@ -39,17 +39,20 @@ router.get('/gsc/oauth/callback', async (req, res) => {
     const parsed = gscService.parseOAuthState(state);
     if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=invalid_state`);
 
-    // Prefer the tenant's real domain (via a connected WordPress site) over the
-    // crmtree.pl placeholder — GSC properties must match the actual live domain
-    // the client's articles get published to, not our internal subdomain.
+    // Priority: an explicit SuperAdmin-configured seo_gsc_site_url (the actual
+    // verified GSC property — was added by migration 0247 for exactly this,
+    // but never wired up here until now, 2026-09-26) > the tenant's real
+    // domain via a connected WordPress site > the crmtree.pl placeholder as
+    // a last resort. GSC properties must match the actual live domain the
+    // client's articles get published to, not our internal subdomain guess.
     const { rows } = await db.query(
-      `SELECT t.slug, w.site_url AS wordpress_site_url
+      `SELECT t.slug, t.seo_gsc_site_url, w.site_url AS wordpress_site_url
          FROM tenants t
          LEFT JOIN tenant_wordpress_connections w ON w.tenant_id = t.id
         WHERE t.id = $1`,
       [parsed.tenantId],
     );
-    const siteUrl = rows[0]?.wordpress_site_url || `https://${rows[0]?.slug}.crmtree.pl/`;
+    const siteUrl = rows[0]?.seo_gsc_site_url || rows[0]?.wordpress_site_url || `https://${rows[0]?.slug}.crmtree.pl/`;
     await gscService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId, siteUrl);
     res.redirect(`${config.frontendUrl}/crm/seo?gsc=connected`);
   } catch (err) {
@@ -783,6 +786,18 @@ router.get('/gsc/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Lets a tenant redo the OAuth connect with a different Google account —
+// added after finding (2026-09-26) a tenant connected with an account that
+// owns zero verified Search Console properties, so every gapQueries/sync
+// call failed with a permission error. No API-side way to detect that
+// ahead of time; disconnect + reconnect is the fix.
+router.delete('/gsc/disconnect', requireSeoEditor, async (req, res, next) => {
+  try {
+    await db.query('DELETE FROM tenant_gsc_tokens WHERE tenant_id = $1', [req.user.tenant_id]);
+    res.json({ disconnected: true });
+  } catch (err) { next(err); }
+});
+
 // ── POST /api/crm/seo/gsc/sync — manual metrics sync (the daily job runs at 07:00) ──
 router.post('/gsc/sync', requireSeoEditor, async (req, res, next) => {
   try {
@@ -915,6 +930,32 @@ router.patch('/tenant-settings/wordpress-publish-mode',
     try {
       await db.query(`UPDATE tenants SET wordpress_publish_mode = $1 WHERE id = $2`, [req.body.wordpress_publish_mode, req.user.tenant_id]);
       res.json({ wordpress_publish_mode: req.body.wordpress_publish_mode });
+    } catch (err) { next(err); }
+  },
+);
+
+// ── Search Console property override — see migration 0247's comment: the
+// GSC OAuth callback needs this to match the tenant's actual verified GSC
+// property (a URL-prefix property like https://client.pl/, or a domain
+// property like sc-domain:client.pl), instead of guessing a subdomain that
+// was never a real property (found broken 2026-09-26 — this column existed
+// since 0247 but the callback never read it until the fix alongside this).
+router.get('/tenant-settings/gsc-site-url', requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await db.query(`SELECT seo_gsc_site_url FROM tenants WHERE id = $1`, [req.user.tenant_id]);
+    res.json({ seo_gsc_site_url: rows[0]?.seo_gsc_site_url ?? null });
+  } catch (err) { next(err); }
+});
+
+router.patch('/tenant-settings/gsc-site-url',
+  requireSuperAdmin,
+  [body('seo_gsc_site_url').optional({ nullable: true }).isString().trim()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const value = req.body.seo_gsc_site_url?.trim() || null;
+      await db.query(`UPDATE tenants SET seo_gsc_site_url = $1 WHERE id = $2`, [value, req.user.tenant_id]);
+      res.json({ seo_gsc_site_url: value });
     } catch (err) { next(err); }
   },
 );
