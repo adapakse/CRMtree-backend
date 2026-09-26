@@ -24,6 +24,7 @@ const linkedinService = require('../services/socialPublish/linkedinService');
 const metaService = require('../services/socialPublish/metaService');
 const wordpressService = require('../services/socialPublish/wordpressService');
 const authorRotation = require('../services/seoAuthorRotationService');
+const indexNowService = require('../services/indexNowService');
 const { mondayOf, addDays, toDateStr } = require('../utils/isoWeek');
 const logger = require('../utils/logger');
 
@@ -364,7 +365,10 @@ router.post('/content/:id/approve',
       // One-click publish: approving also fires social publishing to every connected
       // platform. Fire-and-forget — a slow/failed platform never blocks the response,
       // per-platform outcome lands in seo_social_posts (retry button in the panel).
-      if (rows[0].status === 'published') socialService.publishToConnectedPlatforms(rows[0].id, req.user.tenant_id, config.frontendUrl);
+      if (rows[0].status === 'published') {
+        socialService.publishToConnectedPlatforms(rows[0].id, req.user.tenant_id, config.frontendUrl);
+        indexNowService.notifyArticleChanged(rows[0].id, req.user.tenant_id);
+      }
       res.json(rows[0]);
     } catch (err) { next(err); }
   },
@@ -386,6 +390,8 @@ router.post('/content/:id/unpublish',
       );
       if (!rows[0]) return res.status(409).json({ error: 'Wpis nie jest opublikowany ani zaplanowany.' });
       logger.info('SEO content unpublished', { contentId: req.params.id, unpublishedBy: req.user.id });
+      // IndexNow also takes removed URLs — the engine recrawls, gets the 404, drops it.
+      indexNowService.notifyArticleChanged(rows[0].id, req.user.tenant_id);
       res.json(rows[0]);
     } catch (err) { next(err); }
   },

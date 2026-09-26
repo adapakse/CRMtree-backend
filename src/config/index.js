@@ -175,6 +175,13 @@ module.exports = {
     apiKey: optional("PEXELS_API_KEY"),
   },
 
+  // IndexNow key — not a secret (it's published as crmtree.pl/<key>.txt from
+  // the crmtree-landing repo). Unset = IndexNow pings disabled, which is what
+  // local dev and INT should be: only production publishes the real blog.
+  indexNow: {
+    key: optional("INDEXNOW_KEY"),
+  },
+
   // SEObot Social — one-click multi-platform publishing at article publish time.
   // X (Twitter) intentionally excluded for now (on hold, needs a paid API tier).
   linkedin: {

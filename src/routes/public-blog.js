@@ -9,11 +9,8 @@ const { query, param } = require('express-validator');
 const db = require('../config/database');
 const { validate } = require('../middleware/errorHandler');
 const strategyService = require('../services/seoStrategyService');
-
-// The production "comparme" tenant (slug: comparme) — our own working CRM
-// tenant (call center works real leads there), not a client. crmtree.pl/blog
-// is single-tenant by design (see file header) and always points at this one.
-const CRMTREE_TENANT_ID = '1e610ab7-1f34-427f-bd05-b4094b8077c7';
+// crmtree.pl/blog is single-tenant by design (see file header).
+const { CRMTREE_BLOG_TENANT_ID: CRMTREE_TENANT_ID } = require('../utils/crmtreeBlog');
 
 // author.photo_url may be a real external URL (pasted before upload existed)
 // or an Azure blob path (uploaded via crm-seo.js /authors/:id/photo) — either
