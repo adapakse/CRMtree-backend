@@ -20,6 +20,7 @@ const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { requireFeature } = require('../middleware/crm-rbac');
 const { validate } = require('../middleware/errorHandler');
 const enrichSvc = require('../services/prospectEnrichmentService');
+const discoverySvc = require('../services/competitorDiscoveryService');
 const tenantIcpConfigService = require('../services/tenantIcpConfigService');
 const { normalizeWebsiteUrl, normalizeLinkedinUrl } = require('../utils/urlUtils');
 
@@ -978,6 +979,160 @@ router.delete('/icp-signals/:signalId',
   },
 );
 
+// Górny limit firm w jednym wywołaniu bulk-add — model zwraca maksymalnie
+// MAX_RESULTS, więc większa paczka oznacza spreparowane żądanie, nie UI.
+const MAX_BULK_ADD = discoverySvc.MAX_RESULTS;
+
+// ── "Znajdź konkurencję" ───────────────────────────────────────────
+// Port z worktrips-doc. Wszystkie trzy trasy siedzą pod tym samym
+// router.use(requireAuth / requireFeature('prospects') / requireProspectsAccess)
+// co reszta modułu — nie ma tu własnej autoryzacji i nie może być.
+
+// ── GET /discover-competitors-stream ──────────────────────────────
+// SSE: wyniki spływają na bieżąco.
+router.get('/discover-competitors-stream',
+  [
+    query('company_name').isString().trim().notEmpty().isLength({ max: 255 }),
+    query('seed_nip').isString().customSanitizer(v => String(v).replace(/\D/g, ''))
+      .isLength({ min: 10, max: 10 }).withMessage('seed_nip: dokładnie 10 cyfr'),
+  ],
+  validate,
+  async (req, res) => {
+    const { company_name, seed_nip } = req.query;
+
+    res.setHeader('Content-Type',  'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection',    'keep-alive');
+    res.flushHeaders();
+
+    const send = (data) => {
+      if (!res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      await discoverySvc.discoverStream(
+        req.user.tenant_id, req.user.id, company_name, seed_nip,
+        {
+          onIndustry: (industry) => send({ type: 'industry', industry }),
+          onCompany:  (company)  => send({ type: 'company',  ...company }),
+        },
+      );
+      send({ type: 'done' });
+    } catch (err) {
+      logger.error('[Discovery] Stream error', { tenantId: req.user.tenant_id, message: err.message });
+      send({ type: 'error', message: 'Błąd wyszukiwania konkurencji.' });
+    }
+
+    res.end();
+  },
+);
+
+// ── POST /discover-competitors ─────────────────────────────────────
+// offset 0 → pełny pipeline; offset 5/10 → z cache (bez kosztu).
+router.post('/discover-competitors',
+  [
+    body('company_name').isString().trim().notEmpty().isLength({ max: 255 }),
+    body('seed_nip').isString().customSanitizer(v => String(v).replace(/\D/g, ''))
+      .isLength({ min: 10, max: 10 }).withMessage('seed_nip: dokładnie 10 cyfr'),
+    body('offset').optional().isInt({ min: 0, max: 10 }).toInt(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { company_name, seed_nip, offset = 0 } = req.body;
+      const result = await discoverySvc.discover(
+        req.user.tenant_id, req.user.id, company_name, seed_nip, offset,
+      );
+      res.json(result);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── POST /discover-competitors/bulk-add ────────────────────────────
+// Dodaje zaznaczone firmy do prospect_companies TEGO tenanta i uruchamia batch.
+// source_database generowany automatycznie: {inicjały}_{YYYYMMDD}_{N}.
+router.post('/discover-competitors/bulk-add',
+  [
+    body('companies').isArray({ min: 1, max: MAX_BULK_ADD }),
+    body('companies.*.nip').isString(),
+    body('companies.*.company_name').optional({ nullable: true }).isString().trim().isLength({ max: 255 }),
+    body('companies.*.website_url').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { companies } = req.body;
+      const tenantId = req.user.tenant_id;
+
+      const { rows: userRows } = await db.query(
+        'SELECT first_name, last_name FROM users WHERE id = $1 AND tenant_id = $2',
+        [req.user.id, tenantId],
+      );
+      const u = userRows[0] || {};
+      const initials = ((u.first_name?.[0] || 'X') + (u.last_name?.[0] || 'X')).toUpperCase();
+      const dateStr  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const prefix   = `${initials}_${dateStr}`;
+
+      // Numer sekwencyjny liczony W OBRĘBIE TENANTA — dwaj użytkownicy różnych
+      // tenantów o tych samych inicjałach nie mogą na siebie nachodzić.
+      const { rows: seqRows } = await db.query(
+        `SELECT COUNT(DISTINCT source_database)::int AS cnt
+           FROM prospect_companies
+          WHERE tenant_id = $1 AND imported_by = $2
+            AND source_database LIKE $3
+            AND imported_at::date = CURRENT_DATE`,
+        [tenantId, req.user.id, `${prefix}_%`],
+      );
+      const sourceName = `${prefix}_${(seqRows[0]?.cnt || 0) + 1}`;
+
+      // Ta sama reguła grupy co przy imporcie CSV — pierwsza grupa użytkownika
+      // z dostępem 'full'. Bez tego rekordy wpadłyby jako legacy (group_id NULL),
+      // czyli widoczne dla całego tenanta niezależnie od grup.
+      const { rows: groupRows } = await db.query(
+        `SELECT group_id FROM user_group_roles
+          WHERE user_id = $1 AND access_level = 'full'
+          ORDER BY group_id LIMIT 1`,
+        [req.user.id],
+      );
+      const groupId = groupRows[0]?.group_id || null;
+
+      let added = 0, skipped = 0;
+      for (const c of companies) {
+        const nipClean = String(c.nip || '').replace(/\D/g, '');
+        if (nipClean.length !== 10) { skipped++; continue; }
+
+        try {
+          const { rowCount } = await db.query(
+            `INSERT INTO prospect_companies
+               (tenant_id, nip, company_name, website_url, website_source,
+                source_database, group_id, imported_by, enrichment_status)
+             VALUES ($1, $2, $3, $4, 'ai_discovery', $5, $6, $7, 'pending')
+             ON CONFLICT (tenant_id, nip) DO NOTHING`,
+            [tenantId, nipClean, c.company_name || null, c.website_url || null,
+             sourceName, groupId, req.user.id],
+          );
+          if (rowCount > 0) added++; else skipped++;
+        } catch (err) {
+          logger.warn('[Discovery] Insert failed', { tenantId, nip: nipClean, error: err.message });
+          skipped++;
+        }
+      }
+
+      // Batch enrichmentu jest per-tenant — uruchamiamy TYLKO dla tego tenanta
+      // i tylko jeśli jego własny batch nie jest już w toku.
+      let batchStarted = false;
+      if (added > 0 && !enrichSvc.getBatchProgress(tenantId).running) {
+        enrichSvc.runBatch(tenantId).catch(err =>
+          logger.error('[Discovery] Batch failed', { tenantId, error: err.message }));
+        batchStarted = true;
+      }
+
+      logger.info('[Discovery] Bulk add', { tenantId, sourceName, added, skipped, batchStarted });
+      res.json({ source_database: sourceName, added, skipped, batchStarted });
+    } catch (err) { next(err); }
+  },
+);
+
 // ── GET /:id/prompt — rekonstrukcja promptu wysłanego do Claude ────
 
 router.get('/:id/prompt',
@@ -1026,7 +1181,6 @@ router.get('/:id/prompt',
     } catch (err) { next(err); }
   }
 );
-
 // ── POST /:id/to-lead ──────────────────────────────────────────────
 
 router.post('/:id/to-lead',
