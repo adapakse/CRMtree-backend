@@ -96,9 +96,13 @@ module.exports = {
       "GOOGLE_REDIRECT_URI",
       "http://localhost:3000/api/crm/gmail/oauth/callback",
     ),
-    // SEObot — Search Console (reuses the same OAuth client as Gmail above;
-    // this redirect URI must be added to that client's "Authorized redirect
-    // URIs" in Google Cloud Console before the flow works).
+    // SEObot — Search Console uses its own OAuth client in CRMtree's own GCP
+    // project. The shared GOOGLE_CLIENT_ID above belongs to a Worktrips GCP
+    // project CRMtree can't administer (can't add test users, so the consent
+    // screen 403s). Falls back to the shared client only so an environment
+    // keeps working until its GOOGLE_GSC_CLIENT_* secrets are set.
+    gscClientId:     optional("GOOGLE_GSC_CLIENT_ID") || optional("GOOGLE_CLIENT_ID"),
+    gscClientSecret: optional("GOOGLE_GSC_CLIENT_SECRET") || optional("GOOGLE_CLIENT_SECRET"),
     gscRedirectUri: optional(
       "GOOGLE_GSC_REDIRECT_URI",
       "http://localhost:3000/api/crm/seo/gsc/oauth/callback",

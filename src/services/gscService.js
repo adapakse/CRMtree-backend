@@ -14,8 +14,8 @@ const SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
 
 function makeOAuth2Client() {
   return new google.auth.OAuth2(
-    config.google.clientId,
-    config.google.clientSecret,
+    config.google.gscClientId,
+    config.google.gscClientSecret,
     config.google.gscRedirectUri,
   );
 }
