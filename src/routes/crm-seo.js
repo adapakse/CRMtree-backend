@@ -15,7 +15,6 @@ const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, requireFeature } = require('../middleware/crm-rbac');
 const gscService = require('../services/gscService');
 const { runForTenant: syncGscMetrics } = require('../jobs/gsc-metrics-sync');
-const seoContentService = require('../services/seoContentService');
 const strategyService = require('../services/seoStrategyService');
 const pexelsService = require('../services/pexelsService');
 const backlinkService = require('../services/seoBacklinkService');
@@ -26,6 +25,7 @@ const wordpressService = require('../services/socialPublish/wordpressService');
 const authorRotation = require('../services/seoAuthorRotationService');
 const indexNowService = require('../services/indexNowService');
 const refreshService = require('../services/seoRefreshService');
+const generationJobService = require('../services/seoGenerationJobService');
 const { mondayOf, addDays, toDateStr } = require('../utils/isoWeek');
 const logger = require('../utils/logger');
 
@@ -490,27 +490,26 @@ router.post('/content/:id/reject',
 );
 
 // ── POST /api/crm/seo/content/generate — manually trigger one article ─────
-// (autopilot/cron scheduling is a follow-up; this is the trigger used for
-// testing and for on-demand generation in the meantime).
+// Runs in the background (seoGenerationJobService): 202 with the job, the
+// panel polls GET /content/generate/status until it's done or failed.
 router.post('/content/generate',
   requireSeoEditor,
   async (req, res, next) => {
     try {
-      const { rows: tenantRows } = await db.query(
-        `SELECT seo_daily_article_limit FROM tenants WHERE id = $1`,
-        [req.user.tenant_id],
-      );
-      const limit = tenantRows[0]?.seo_daily_article_limit ?? 0;
-      const generatedToday = await seoContentService.countGeneratedToday(req.user.tenant_id);
-      if (generatedToday >= limit) {
-        return res.status(429).json({ error: `Osiągnięto dzienny limit artykułów (${limit}).` });
-      }
-      const content = await seoContentService.generateArticle(req.user.tenant_id);
-      logger.info('SEO content generation triggered', { tenantId: req.user.tenant_id, contentId: content.id, triggeredBy: req.user.id });
-      res.status(201).json(content);
+      const result = await generationJobService.startJob(req.user.tenant_id, req.user.id);
+      if (result.error) return res.status(result.status).json({ error: result.error, job: result.job });
+      logger.info('SEO content generation started', { tenantId: req.user.tenant_id, jobId: result.job.id, triggeredBy: req.user.id });
+      res.status(202).json(result.job);
     } catch (err) { next(err); }
   },
 );
+
+// ── GET /api/crm/seo/content/generate/status — the tenant's latest job ────
+router.get('/content/generate/status', async (req, res, next) => {
+  try {
+    res.json(await generationJobService.latestJob(req.user.tenant_id));
+  } catch (err) { next(err); }
+});
 
 // ── GET /api/crm/seo/pillars — content strategy map (viewers, like /content) ──
 router.get('/pillars', async (req, res, next) => {
