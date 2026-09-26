@@ -109,6 +109,59 @@ async function getAuthForTenant(tenantId) {
   return { oauth2, siteUrl: rows[0].site_url };
 }
 
+// ── Article URLs as GSC reports them in the "page" dimension ────────────────
+// A domain property ("sc-domain:crmtree.pl") isn't a URL, so it's turned into
+// the https:// base that pages are actually served on.
+function pageBaseUrl(siteUrl) {
+  if (siteUrl.startsWith("sc-domain:")) return `https://${siteUrl.slice("sc-domain:".length)}`;
+  return siteUrl.replace(/\/$/, "");
+}
+
+// Articles published to a client's WordPress live at WP's own permalink,
+// not our /blog/<slug> path. The connector records that real URL.
+function articlePageUrl(article, siteUrl) {
+  return article.wordpress_url || `${pageBaseUrl(siteUrl)}/blog/${article.slug}`;
+}
+
+const fmtDate = (d) => d.toISOString().slice(0, 10);
+
+/** Map of page URL → { impressions, clicks, position } over a date range, one API call for all pages. */
+async function getPageMetrics(tenantId, startDate, endDate) {
+  const { oauth2, siteUrl } = await getAuthForTenant(tenantId);
+  const searchconsole = google.searchconsole({ version: "v1", auth: oauth2 });
+  const { data } = await searchconsole.searchanalytics.query({
+    siteUrl,
+    requestBody: { startDate: fmtDate(startDate), endDate: fmtDate(endDate), dimensions: ["page"], rowLimit: 1000 },
+  });
+  const byPage = new Map();
+  for (const r of data.rows || []) {
+    byPage.set(r.keys[0], { impressions: r.impressions, clicks: r.clicks, position: Math.round(r.position * 10) / 10 });
+  }
+  return { byPage, siteUrl };
+}
+
+/** Real search queries an article's page already appears for — what a refresh should answer more directly. */
+async function getQueriesForArticle(tenantId, article, { days = 28, limit = 20 } = {}) {
+  const { oauth2, siteUrl } = await getAuthForTenant(tenantId);
+  const searchconsole = google.searchconsole({ version: "v1", auth: oauth2 });
+  const pageUrl = articlePageUrl(article, siteUrl);
+  const end = new Date();
+  const start = new Date(end.getTime() - days * 24 * 3600 * 1000);
+  const { data } = await searchconsole.searchanalytics.query({
+    siteUrl,
+    requestBody: {
+      startDate: fmtDate(start),
+      endDate: fmtDate(end),
+      dimensions: ["query"],
+      dimensionFilterGroups: [{ filters: [{ dimension: "page", expression: pageUrl }] }],
+      rowLimit: limit,
+    },
+  });
+  return (data.rows || [])
+    .sort((a, b) => b.impressions - a.impressions)
+    .map((r) => ({ phrase: r.keys[0], impressions: r.impressions, position: Math.round(r.position * 10) / 10 }));
+}
+
 // ── Search analytics for a single URL, stored into seo_metrics ──────────────
 async function syncMetricsForContent(tenantId, contentId, pageUrl, date) {
   const { oauth2, siteUrl } = await getAuthForTenant(tenantId);
@@ -169,4 +222,8 @@ module.exports = {
   getAuthForTenant,
   syncMetricsForContent,
   getContentGapQueries,
+  pageBaseUrl,
+  articlePageUrl,
+  getPageMetrics,
+  getQueriesForArticle,
 };

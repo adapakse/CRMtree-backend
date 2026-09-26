@@ -84,7 +84,11 @@ router.get('/:slug',
       const locale = req.query.locale || 'pl';
       const { rows } = await db.query(
         `SELECT c.id, c.title, c.slug, c.body, c.meta_description, c.category, c.header_image_url,
-                c.published_at, c.updated_at, c.faq,
+                -- Public "modified" date = when content last changed via an
+                -- applied refresh. updated_at also moves on internal flag
+                -- changes (e.g. being queued for a refresh), so it would claim
+                -- edits that never reached readers.
+                c.published_at, c.last_refreshed_at AS updated_at, c.faq,
                 GREATEST(1, CEIL(array_length(regexp_split_to_array(trim(c.body), '\\s+'), 1) / 200.0))::int AS reading_minutes,
                 a.id AS author_id, a.full_name AS author_name, a.job_title AS author_job_title, a.bio AS author_bio,
                 a.photo_url AS author_photo_url, a.linkedin_url AS author_linkedin_url,

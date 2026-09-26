@@ -184,7 +184,10 @@ function containsMarkdownTable(text) {
   return false;
 }
 
-function validateArticle(article, primaryKeyword, validSlugSet, hasFacts = false) {
+// skipSlugCheck: a refreshed article keeps its existing, already-indexed slug.
+// Older slugs may not contain the keyword's core word, and the model isn't
+// allowed to change the slug anyway, so that check could never be fixed.
+function validateArticle(article, primaryKeyword, validSlugSet, hasFacts = false, { skipSlugCheck = false } = {}) {
   const errors = [];
   const bodyText = [article.lead, ...(article.tldr_bullets || []), ...article.sections.map((s) => s.content_markdown)]
     .filter(Boolean)
@@ -216,10 +219,12 @@ function validateArticle(article, primaryKeyword, validSlugSet, hasFacts = false
     errors.push('Fraza kluczowa nie występuje w pierwszych ~100 słowach treści (lead).');
   }
 
-  if (!/^[a-z0-9-]+$/.test(article.slug || '')) {
-    errors.push(`Slug "${article.slug}" nie pasuje do formatu kebab-case ASCII.`);
-  } else if (core && !article.slug.includes(core.normalize('NFD').replace(/[̀-ͯ]/g, ''))) {
-    errors.push(`Slug "${article.slug}" nie zawiera rdzenia frazy kluczowej ("${core}").`);
+  if (!skipSlugCheck) {
+    if (!/^[a-z0-9-]+$/.test(article.slug || '')) {
+      errors.push(`Slug "${article.slug}" nie pasuje do formatu kebab-case ASCII.`);
+    } else if (core && !article.slug.includes(core.normalize('NFD').replace(/[̀-ͯ]/g, ''))) {
+      errors.push(`Slug "${article.slug}" nie zawiera rdzenia frazy kluczowej ("${core}").`);
+    }
   }
 
   const phraseRegex = primaryKeyword
@@ -560,4 +565,141 @@ async function generateArticle(tenantId) {
   return contentRows[0];
 }
 
-module.exports = { generateArticle, countGeneratedToday, validateArticle, renderBody, BRAND_VOICE };
+// ── Refresh of an already-published article ─────────────────────────────
+// Produces a proposed revision only; seoRefreshService stages it in
+// refresh_draft and it goes live when an editor applies it. Held to the same
+// structure and validation as a new article, so a refresh also brings older,
+// pre-2026-09 articles up to the current standard. It additionally targets
+// the real queries the page already shows up for in Search Console.
+
+const REFRESH_REASON_TEXT = {
+  striking_distance: (s) => `Artykuł jest blisko pierwszej strony Google (śr. pozycja ${s.position}, ${s.impressions} wyświetleń w 28 dni) — celem jest wejście do TOP 10.`,
+  position_drop: (s) => `Artykuł stracił pozycję w Google (z ${s.positionBefore} na ${s.positionNow}) — celem jest odzyskanie jej przez lepsze dopasowanie do zapytań i aktualność.`,
+  age: () => 'Artykuł nie był aktualizowany od ponad 90 dni — celem jest aktualność danych i zgodność z bieżącymi standardami treści.',
+  manual: () => 'Redaktor oznaczył artykuł do odświeżenia.',
+};
+
+async function refreshArticle(contentId, tenantId) {
+  const { rows } = await db.query(
+    `SELECT c.id, c.title, c.slug, c.body, c.meta_description, c.target_keyword, c.category,
+            c.refresh_reason, c.refresh_signal, wp.remote_url AS wordpress_url
+       FROM seo_content_pieces c
+       LEFT JOIN seo_social_posts wp ON wp.content_id = c.id AND wp.platform = 'wordpress' AND wp.status = 'published'
+      WHERE c.id = $1 AND c.tenant_id = $2`,
+    [contentId, tenantId],
+  );
+  const current = rows[0];
+  if (!current) throw new Error('Nie znaleziono artykułu.');
+
+  const { rows: pillarRows } = await db.query(
+    `SELECT p.id, p.name, p.description, p.slug
+       FROM seo_keywords k JOIN seo_content_pillars p ON p.id = k.pillar_id
+      WHERE k.content_id = $1 LIMIT 1`,
+    [contentId],
+  );
+  // Seed articles predate content pillars — fall back to the category text.
+  const pillar = pillarRows[0] || { name: current.category || '', description: current.category || '', slug: null };
+  const keyword = current.target_keyword || current.title;
+
+  const { rows: published } = await db.query(
+    `SELECT id, slug, title FROM seo_content_pieces
+      WHERE tenant_id = $1 AND locale = 'pl' AND status = 'published' AND id <> $2`,
+    [tenantId, contentId],
+  );
+  const validSlugs = new Set(published.map((p) => p.slug));
+
+  let totalCostUsd = 0;
+  const track = (stage) => { totalCostUsd += costOf(stage.model, stage.usage); };
+
+  let queries = [];
+  try {
+    queries = await gscService.getQueriesForArticle(tenantId, current);
+  } catch (err) {
+    logger.info('SEO refresh: no GSC query data for page', { contentId, reason: err.message });
+  }
+
+  let facts = [];
+  try {
+    const factsResp = await factsService.findFacts({ keyword, pillar });
+    track(factsResp);
+    facts = factsResp.facts;
+  } catch (err) {
+    logger.info('SEO refresh: facts research failed — proceeding without cited data', { contentId, reason: err.message });
+  }
+
+  const reasonText = REFRESH_REASON_TEXT[current.refresh_reason]?.(current.refresh_signal || {}) ?? REFRESH_REASON_TEXT.manual();
+
+  const response = await client.messages.parse({
+    model: DRAFT_MODEL,
+    max_tokens: 12000,
+    thinking: { type: 'adaptive' },
+    system: `You are an expert B2B content editor refreshing an already-published, already-indexed article — improve it, don't discard what already works. ${BRAND_VOICE}`,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          'Odśwież ten opublikowany artykuł. Zachowaj temat, główną frazę i to, co w nim dobre — to aktualizacja, nie nowy tekst od zera.',
+          `Powód odświeżenia: ${reasonText}`,
+          `Obecny tytuł: ${current.title}`,
+          `Obecny meta description: ${current.meta_description || '(brak)'}`,
+          `Fraza kluczowa: ${keyword}`,
+          `Obecna treść (markdown; pomiń stopkę z linkami "Zobacz też", linkiem do tematu i CTA — dodawane są automatycznie):\n\n${current.body}`,
+          queries.length
+            ? `Zapytania z Google Search Console, na które ten artykuł JUŻ się wyświetla (ostatnie 28 dni):\n${queries.map((q) => `- "${q.phrase}" (${q.impressions} wyśw., śr. poz. ${q.position})`).join('\n')}\nDopisz lub przebuduj treść tak, żeby odpowiadała na te zapytania wprost — najlepiej jako nagłówek H2 w formie pytania albo pytanie w FAQ, z 40-60-słowną konkretną odpowiedzią na początku. Nie upychaj fraz sztucznie; pomiń zapytania niezwiązane z tematem.`
+            : 'Brak danych o zapytaniach z Search Console — skup się na aktualności treści i zgodności ze strukturą poniżej.',
+          facts.length
+            ? `Realne, zacytowane dane — wykorzystaj naturalnie, z linkiem markdown do źródła:\n${facts.map((f) => `- ${f.claim} (źródło: ${f.source_url})`).join('\n')}`
+            : 'Brak realnych danych na ten temat — nie wymyślaj liczb ani statystyk.',
+          'Wymagana struktura (jak każdy nowy artykuł): lead (3-4 zdania, fraza w pierwszych 100 słowach), "W skrócie" (5-8 punktów), wśród H2 sekcje "Dla kogo jest…" i "Dla kogo NIE jest to rozwiązanie", "Najczęstsze błędy" oraz prawdziwa tabela porównawcza w markdown; pozostałe H2 w miarę możliwości jako pytania, pierwszy akapit pod każdym H2 to 40-60 słów czystej odpowiedzi; min. 2-3 jednozdaniowe definicje "X to…"; każda sekcja zrozumiała samodzielnie; FAQ 5-8 pytań po 40-60 słów; łącznie maks. 1600 słów (bez FAQ).',
+          `Slug MUSI pozostać dokładnie: ${current.slug} — adres jest już zaindeksowany.`,
+          published.length
+            ? `Kandydaci na linki wewnętrzne (użyj 2-5 pasujących):\n${published.map((p) => `- ${p.slug}: ${p.title}`).join('\n')}`
+            : 'Brak innych opublikowanych artykułów — zostaw internal_link_suggestions puste.',
+          'Zwróć kompletny artykuł: title, slug, meta_title (55-70 znaków), meta_description (150-160 znaków), primary_keyword, lead, tldr_bullets, sections, faq, internal_link_suggestions.',
+        ].join('\n\n'),
+      },
+    ],
+    output_config: { format: zodOutputFormat(ArticleSchema) },
+  });
+  if (!response.parsed_output) throw new Error('Refresh generation failed to parse.');
+  track({ model: DRAFT_MODEL, usage: response.usage });
+  let article = { ...response.parsed_output, slug: current.slug };
+
+  const critiqueResp = await reviseArticle({ article, instructions: CRITIQUE_INSTRUCTIONS });
+  track(critiqueResp);
+  article = { ...critiqueResp.result, slug: current.slug };
+
+  const validationOpts = { skipSlugCheck: true };
+  let validation = validateArticle(article, keyword, validSlugs, facts.length > 0, validationOpts);
+  let attempts = 0;
+  while (!validation.ok && attempts < 2) {
+    const fixResp = await reviseArticle({
+      article,
+      instructions: `Ten artykuł nie przeszedł automatycznej walidacji. Popraw dokładnie te problemy (slug zostaw bez zmian):\n${validation.errors.map((e) => `- ${e}`).join('\n')}`,
+    });
+    track(fixResp);
+    article = { ...fixResp.result, slug: current.slug };
+    validation = validateArticle(article, keyword, validSlugs, facts.length > 0, validationOpts);
+    attempts++;
+  }
+
+  logger.info('SEO refresh draft generated', {
+    tenantId, contentId, costUsd: totalCostUsd.toFixed(4), queriesUsed: queries.length, factsUsed: facts.length, validationOk: validation.ok,
+  });
+
+  return {
+    title: article.title,
+    meta_description: article.meta_description,
+    body: renderBody(article, pillar),
+    faq: article.faq,
+    queries,
+    facts_used: facts.length,
+    // Kept rather than blocking the draft: the editor decides whether the
+    // remaining issues matter enough to reject it.
+    validation_errors: validation.ok ? [] : validation.errors,
+    cost_usd: Number(totalCostUsd.toFixed(4)),
+    generated_at: new Date().toISOString(),
+  };
+}
+
+module.exports = { generateArticle, refreshArticle, countGeneratedToday, validateArticle, renderBody, BRAND_VOICE };

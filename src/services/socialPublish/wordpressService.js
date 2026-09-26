@@ -133,4 +133,21 @@ async function publishPost(tenantId, { title, contentHtml, excerpt, imageUrl, sl
   return { remotePostId: String(data.id), remoteUrl: data.link || null };
 }
 
-module.exports = { connect, getAccount, publishPost };
+/** Replaces an already-published post's content in place (content refresh). Leaves its status and slug alone. */
+async function updatePost(tenantId, remotePostId, { title, contentHtml, excerpt }) {
+  const account = await getAccount(tenantId);
+  if (!account) throw new Error('WordPress nie jest podłączony dla tego tenanta.');
+
+  const res = await fetch(`${account.site_url}/wp-json/wp/v2/posts/${encodeURIComponent(remotePostId)}`, {
+    method: 'POST',
+    headers: {
+      ...REQUEST_HEADERS,
+      Authorization: authHeader(account.username, account.app_password),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ title, content: contentHtml, excerpt }),
+  });
+  if (!res.ok) throw new Error(`Aktualizacja wpisu na WordPress nie powiodła się (${res.status}): ${await res.text()}`);
+}
+
+module.exports = { connect, getAccount, publishPost, updatePost };

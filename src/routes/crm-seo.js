@@ -25,6 +25,7 @@ const metaService = require('../services/socialPublish/metaService');
 const wordpressService = require('../services/socialPublish/wordpressService');
 const authorRotation = require('../services/seoAuthorRotationService');
 const indexNowService = require('../services/indexNowService');
+const refreshService = require('../services/seoRefreshService');
 const { mondayOf, addDays, toDateStr } = require('../utils/isoWeek');
 const logger = require('../utils/logger');
 
@@ -139,9 +140,16 @@ async function requireSeoEditor(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Refresh queue, most promising first: near page 1 (by traffic), then
+// ranking drops, then age-based and manual requests.
+const REFRESH_QUEUE_ORDER = `
+  CASE c.refresh_reason WHEN 'striking_distance' THEN 0 WHEN 'position_drop' THEN 1 WHEN 'manual' THEN 2 ELSE 3 END,
+  (c.refresh_signal->>'impressions')::numeric DESC NULLS LAST,
+  c.refresh_requested_at`;
+
 // ── GET /api/crm/seo/content — editorial queue (all viewers with feature access) ──
 router.get('/content',
-  [query('status').optional().isString()],
+  [query('status').optional().isString(), query('refresh').optional().isIn(['1'])],
   validate,
   async (req, res, next) => {
     try {
@@ -151,9 +159,13 @@ router.get('/content',
         params.push(req.query.status);
         where += ` AND c.status = $${params.length}`;
       }
+      if (req.query.refresh) {
+        where += ` AND c.status = 'published' AND c.refresh_reason IS NOT NULL`;
+      }
       const { rows } = await db.query(
         `SELECT c.id, c.locale, c.title, c.slug, c.status, c.target_keyword, c.category, c.author_id,
                 c.scheduled_at, c.published_at, c.reviewed_by, c.created_at, c.updated_at,
+                c.refresh_reason, c.refresh_status, c.refresh_signal, c.refresh_requested_at,
                 COALESCE(m.clicks_28d, 0) AS clicks_28d,
                 COALESCE(m.impressions_28d, 0) AS impressions_28d,
                 m.avg_position_28d
@@ -165,7 +177,7 @@ router.get('/content',
                FROM seo_metrics
               WHERE content_id = c.id AND date >= CURRENT_DATE - INTERVAL '28 days'
            ) m ON true
-          WHERE ${where} ORDER BY c.created_at DESC`,
+          WHERE ${where} ORDER BY ${req.query.refresh ? REFRESH_QUEUE_ORDER : 'c.created_at DESC'}`,
         params,
       );
       res.json(rows);
@@ -383,7 +395,9 @@ router.post('/content/:id/unpublish',
     try {
       const { rows } = await db.query(
         `UPDATE seo_content_pieces
-            SET status = 'draft', published_at = NULL, scheduled_at = NULL, reviewed_by = $3
+            SET status = 'draft', published_at = NULL, scheduled_at = NULL, reviewed_by = $3,
+                refresh_reason = NULL, refresh_requested_at = NULL, refresh_signal = NULL,
+                refresh_status = NULL, refresh_draft = NULL, refresh_error = NULL
           WHERE id = $1 AND tenant_id = $2 AND status IN ('published', 'scheduled')
           RETURNING *`,
         [req.params.id, req.user.tenant_id, req.user.id],
@@ -393,6 +407,64 @@ router.post('/content/:id/unpublish',
       // IndexNow also takes removed URLs — the engine recrawls, gets the 404, drops it.
       indexNowService.notifyArticleChanged(rows[0].id, req.user.tenant_id);
       res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── Content refresh (seoRefreshService) — the article stays published the
+// whole time; a proposed revision goes live only via /refresh/apply. ──────
+router.post('/content/:id/refresh/request',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const row = await refreshService.requestRefresh(req.params.id, req.user.tenant_id);
+      if (!row) return res.status(409).json({ error: 'Wpis nie jest opublikowany albo już czeka na odświeżenie.' });
+      res.json(row);
+    } catch (err) { next(err); }
+  },
+);
+
+// 202 + background work: generation runs several minutes, longer than the
+// ingress keeps a request open. The panel polls GET /content/:id for refresh_status.
+router.post('/content/:id/refresh/generate',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const started = await refreshService.startDraftGeneration(req.params.id, req.user.tenant_id);
+      if (!started) return res.status(409).json({ error: 'Wpis nie czeka na odświeżenie albo propozycja jest już generowana.' });
+      logger.info('SEO refresh draft generation started', { contentId: req.params.id, triggeredBy: req.user.id });
+      res.status(202).json({ refresh_status: 'generating' });
+    } catch (err) { next(err); }
+  },
+);
+
+router.post('/content/:id/refresh/apply',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const row = await refreshService.applyRefresh(req.params.id, req.user.tenant_id);
+      if (!row) return res.status(409).json({ error: 'Brak gotowej propozycji odświeżenia do zastosowania.' });
+      logger.info('SEO refresh applied', { contentId: req.params.id, appliedBy: req.user.id });
+      res.json(row);
+    } catch (err) { next(err); }
+  },
+);
+
+router.post('/content/:id/refresh/dismiss',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const row = await refreshService.dismissRefresh(req.params.id, req.user.tenant_id);
+      if (!row) return res.status(409).json({ error: 'Wpis nie czeka na odświeżenie albo propozycja jest właśnie generowana.' });
+      res.json(row);
     } catch (err) { next(err); }
   },
 );
