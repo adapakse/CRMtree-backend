@@ -5,10 +5,10 @@
 // Mirrors the OAuth pattern in services/gmailService.js.
 
 const { google } = require("googleapis");
-const crypto = require("crypto");
 const { pool } = require("../config/database");
 const config = require("../config");
 const { encrypt, decrypt } = require("../utils/encrypt");
+const { makeOAuthState, parseOAuthState } = require("../utils/seoOAuthState");
 
 const SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
 
@@ -20,39 +20,12 @@ function makeOAuth2Client() {
   );
 }
 
-// ── State: HMAC-signed "<tenantId>.<userId>.<timestamp>.<hmac>" ──────────────
-function makeOAuthState(tenantId, userId) {
-  const ts = Date.now();
-  const sig = crypto
-    .createHmac("sha256", config.jwt.secret)
-    .update(`${tenantId}:${userId}:${ts}`)
-    .digest("hex")
-    .slice(0, 16);
-  return `${tenantId}.${userId}.${ts}.${sig}`;
-}
-
-function parseOAuthState(state) {
-  if (!state || typeof state !== "string") return null;
-  const parts = state.split(".");
-  if (parts.length !== 4) return null;
-  const [tenantId, userId, tsStr, sig] = parts;
-  const ts = parseInt(tsStr, 10);
-  if (!ts || isNaN(ts) || Date.now() - ts > 30 * 60 * 1000) return null;
-  const expected = crypto
-    .createHmac("sha256", config.jwt.secret)
-    .update(`${tenantId}:${userId}:${ts}`)
-    .digest("hex")
-    .slice(0, 16);
-  if (sig !== expected) return null;
-  return { tenantId, userId };
-}
-
-function getAuthUrl(tenantId, userId) {
+function getAuthUrl(tenantId, userId, returnHost) {
   const oauth2 = makeOAuth2Client();
   return oauth2.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
-    state: makeOAuthState(tenantId, userId),
+    state: makeOAuthState(tenantId, userId, returnHost),
     scope: [SCOPE],
   });
 }

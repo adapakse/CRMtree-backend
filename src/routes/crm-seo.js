@@ -28,6 +28,7 @@ const refreshService = require('../services/seoRefreshService');
 const generationJobService = require('../services/seoGenerationJobService');
 const { mondayOf, addDays, toDateStr } = require('../utils/isoWeek');
 const slots = require('../utils/seoSlots');
+const { returnHostFor, frontendBaseFor } = require('../utils/seoOAuthState');
 const logger = require('../utils/logger');
 
 // ── OAuth callbacks — registered BEFORE the auth gate below on purpose.
@@ -35,12 +36,15 @@ const logger = require('../utils/logger');
 // never carries our Authorization header — requireAuth would 401 every one
 // of them before the handler ever ran. Identity instead comes from the
 // signed `state` param each service's parseOAuthState() verifies. ──────────
+// Each callback returns the user to the tenant subdomain the flow started on
+// (utils/seoOAuthState.js), falling back to the global app host.
 router.get('/gsc/oauth/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  const parsed = gscService.parseOAuthState(state);
+  const base = frontendBaseFor(parsed);
   try {
-    const { code, state, error } = req.query;
-    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=${encodeURIComponent(error)}`);
-    const parsed = gscService.parseOAuthState(state);
-    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=invalid_state`);
+    if (error) return res.redirect(`${base}/crm/seo?gsc=error&reason=${encodeURIComponent(error)}`);
+    if (!code || !parsed) return res.redirect(`${base}/crm/seo?gsc=error&reason=invalid_state`);
 
     // Priority: an explicit SuperAdmin-configured seo_gsc_site_url (the actual
     // verified GSC property — was added by migration 0247 for exactly this,
@@ -57,38 +61,40 @@ router.get('/gsc/oauth/callback', async (req, res) => {
     );
     const siteUrl = rows[0]?.seo_gsc_site_url || rows[0]?.wordpress_site_url || `https://${rows[0]?.slug}.crmtree.pl/`;
     await gscService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId, siteUrl);
-    res.redirect(`${config.frontendUrl}/crm/seo?gsc=connected`);
+    res.redirect(`${base}/crm/seo?gsc=connected`);
   } catch (err) {
     logger.error('GSC OAuth callback failed', { error: err.message });
-    res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=callback_failed`);
+    res.redirect(`${base}/crm/seo?gsc=error&reason=callback_failed`);
   }
 });
 
 router.get('/social/linkedin/oauth/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  const parsed = linkedinService.parseOAuthState(state);
+  const base = frontendBaseFor(parsed);
   try {
-    const { code, state, error } = req.query;
-    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=${encodeURIComponent(error)}`);
-    const parsed = linkedinService.parseOAuthState(state);
-    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=invalid_state`);
+    if (error) return res.redirect(`${base}/crm/seo?social=error&platform=linkedin&reason=${encodeURIComponent(error)}`);
+    if (!code || !parsed) return res.redirect(`${base}/crm/seo?social=error&platform=linkedin&reason=invalid_state`);
     await linkedinService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId);
-    res.redirect(`${config.frontendUrl}/crm/seo?social=connected&platform=linkedin`);
+    res.redirect(`${base}/crm/seo?social=connected&platform=linkedin`);
   } catch (err) {
     logger.error('LinkedIn OAuth callback failed', { error: err.message });
-    res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=linkedin&reason=callback_failed`);
+    res.redirect(`${base}/crm/seo?social=error&platform=linkedin&reason=callback_failed`);
   }
 });
 
 router.get('/social/facebook/oauth/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  const parsed = metaService.parseOAuthState(state);
+  const base = frontendBaseFor(parsed);
   try {
-    const { code, state, error } = req.query;
-    if (error) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=${encodeURIComponent(error)}`);
-    const parsed = metaService.parseOAuthState(state);
-    if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=invalid_state`);
+    if (error) return res.redirect(`${base}/crm/seo?social=error&platform=facebook&reason=${encodeURIComponent(error)}`);
+    if (!code || !parsed) return res.redirect(`${base}/crm/seo?social=error&platform=facebook&reason=invalid_state`);
     await metaService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId);
-    res.redirect(`${config.frontendUrl}/crm/seo?social=connected&platform=facebook`);
+    res.redirect(`${base}/crm/seo?social=connected&platform=facebook`);
   } catch (err) {
     logger.error('Meta OAuth callback failed', { error: err.message });
-    res.redirect(`${config.frontendUrl}/crm/seo?social=error&platform=facebook&reason=callback_failed`);
+    res.redirect(`${base}/crm/seo?social=error&platform=facebook&reason=callback_failed`);
   }
 });
 
@@ -1065,7 +1071,7 @@ router.post('/backlinks/:id/reject',
 
 // ── Google Search Console connection ───────────────────────────────────────
 router.get('/gsc/oauth/url', requireSeoEditor, (req, res) => {
-  res.json({ url: gscService.getAuthUrl(req.user.tenant_id, req.user.id) });
+  res.json({ url: gscService.getAuthUrl(req.user.tenant_id, req.user.id, returnHostFor(req)) });
 });
 
 router.get('/gsc/status', async (req, res, next) => {
@@ -1143,7 +1149,7 @@ router.get('/social/linkedin/oauth/url', requireSeoEditor, (req, res) => {
     logger.error('LinkedIn connect attempted without LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET configured');
     return res.status(503).json({ error: 'Integracja z LinkedIn nie jest skonfigurowana na serwerze (brak danych aplikacji LinkedIn). Skontaktuj się z administratorem.' });
   }
-  res.json({ url: linkedinService.getAuthUrl(req.user.tenant_id, req.user.id) });
+  res.json({ url: linkedinService.getAuthUrl(req.user.tenant_id, req.user.id, returnHostFor(req)) });
 });
 
 router.get('/social/facebook/oauth/url', requireSeoEditor, (req, res) => {
@@ -1151,7 +1157,7 @@ router.get('/social/facebook/oauth/url', requireSeoEditor, (req, res) => {
     logger.error('Facebook connect attempted without META_APP_ID / META_APP_SECRET configured');
     return res.status(503).json({ error: 'Integracja z Facebookiem nie jest skonfigurowana na serwerze (brak danych aplikacji Meta). Skontaktuj się z administratorem.' });
   }
-  res.json({ url: metaService.getAuthUrl(req.user.tenant_id, req.user.id) });
+  res.json({ url: metaService.getAuthUrl(req.user.tenant_id, req.user.id, returnHostFor(req)) });
 });
 
 // ── WordPress connector — client tenants only; CRMtree keeps its own native

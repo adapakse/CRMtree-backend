@@ -15,38 +15,22 @@
 // Meta deprecates old versions on a schedule, check developers.facebook.com.
 // ─────────────────────────────────────────────────────────────────
 
-const crypto = require('crypto');
 const db = require('../../config/database');
 const config = require('../../config');
 const logger = require('../../utils/logger');
 const { encrypt, decrypt } = require('../../utils/encrypt');
+const { makeOAuthState, parseOAuthState } = require('../../utils/seoOAuthState');
 
 const GRAPH_VERSION = 'v24.0'; // bumped 2026-09-28 from v21.0; Meta retires versions ~2 years after release
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
 const AUTH_BASE = `https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth`;
 const SCOPES = ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement', 'instagram_basic', 'instagram_content_publish'];
 
-function makeOAuthState(tenantId, userId) {
-  const ts = Date.now();
-  const sig = crypto.createHmac('sha256', config.jwt.secret).update(`${tenantId}:${userId}:${ts}`).digest('hex').slice(0, 16);
-  return `${tenantId}.${userId}.${ts}.${sig}`;
-}
-
-function parseOAuthState(state) {
-  if (!state || typeof state !== 'string') return null;
-  const [tenantId, userId, tsStr, sig] = state.split('.');
-  const ts = parseInt(tsStr, 10);
-  if (!ts || Date.now() - ts > 30 * 60 * 1000) return null;
-  const expected = crypto.createHmac('sha256', config.jwt.secret).update(`${tenantId}:${userId}:${ts}`).digest('hex').slice(0, 16);
-  if (sig !== expected) return null;
-  return { tenantId, userId };
-}
-
-function getAuthUrl(tenantId, userId) {
+function getAuthUrl(tenantId, userId, returnHost) {
   const params = new URLSearchParams({
     client_id: config.meta.appId,
     redirect_uri: config.meta.redirectUri,
-    state: makeOAuthState(tenantId, userId),
+    state: makeOAuthState(tenantId, userId, returnHost),
     scope: SCOPES.join(','),
   });
   return `${AUTH_BASE}?${params.toString()}`;
