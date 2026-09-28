@@ -6,7 +6,7 @@
 
 const router = require('express').Router();
 const multer = require('multer');
-const { body, param, query } = require('express-validator');
+const { body, param, query, validationResult } = require('express-validator');
 const db = require('../config/database');
 const config = require('../config');
 const storageService = require('../services/storageService');
@@ -15,7 +15,6 @@ const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, requireFeature } = require('../middleware/crm-rbac');
 const gscService = require('../services/gscService');
 const { runForTenant: syncGscMetrics } = require('../jobs/gsc-metrics-sync');
-const seoContentService = require('../services/seoContentService');
 const strategyService = require('../services/seoStrategyService');
 const pexelsService = require('../services/pexelsService');
 const backlinkService = require('../services/seoBacklinkService');
@@ -24,7 +23,11 @@ const linkedinService = require('../services/socialPublish/linkedinService');
 const metaService = require('../services/socialPublish/metaService');
 const wordpressService = require('../services/socialPublish/wordpressService');
 const authorRotation = require('../services/seoAuthorRotationService');
+const indexNowService = require('../services/indexNowService');
+const refreshService = require('../services/seoRefreshService');
+const generationJobService = require('../services/seoGenerationJobService');
 const { mondayOf, addDays, toDateStr } = require('../utils/isoWeek');
+const slots = require('../utils/seoSlots');
 const logger = require('../utils/logger');
 
 // ── OAuth callbacks — registered BEFORE the auth gate below on purpose.
@@ -39,17 +42,20 @@ router.get('/gsc/oauth/callback', async (req, res) => {
     const parsed = gscService.parseOAuthState(state);
     if (!code || !parsed) return res.redirect(`${config.frontendUrl}/crm/seo?gsc=error&reason=invalid_state`);
 
-    // Prefer the tenant's real domain (via a connected WordPress site) over the
-    // crmtree.pl placeholder — GSC properties must match the actual live domain
-    // the client's articles get published to, not our internal subdomain.
+    // Priority: an explicit SuperAdmin-configured seo_gsc_site_url (the actual
+    // verified GSC property — was added by migration 0247 for exactly this,
+    // but never wired up here until now, 2026-09-26) > the tenant's real
+    // domain via a connected WordPress site > the crmtree.pl placeholder as
+    // a last resort. GSC properties must match the actual live domain the
+    // client's articles get published to, not our internal subdomain guess.
     const { rows } = await db.query(
-      `SELECT t.slug, w.site_url AS wordpress_site_url
+      `SELECT t.slug, t.seo_gsc_site_url, w.site_url AS wordpress_site_url
          FROM tenants t
          LEFT JOIN tenant_wordpress_connections w ON w.tenant_id = t.id
         WHERE t.id = $1`,
       [parsed.tenantId],
     );
-    const siteUrl = rows[0]?.wordpress_site_url || `https://${rows[0]?.slug}.crmtree.pl/`;
+    const siteUrl = rows[0]?.seo_gsc_site_url || rows[0]?.wordpress_site_url || `https://${rows[0]?.slug}.crmtree.pl/`;
     await gscService.exchangeCodeAndSave(code, parsed.tenantId, parsed.userId, siteUrl);
     res.redirect(`${config.frontendUrl}/crm/seo?gsc=connected`);
   } catch (err) {
@@ -135,9 +141,16 @@ async function requireSeoEditor(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Refresh queue, most promising first: near page 1 (by traffic), then
+// ranking drops, then age-based and manual requests.
+const REFRESH_QUEUE_ORDER = `
+  CASE c.refresh_reason WHEN 'striking_distance' THEN 0 WHEN 'position_drop' THEN 1 WHEN 'manual' THEN 2 ELSE 3 END,
+  (c.refresh_signal->>'impressions')::numeric DESC NULLS LAST,
+  c.refresh_requested_at`;
+
 // ── GET /api/crm/seo/content — editorial queue (all viewers with feature access) ──
 router.get('/content',
-  [query('status').optional().isString()],
+  [query('status').optional().isString(), query('refresh').optional().isIn(['1'])],
   validate,
   async (req, res, next) => {
     try {
@@ -147,9 +160,13 @@ router.get('/content',
         params.push(req.query.status);
         where += ` AND c.status = $${params.length}`;
       }
+      if (req.query.refresh) {
+        where += ` AND c.status = 'published' AND c.refresh_reason IS NOT NULL`;
+      }
       const { rows } = await db.query(
         `SELECT c.id, c.locale, c.title, c.slug, c.status, c.target_keyword, c.category, c.author_id,
                 c.scheduled_at, c.published_at, c.reviewed_by, c.created_at, c.updated_at,
+                c.refresh_reason, c.refresh_status, c.refresh_signal, c.refresh_requested_at,
                 COALESCE(m.clicks_28d, 0) AS clicks_28d,
                 COALESCE(m.impressions_28d, 0) AS impressions_28d,
                 m.avg_position_28d
@@ -161,7 +178,7 @@ router.get('/content',
                FROM seo_metrics
               WHERE content_id = c.id AND date >= CURRENT_DATE - INTERVAL '28 days'
            ) m ON true
-          WHERE ${where} ORDER BY c.created_at DESC`,
+          WHERE ${where} ORDER BY ${req.query.refresh ? REFRESH_QUEUE_ORDER : 'c.created_at DESC'}`,
         params,
       );
       res.json(rows);
@@ -248,6 +265,20 @@ router.patch('/content/:id',
         [req.params.id, req.user.tenant_id, ...fields.map((f) => req.body[f])],
       );
       if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      // An editor deleting a [[SLOT:..]] marker by hand removed that slot —
+      // otherwise the panel would keep asking to fill a place that's gone.
+      if (req.body.body !== undefined) {
+        const open = new Set(slots.openSlotIds(rows[0].body));
+        const stale = rows[0].enrichment_slots.some((s) => s.status === 'pending' && !open.has(s.id));
+        if (stale) {
+          const synced = rows[0].enrichment_slots.map((s) => (s.status === 'pending' && !open.has(s.id) ? { ...s, status: 'removed' } : s));
+          const { rows: updated } = await db.query(
+            `UPDATE seo_content_pieces SET enrichment_slots = $2 WHERE id = $1 RETURNING *`,
+            [rows[0].id, JSON.stringify(synced)],
+          );
+          return res.json(updated[0]);
+        }
+      }
       res.json(rows[0]);
     } catch (err) { next(err); }
   },
@@ -273,6 +304,110 @@ router.post('/content/:id/reroll-image',
         [newUrl, req.params.id, req.user.tenant_id],
       );
       res.json(updated[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── Enrichment slots (utils/seoSlots.js): the editor fills or removes each
+// place the article asks for before it can be approved. ────────────────────
+const SLOT_VALUE_VALIDATORS = {
+  expert_comment: [
+    body('text').isString().trim().isLength({ min: 20, max: 1500 }),
+    body('author_name').isString().trim().notEmpty().isLength({ max: 150 }),
+    body('author_role').optional({ nullable: true }).isString().trim().isLength({ max: 150 }),
+  ],
+  quote: [
+    body('text').isString().trim().isLength({ min: 10, max: 1000 }),
+    body('author').isString().trim().notEmpty().isLength({ max: 150 }),
+    body('author_role').optional({ nullable: true }).isString().trim().isLength({ max: 150 }),
+    body('source_title').optional({ nullable: true }).isString().trim().isLength({ max: 250 }),
+    body('source_url').optional({ nullable: true, checkFalsy: true }).isURL({ protocols: ['https'], require_protocol: true }),
+  ],
+  screenshot: [body('screenshot_id').isInt()],
+};
+
+async function loadEditableContent(contentId, tenantId) {
+  const { rows } = await db.query(
+    `SELECT id, status, body, enrichment_slots FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
+    [contentId, tenantId],
+  );
+  return rows[0] || null;
+}
+
+async function saveSlotChange(content, slotId, markdown, slotPatch) {
+  const newBody = slots.replaceMarker(content.body, slotId, markdown);
+  if (newBody === null) return null;
+  const updatedSlots = content.enrichment_slots.map((s) => (s.id === slotId ? { ...s, ...slotPatch } : s));
+  const { rows } = await db.query(
+    `UPDATE seo_content_pieces SET body = $2, enrichment_slots = $3 WHERE id = $1 RETURNING *`,
+    [content.id, newBody, JSON.stringify(updatedSlots)],
+  );
+  return rows[0];
+}
+
+router.post('/content/:id/slots/:slotId/fill',
+  requireSeoEditor,
+  [param('id').isInt(), param('slotId').matches(/^[a-z0-9_-]+$/i)],
+  validate,
+  async (req, res, next) => {
+    try {
+      const content = await loadEditableContent(req.params.id, req.user.tenant_id);
+      if (!content) return res.status(404).json({ error: 'Nie znaleziono.' });
+      if (!['draft', 'in_review', 'needs_update'].includes(content.status)) {
+        return res.status(409).json({ error: 'Miejsca można uzupełniać tylko przed zatwierdzeniem wpisu.' });
+      }
+      const slot = content.enrichment_slots.find((s) => s.id === req.params.slotId);
+      if (!slot) return res.status(404).json({ error: 'Nie znaleziono miejsca do uzupełnienia.' });
+
+      // Which fields are required depends on the slot's type, known only after loading it.
+      for (const check of SLOT_VALUE_VALIDATORS[slot.type]) await check.run(req);
+      const invalid = validationResult(req);
+      if (!invalid.isEmpty()) {
+        return res.status(400).json({
+          error: 'Uzupełnij wymagane pola.',
+          details: invalid.array().map((e) => ({ field: e.path, message: e.msg })),
+        });
+      }
+
+      let value;
+      if (slot.type === 'screenshot') {
+        const { rows } = await db.query(
+          `SELECT id, caption FROM seo_screenshots WHERE id = $1 AND tenant_id = $2`,
+          [req.body.screenshot_id, req.user.tenant_id],
+        );
+        if (!rows[0]) return res.status(400).json({ error: 'Nieznany screen.' });
+        value = { screenshot_id: rows[0].id, caption: rows[0].caption };
+      } else if (slot.type === 'quote') {
+        const { text, author, author_role, source_title, source_url } = req.body;
+        value = { text, author, author_role: author_role || null, source_title: source_title || null, source_url: source_url || null };
+      } else {
+        const { text, author_name, author_role } = req.body;
+        value = { text, author_name, author_role: author_role || null };
+      }
+
+      const updated = await saveSlotChange(content, slot.id, slots.renderSlotMarkdown(slot.type, value), { status: 'filled', value });
+      if (!updated) return res.status(409).json({ error: 'Znacznika tego miejsca nie ma już w treści (usunięty przy edycji?).' });
+      res.json(updated);
+    } catch (err) { next(err); }
+  },
+);
+
+router.post('/content/:id/slots/:slotId/remove',
+  requireSeoEditor,
+  [param('id').isInt(), param('slotId').matches(/^[a-z0-9_-]+$/i)],
+  validate,
+  async (req, res, next) => {
+    try {
+      const content = await loadEditableContent(req.params.id, req.user.tenant_id);
+      if (!content) return res.status(404).json({ error: 'Nie znaleziono.' });
+      if (!['draft', 'in_review', 'needs_update'].includes(content.status)) {
+        return res.status(409).json({ error: 'Miejsca można usuwać tylko przed zatwierdzeniem wpisu.' });
+      }
+      const slot = content.enrichment_slots.find((s) => s.id === req.params.slotId);
+      if (!slot) return res.status(404).json({ error: 'Nie znaleziono miejsca do uzupełnienia.' });
+      const updated = await saveSlotChange(content, slot.id, '', { status: 'removed' });
+      if (!updated) return res.status(409).json({ error: 'Znacznika tego miejsca nie ma już w treści (usunięty przy edycji?).' });
+      res.json(updated);
     } catch (err) { next(err); }
   },
 );
@@ -339,11 +474,15 @@ router.post('/content/:id/approve',
       // Author is mandatory before publish (E-E-A-T requirement) — checked here rather
       // than a NOT NULL column, so drafts can still be written/edited without one.
       const { rows: existing } = await db.query(
-        `SELECT status, author_id FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
+        `SELECT status, author_id, body FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
         [req.params.id, req.user.tenant_id],
       );
       if (!existing[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
       if (!existing[0].author_id) return res.status(409).json({ error: 'Wpis musi mieć przypisanego autora przed zatwierdzeniem.' });
+      const openSlots = slots.openSlotIds(existing[0].body);
+      if (openSlots.length) {
+        return res.status(409).json({ error: `Uzupełnij albo usuń miejsca do uzupełnienia przed zatwierdzeniem (pozostało: ${openSlots.length}).` });
+      }
 
       // Approving with a future scheduled_at queues it instead of publishing immediately —
       // the scheduler job (jobs/seo-scheduler.js) flips it to published when the time comes.
@@ -361,7 +500,10 @@ router.post('/content/:id/approve',
       // One-click publish: approving also fires social publishing to every connected
       // platform. Fire-and-forget — a slow/failed platform never blocks the response,
       // per-platform outcome lands in seo_social_posts (retry button in the panel).
-      if (rows[0].status === 'published') socialService.publishToConnectedPlatforms(rows[0].id, req.user.tenant_id, config.frontendUrl);
+      if (rows[0].status === 'published') {
+        socialService.publishToConnectedPlatforms(rows[0].id, req.user.tenant_id, config.frontendUrl);
+        indexNowService.notifyArticleChanged(rows[0].id, req.user.tenant_id);
+      }
       res.json(rows[0]);
     } catch (err) { next(err); }
   },
@@ -376,14 +518,76 @@ router.post('/content/:id/unpublish',
     try {
       const { rows } = await db.query(
         `UPDATE seo_content_pieces
-            SET status = 'draft', published_at = NULL, scheduled_at = NULL, reviewed_by = $3
+            SET status = 'draft', published_at = NULL, scheduled_at = NULL, reviewed_by = $3,
+                refresh_reason = NULL, refresh_requested_at = NULL, refresh_signal = NULL,
+                refresh_status = NULL, refresh_draft = NULL, refresh_error = NULL
           WHERE id = $1 AND tenant_id = $2 AND status IN ('published', 'scheduled')
           RETURNING *`,
         [req.params.id, req.user.tenant_id, req.user.id],
       );
       if (!rows[0]) return res.status(409).json({ error: 'Wpis nie jest opublikowany ani zaplanowany.' });
       logger.info('SEO content unpublished', { contentId: req.params.id, unpublishedBy: req.user.id });
+      // IndexNow also takes removed URLs — the engine recrawls, gets the 404, drops it.
+      indexNowService.notifyArticleChanged(rows[0].id, req.user.tenant_id);
       res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── Content refresh (seoRefreshService) — the article stays published the
+// whole time; a proposed revision goes live only via /refresh/apply. ──────
+router.post('/content/:id/refresh/request',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const row = await refreshService.requestRefresh(req.params.id, req.user.tenant_id);
+      if (!row) return res.status(409).json({ error: 'Wpis nie jest opublikowany albo już czeka na odświeżenie.' });
+      res.json(row);
+    } catch (err) { next(err); }
+  },
+);
+
+// 202 + background work: generation runs several minutes, longer than the
+// ingress keeps a request open. The panel polls GET /content/:id for refresh_status.
+router.post('/content/:id/refresh/generate',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const started = await refreshService.startDraftGeneration(req.params.id, req.user.tenant_id);
+      if (!started) return res.status(409).json({ error: 'Wpis nie czeka na odświeżenie albo propozycja jest już generowana.' });
+      logger.info('SEO refresh draft generation started', { contentId: req.params.id, triggeredBy: req.user.id });
+      res.status(202).json({ refresh_status: 'generating' });
+    } catch (err) { next(err); }
+  },
+);
+
+router.post('/content/:id/refresh/apply',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const row = await refreshService.applyRefresh(req.params.id, req.user.tenant_id);
+      if (!row) return res.status(409).json({ error: 'Brak gotowej propozycji odświeżenia do zastosowania.' });
+      logger.info('SEO refresh applied', { contentId: req.params.id, appliedBy: req.user.id });
+      res.json(row);
+    } catch (err) { next(err); }
+  },
+);
+
+router.post('/content/:id/refresh/dismiss',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const row = await refreshService.dismissRefresh(req.params.id, req.user.tenant_id);
+      if (!row) return res.status(409).json({ error: 'Wpis nie czeka na odświeżenie albo propozycja jest właśnie generowana.' });
+      res.json(row);
     } catch (err) { next(err); }
   },
 );
@@ -409,27 +613,26 @@ router.post('/content/:id/reject',
 );
 
 // ── POST /api/crm/seo/content/generate — manually trigger one article ─────
-// (autopilot/cron scheduling is a follow-up; this is the trigger used for
-// testing and for on-demand generation in the meantime).
+// Runs in the background (seoGenerationJobService): 202 with the job, the
+// panel polls GET /content/generate/status until it's done or failed.
 router.post('/content/generate',
   requireSeoEditor,
   async (req, res, next) => {
     try {
-      const { rows: tenantRows } = await db.query(
-        `SELECT seo_daily_article_limit FROM tenants WHERE id = $1`,
-        [req.user.tenant_id],
-      );
-      const limit = tenantRows[0]?.seo_daily_article_limit ?? 0;
-      const generatedToday = await seoContentService.countGeneratedToday(req.user.tenant_id);
-      if (generatedToday >= limit) {
-        return res.status(429).json({ error: `Osiągnięto dzienny limit artykułów (${limit}).` });
-      }
-      const content = await seoContentService.generateArticle(req.user.tenant_id);
-      logger.info('SEO content generation triggered', { tenantId: req.user.tenant_id, contentId: content.id, triggeredBy: req.user.id });
-      res.status(201).json(content);
+      const result = await generationJobService.startJob(req.user.tenant_id, req.user.id);
+      if (result.error) return res.status(result.status).json({ error: result.error, job: result.job });
+      logger.info('SEO content generation started', { tenantId: req.user.tenant_id, jobId: result.job.id, triggeredBy: req.user.id });
+      res.status(202).json(result.job);
     } catch (err) { next(err); }
   },
 );
+
+// ── GET /api/crm/seo/content/generate/status — the tenant's latest job ────
+router.get('/content/generate/status', async (req, res, next) => {
+  try {
+    res.json(await generationJobService.latestJob(req.user.tenant_id));
+  } catch (err) { next(err); }
+});
 
 // ── GET /api/crm/seo/pillars — content strategy map (viewers, like /content) ──
 router.get('/pillars', async (req, res, next) => {
@@ -644,6 +847,98 @@ router.delete('/authors/:id',
   },
 );
 
+// ── Product screenshot library — tagged by feature so the generator can put a
+// matching screenshot into an article by itself (utils/seoSlots.js). ────────
+const screenshotUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    cb(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype));
+  },
+});
+
+router.get('/screenshots', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, feature_tag, caption, created_at FROM seo_screenshots WHERE tenant_id = $1 ORDER BY feature_tag, id`,
+      [req.user.tenant_id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+router.post('/screenshots',
+  requireSeoEditor,
+  screenshotUpload.single('file'),
+  [
+    body('feature_tag').isString().trim().notEmpty().isLength({ max: 80 }),
+    body('caption').isString().trim().notEmpty().isLength({ max: 300 }),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'Brak pliku (dozwolone: JPEG, PNG, WebP, max 8 MB).' });
+      const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[req.file.mimetype];
+      const blobPath = `seo-screenshots/${req.user.tenant_id}/${Date.now()}.${ext}`;
+      await storageService.uploadBuffer(blobPath, req.file.buffer, req.file.mimetype);
+      const { rows } = await db.query(
+        `INSERT INTO seo_screenshots (tenant_id, blob_path, feature_tag, caption)
+         VALUES ($1, $2, $3, $4) RETURNING id, feature_tag, caption, created_at`,
+        [req.user.tenant_id, blobPath, req.body.feature_tag, req.body.caption],
+      );
+      res.status(201).json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+router.patch('/screenshots/:id',
+  requireSeoEditor,
+  [
+    param('id').isInt(),
+    body('feature_tag').optional().isString().trim().notEmpty().isLength({ max: 80 }),
+    body('caption').optional().isString().trim().notEmpty().isLength({ max: 300 }),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const fields = ['feature_tag', 'caption'].filter((f) => req.body[f] !== undefined);
+      if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
+      const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(', ');
+      const { rows } = await db.query(
+        `UPDATE seo_screenshots SET ${setClause} WHERE id = $1 AND tenant_id = $2
+         RETURNING id, feature_tag, caption, created_at`,
+        [req.params.id, req.user.tenant_id, ...fields.map((f) => req.body[f])],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// Same posture as deleting an author: an article already showing the image
+// would silently lose it, so deleting is blocked while one does.
+router.delete('/screenshots/:id',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows: inUse } = await db.query(
+        `SELECT 1 FROM seo_content_pieces WHERE tenant_id = $1 AND body LIKE $2 LIMIT 1`,
+        [req.user.tenant_id, `%(${slots.screenshotUrl(req.params.id)})%`],
+      );
+      if (inUse.length) return res.status(409).json({ error: 'Screen jest użyty w artykule — usuń go najpierw z treści.' });
+      const { rows } = await db.query(
+        `DELETE FROM seo_screenshots WHERE id = $1 AND tenant_id = $2 RETURNING blob_path`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      await storageService.deleteBlob(rows[0].blob_path);
+      res.status(204).end();
+    } catch (err) { next(err); }
+  },
+);
+
 // ── Competitor research — editors maintain the list, seoStrategyService reads
 // it when (re)generating the content pillar map ───────────────────────────
 router.get('/competitors', async (req, res, next) => {
@@ -783,6 +1078,18 @@ router.get('/gsc/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Lets a tenant redo the OAuth connect with a different Google account —
+// added after finding (2026-09-26) a tenant connected with an account that
+// owns zero verified Search Console properties, so every gapQueries/sync
+// call failed with a permission error. No API-side way to detect that
+// ahead of time; disconnect + reconnect is the fix.
+router.delete('/gsc/disconnect', requireSeoEditor, async (req, res, next) => {
+  try {
+    await db.query('DELETE FROM tenant_gsc_tokens WHERE tenant_id = $1', [req.user.tenant_id]);
+    res.json({ disconnected: true });
+  } catch (err) { next(err); }
+});
+
 // ── POST /api/crm/seo/gsc/sync — manual metrics sync (the daily job runs at 07:00) ──
 router.post('/gsc/sync', requireSeoEditor, async (req, res, next) => {
   try {
@@ -828,11 +1135,22 @@ router.delete('/social/accounts/:platform',
   },
 );
 
+// Without the app credentials the user was sent to LinkedIn/Facebook with an
+// empty client_id and only saw the provider's own cryptic error page
+// ("You need to pass the client_id parameter", 2026-09-28).
 router.get('/social/linkedin/oauth/url', requireSeoEditor, (req, res) => {
+  if (!config.linkedin.clientId || !config.linkedin.clientSecret) {
+    logger.error('LinkedIn connect attempted without LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET configured');
+    return res.status(503).json({ error: 'Integracja z LinkedIn nie jest skonfigurowana na serwerze (brak danych aplikacji LinkedIn). Skontaktuj się z administratorem.' });
+  }
   res.json({ url: linkedinService.getAuthUrl(req.user.tenant_id, req.user.id) });
 });
 
 router.get('/social/facebook/oauth/url', requireSeoEditor, (req, res) => {
+  if (!config.meta.appId || !config.meta.appSecret) {
+    logger.error('Facebook connect attempted without META_APP_ID / META_APP_SECRET configured');
+    return res.status(503).json({ error: 'Integracja z Facebookiem nie jest skonfigurowana na serwerze (brak danych aplikacji Meta). Skontaktuj się z administratorem.' });
+  }
   res.json({ url: metaService.getAuthUrl(req.user.tenant_id, req.user.id) });
 });
 
@@ -859,12 +1177,13 @@ router.post('/social/wordpress/connect',
 );
 
 // ── Tenant SEO settings — business_description/industry_vertical feed the
-// content-pillar generator (seoStrategyService). Any SEO editor can tune
+// content-pillar generator (seoStrategyService); business_description and
+// product_name also tell every article what the product actually does. Any SEO editor can tune
 // these, same permission as the rest of this module. ─────────────────────
 router.get('/tenant-settings', async (req, res, next) => {
   try {
     const { rows } = await db.query(
-      `SELECT t.business_description, t.industry_vertical,
+      `SELECT t.business_description, t.industry_vertical, t.product_name,
               w.site_url AS wordpress_site_url
          FROM tenants t
          LEFT JOIN tenant_wordpress_connections w ON w.tenant_id = t.id
@@ -880,16 +1199,17 @@ router.patch('/tenant-settings',
   [
     body('business_description').optional({ nullable: true }).isString().trim(),
     body('industry_vertical').optional({ nullable: true }).isString().trim(),
+    body('product_name').optional({ nullable: true }).isString().trim().isLength({ max: 120 }),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const fields = ['business_description', 'industry_vertical'].filter((f) => req.body[f] !== undefined);
+      const fields = ['business_description', 'industry_vertical', 'product_name'].filter((f) => req.body[f] !== undefined);
       if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
       const values = fields.map((f) => req.body[f]);
       const setClause = fields.map((f, i) => `${f} = $${i + 2}`).join(', ');
       const { rows } = await db.query(
-        `UPDATE tenants SET ${setClause} WHERE id = $1 RETURNING business_description, industry_vertical`,
+        `UPDATE tenants SET ${setClause} WHERE id = $1 RETURNING business_description, industry_vertical, product_name`,
         [req.user.tenant_id, ...values],
       );
       res.json(rows[0]);
@@ -915,6 +1235,32 @@ router.patch('/tenant-settings/wordpress-publish-mode',
     try {
       await db.query(`UPDATE tenants SET wordpress_publish_mode = $1 WHERE id = $2`, [req.body.wordpress_publish_mode, req.user.tenant_id]);
       res.json({ wordpress_publish_mode: req.body.wordpress_publish_mode });
+    } catch (err) { next(err); }
+  },
+);
+
+// ── Search Console property override — see migration 0247's comment: the
+// GSC OAuth callback needs this to match the tenant's actual verified GSC
+// property (a URL-prefix property like https://client.pl/, or a domain
+// property like sc-domain:client.pl), instead of guessing a subdomain that
+// was never a real property (found broken 2026-09-26 — this column existed
+// since 0247 but the callback never read it until the fix alongside this).
+router.get('/tenant-settings/gsc-site-url', requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await db.query(`SELECT seo_gsc_site_url FROM tenants WHERE id = $1`, [req.user.tenant_id]);
+    res.json({ seo_gsc_site_url: rows[0]?.seo_gsc_site_url ?? null });
+  } catch (err) { next(err); }
+});
+
+router.patch('/tenant-settings/gsc-site-url',
+  requireSuperAdmin,
+  [body('seo_gsc_site_url').optional({ nullable: true }).isString().trim()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const value = req.body.seo_gsc_site_url?.trim() || null;
+      await db.query(`UPDATE tenants SET seo_gsc_site_url = $1 WHERE id = $2`, [value, req.user.tenant_id]);
+      res.json({ seo_gsc_site_url: value });
     } catch (err) { next(err); }
   },
 );

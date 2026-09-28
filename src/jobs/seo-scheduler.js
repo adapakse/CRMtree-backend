@@ -9,6 +9,7 @@ const db = require('../config/database');
 const config = require('../config');
 const logger = require('../utils/logger');
 const socialService = require('../services/seoSocialService');
+const indexNowService = require('../services/indexNowService');
 
 async function publishDueArticles() {
   try {
@@ -21,6 +22,7 @@ async function publishDueArticles() {
     for (const row of rows) {
       logger.info('[seo-scheduler] Published scheduled article', { contentId: row.id, tenantId: row.tenant_id, title: row.title });
       socialService.publishToConnectedPlatforms(row.id, row.tenant_id, config.frontendUrl); // fire-and-forget
+      indexNowService.notifyArticleChanged(row.id, row.tenant_id); // fire-and-forget
     }
   } catch (err) {
     logger.error('[seo-scheduler] Tick error', { error: err.message });

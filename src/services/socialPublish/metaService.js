@@ -11,7 +11,7 @@
 // until granted, calls here fail with a permissions error from Meta, same
 // as any other publish failure (see seoSocialService).
 //
-// NOTE: Graph API is versioned in the URL (v21.0 below). Bump periodically —
+// NOTE: Graph API is versioned in the URL (GRAPH_VERSION below). Bump periodically —
 // Meta deprecates old versions on a schedule, check developers.facebook.com.
 // ─────────────────────────────────────────────────────────────────
 
@@ -21,7 +21,7 @@ const config = require('../../config');
 const logger = require('../../utils/logger');
 const { encrypt, decrypt } = require('../../utils/encrypt');
 
-const GRAPH_VERSION = 'v21.0'; // verify/bump against current Meta docs
+const GRAPH_VERSION = 'v24.0'; // bumped 2026-09-28 from v21.0; Meta retires versions ~2 years after release
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
 const AUTH_BASE = `https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth`;
 const SCOPES = ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement', 'instagram_basic', 'instagram_content_publish'];

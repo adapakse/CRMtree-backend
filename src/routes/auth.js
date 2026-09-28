@@ -7,6 +7,7 @@ const db       = require('../config/database');
 const audit    = require('../services/auditService');
 const logger   = require('../utils/logger');   // ← DODANY (brakowało)
 const bcrypt   = require('bcryptjs');
+const rateLimit = require('express-rate-limit');
 const { requireAuth, requireAdmin, signAccessToken, signRefreshToken, saveRefreshToken } = require('../middleware/auth');
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
@@ -150,20 +151,43 @@ router.post('/refresh', injectAuditContext, async (req, res, next) => {
               u.tenant_id, u.is_super_admin
        FROM refresh_tokens rt
        JOIN users u ON u.id = rt.user_id
-       WHERE rt.token_hash = $1 AND rt.revoked = FALSE AND rt.expires_at > NOW()`,
+       WHERE rt.token_hash = $1`,
       [hash]
     );
-    if (!rows.length) return res.status(401).json({ error: 'Invalid or expired refresh token' });
     const row = rows[0];
-    if (!row.is_active) return res.status(401).json({ error: 'Account inactive' });
 
-    // Rotacja: unieważnij stary, wydaj nowy
-    await db.query('UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1', [hash]);
+    // A rotated mobile token presented again means it was copied — the
+    // legitimate app always holds only the newest one. Revoke the whole
+    // family (this account on this device) so a stolen token dies with it.
+    if (row?.revoked && row.client === 'mobile') {
+      await db.query(
+        `UPDATE refresh_tokens SET revoked = TRUE
+          WHERE user_id = $1 AND device_id = $2 AND client = 'mobile' AND revoked = FALSE`,
+        [row.user_id, row.device_id]
+      );
+      logger.warn('[auth] Mobile refresh token reuse — device family revoked', { userId: row.user_id, deviceId: row.device_id });
+      return res.status(401).json({ error: 'Invalid or expired refresh token', code: 'REFRESH_TOKEN_REUSED' });
+    }
+    if (!row || row.revoked || new Date(row.expires_at) <= new Date()) {
+      return res.status(401).json({ error: 'Invalid or expired refresh token' });
+    }
+    if (!row.is_active) return res.status(401).json({ error: 'Account inactive' });
+    if (await isTenantDeleted(row.tenant_id)) return res.status(401).json({ error: 'Tenant nie jest już dostępny.' });
+
+    // Rotacja: unieważnij stary, wydaj nowy. revoked = FALSE in the WHERE
+    // makes it atomic — two concurrent refreshes with one token can't both win.
+    const { rowCount } = await db.query(
+      'UPDATE refresh_tokens SET revoked = TRUE, last_used_at = NOW() WHERE token_hash = $1 AND revoked = FALSE',
+      [hash]
+    );
+    if (!rowCount) return res.status(401).json({ error: 'Invalid or expired refresh token' });
     const user       = { id: row.uid, email: row.email, display_name: row.display_name,
                          is_admin: row.is_admin, tenant_id: row.tenant_id, is_super_admin: row.is_super_admin };
     const newAccess  = signAccessToken(user);
     const { token: newRefresh, hash: newHash } = signRefreshToken(user);
-    await saveRefreshToken(user.id, user.tenant_id, newHash);
+    await saveRefreshToken(user.id, user.tenant_id, newHash, {
+      client: row.client, deviceId: row.device_id, deviceName: row.device_name,
+    });
 
     res.json({ access_token: newAccess, refresh_token: newRefresh });
   } catch (err) { next(err); }
@@ -253,6 +277,111 @@ router.post('/login', injectAuditContext, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─── POST /api/auth/mobile/login — email + password for the mobile app ──────
+// ADR 001 §2 (crmtree-frontend docs/adr): one email may have active accounts
+// in several tenants, each with its own password. The password is checked
+// against all of them and the response lists every tenant it matched, each
+// with its own device-bound tokens. Tenant names are only revealed after a
+// correct password — never for just an email.
+const MOBILE_ROLES = ['salesperson', 'sales_manager'];
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const mobileLoginRateLimitMessage = { error: 'Zbyt wiele prób logowania. Spróbuj ponownie za kilka minut.', code: 'RATE_LIMITED' };
+const mobileLoginLimitByIp = rateLimit({
+  windowMs: LOGIN_WINDOW_MS, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false,
+  message: mobileLoginRateLimitMessage,
+});
+// Per email as well: an attacker rotating IPs still can't hammer one account.
+const mobileLoginLimitByEmail = rateLimit({
+  windowMs: LOGIN_WINDOW_MS, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false,
+  message: mobileLoginRateLimitMessage,
+  keyGenerator: (req) => `mobile-login:${String(req.body?.email ?? '').trim().toLowerCase()}`,
+});
+// bcrypt hash of a random string: compared against when an email has no
+// candidate accounts, so "unknown email" takes as long as "wrong password".
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 12);
+
+router.post('/mobile/login', mobileLoginLimitByIp, mobileLoginLimitByEmail, injectAuditContext, async (req, res, next) => {
+  try {
+    const { email, password, device_id: deviceId, device_name: deviceName } = req.body ?? {};
+    if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
+      return res.status(400).json({ error: 'email i password są wymagane' });
+    }
+    if (typeof deviceId !== 'string' || deviceId.length < 8 || deviceId.length > 128) {
+      return res.status(400).json({ error: 'device_id jest wymagane (8-128 znaków)' });
+    }
+    const safeDeviceName = typeof deviceName === 'string' ? deviceName.slice(0, 100) : null;
+
+    // On a tenant subdomain only that tenant counts, like the web login; the
+    // app itself always calls the universal host.
+    const hostTenantId = await resolveHostTenantId(req);
+    if (hostTenantId === null) return res.status(401).json({ error: 'Nieprawidłowy email lub hasło' });
+    const params = [email];
+    let tenantFilter = '';
+    if (hostTenantId !== undefined) {
+      tenantFilter = 'AND u.tenant_id = $2';
+      params.push(hostTenantId);
+    }
+
+    const { rows: candidates } = await db.query(
+      `SELECT u.id, u.email, u.first_name, u.last_name, u.display_name, u.is_admin, u.crm_role,
+              u.tenant_id, u.is_super_admin, u.password_hash, u.must_change_password,
+              t.slug AS tenant_slug, t.name AS tenant_name
+         FROM users u
+         JOIN tenants t ON t.id = u.tenant_id
+        WHERE lower(trim(u.email)) = lower(trim($1))
+          AND u.is_active AND t.is_active AND t.deleted_at IS NULL
+          AND u.password_hash IS NOT NULL ${tenantFilter}
+        ORDER BY t.name`,
+      params
+    );
+
+    if (!candidates.length) {
+      await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+      return res.status(401).json({ error: 'Nieprawidłowy email lub hasło' });
+    }
+
+    const matched = [];
+    for (const account of candidates) {
+      if (await bcrypt.compare(password, account.password_hash)) matched.push(account);
+    }
+    if (!matched.length) return res.status(401).json({ error: 'Nieprawidłowy email lub hasło' });
+
+    const allowed = matched.filter((a) => MOBILE_ROLES.includes(a.crm_role));
+    if (!allowed.length) {
+      return res.status(403).json({
+        error: 'Aplikacja mobilna CRMtree jest przeznaczona dla handlowców. Zaloguj się w przeglądarce.',
+        code: 'MOBILE_ROLE_NOT_ALLOWED',
+      });
+    }
+
+    const accounts = [];
+    for (const user of allowed) {
+      const accessToken = signAccessToken(user);
+      const { token: refreshToken, hash } = signRefreshToken(user);
+      await saveRefreshToken(user.id, user.tenant_id, hash, { client: 'mobile', deviceId, deviceName: safeDeviceName });
+      await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+      await audit.log({
+        user,
+        action:    'user_login',
+        metadata:  { method: 'password_mobile', device_name: safeDeviceName },
+        ipAddress: req.auditContext?.ipAddress,
+        userAgent: req.auditContext?.userAgent,
+      });
+      accounts.push({
+        tenant_slug:          user.tenant_slug,
+        tenant_name:          user.tenant_name,
+        access_token:         accessToken,
+        refresh_token:        refreshToken,
+        must_change_password: user.must_change_password,
+        user: { id: user.id, display_name: user.display_name, crm_role: user.crm_role },
+      });
+    }
+
+    logger.info('Mobile login', { userIds: allowed.map((u) => u.id), tenants: accounts.length });
+    res.json({ accounts });
+  } catch (err) { next(err); }
+});
+
 // ─── POST /api/auth/change-password ─────────────────────────────────────────
 router.post('/change-password', requireAuth, async (req, res, next) => {
   try {
@@ -280,6 +409,16 @@ router.post('/change-password', requireAuth, async (req, res, next) => {
     await db.query(
       'UPDATE users SET password_hash = $1, must_change_password = false WHERE id = $2',
       [newHash, req.user.id]
+    );
+
+    // A password change logs this account out of its phones (ADR 001 §4) —
+    // except the device making the change, when the app sends its device_id
+    // (e.g. the forced must_change_password step right after mobile login).
+    await db.query(
+      `UPDATE refresh_tokens SET revoked = TRUE
+        WHERE user_id = $1 AND client = 'mobile' AND revoked = FALSE
+          AND device_id IS DISTINCT FROM $2`,
+      [req.user.id, typeof req.body.device_id === 'string' ? req.body.device_id : null]
     );
 
     logger.info('Password changed', { userId: req.user.id });

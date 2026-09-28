@@ -20,8 +20,16 @@ const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { requireFeature } = require('../middleware/crm-rbac');
 const { validate } = require('../middleware/errorHandler');
 const enrichSvc = require('../services/prospectEnrichmentService');
+const discoverySvc = require('../services/competitorDiscoveryService');
 const tenantIcpConfigService = require('../services/tenantIcpConfigService');
 const { normalizeWebsiteUrl, normalizeLinkedinUrl } = require('../utils/urlUtils');
+
+// Kontakty z AI bywają dłuższe niż kolumny crm_leads/crm_lead_contacts (np. stanowisko
+// albo dwa numery w jednym polu) — bez przycięcia INSERT leciałby 22001.
+function cut(value, maxLength) {
+  const text = value == null ? '' : String(value).trim();
+  return text ? text.slice(0, maxLength) : null;
+}
 
 // ── "Prospekty" group check (mirrors the group_profiles/user_group_roles
 // pattern already used for SEO editorial access — no new permission system) ──
@@ -978,6 +986,160 @@ router.delete('/icp-signals/:signalId',
   },
 );
 
+// Górny limit firm w jednym wywołaniu bulk-add — model zwraca maksymalnie
+// MAX_RESULTS, więc większa paczka oznacza spreparowane żądanie, nie UI.
+const MAX_BULK_ADD = discoverySvc.MAX_RESULTS;
+
+// ── "Znajdź konkurencję" ───────────────────────────────────────────
+// Port z worktrips-doc. Wszystkie trzy trasy siedzą pod tym samym
+// router.use(requireAuth / requireFeature('prospects') / requireProspectsAccess)
+// co reszta modułu — nie ma tu własnej autoryzacji i nie może być.
+
+// ── GET /discover-competitors-stream ──────────────────────────────
+// SSE: wyniki spływają na bieżąco.
+router.get('/discover-competitors-stream',
+  [
+    query('company_name').isString().trim().notEmpty().isLength({ max: 255 }),
+    query('seed_nip').isString().customSanitizer(v => String(v).replace(/\D/g, ''))
+      .isLength({ min: 10, max: 10 }).withMessage('seed_nip: dokładnie 10 cyfr'),
+  ],
+  validate,
+  async (req, res) => {
+    const { company_name, seed_nip } = req.query;
+
+    res.setHeader('Content-Type',  'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection',    'keep-alive');
+    res.flushHeaders();
+
+    const send = (data) => {
+      if (!res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      await discoverySvc.discoverStream(
+        req.user.tenant_id, req.user.id, company_name, seed_nip,
+        {
+          onIndustry: (industry) => send({ type: 'industry', industry }),
+          onCompany:  (company)  => send({ type: 'company',  ...company }),
+        },
+      );
+      send({ type: 'done' });
+    } catch (err) {
+      logger.error('[Discovery] Stream error', { tenantId: req.user.tenant_id, message: err.message });
+      send({ type: 'error', message: 'Błąd wyszukiwania konkurencji.' });
+    }
+
+    res.end();
+  },
+);
+
+// ── POST /discover-competitors ─────────────────────────────────────
+// offset 0 → pełny pipeline; offset 5/10 → z cache (bez kosztu).
+router.post('/discover-competitors',
+  [
+    body('company_name').isString().trim().notEmpty().isLength({ max: 255 }),
+    body('seed_nip').isString().customSanitizer(v => String(v).replace(/\D/g, ''))
+      .isLength({ min: 10, max: 10 }).withMessage('seed_nip: dokładnie 10 cyfr'),
+    body('offset').optional().isInt({ min: 0, max: 10 }).toInt(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { company_name, seed_nip, offset = 0 } = req.body;
+      const result = await discoverySvc.discover(
+        req.user.tenant_id, req.user.id, company_name, seed_nip, offset,
+      );
+      res.json(result);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── POST /discover-competitors/bulk-add ────────────────────────────
+// Dodaje zaznaczone firmy do prospect_companies TEGO tenanta i uruchamia batch.
+// source_database generowany automatycznie: {inicjały}_{YYYYMMDD}_{N}.
+router.post('/discover-competitors/bulk-add',
+  [
+    body('companies').isArray({ min: 1, max: MAX_BULK_ADD }),
+    body('companies.*.nip').isString(),
+    body('companies.*.company_name').optional({ nullable: true }).isString().trim().isLength({ max: 255 }),
+    body('companies.*.website_url').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { companies } = req.body;
+      const tenantId = req.user.tenant_id;
+
+      const { rows: userRows } = await db.query(
+        'SELECT first_name, last_name FROM users WHERE id = $1 AND tenant_id = $2',
+        [req.user.id, tenantId],
+      );
+      const u = userRows[0] || {};
+      const initials = ((u.first_name?.[0] || 'X') + (u.last_name?.[0] || 'X')).toUpperCase();
+      const dateStr  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const prefix   = `${initials}_${dateStr}`;
+
+      // Numer sekwencyjny liczony W OBRĘBIE TENANTA — dwaj użytkownicy różnych
+      // tenantów o tych samych inicjałach nie mogą na siebie nachodzić.
+      const { rows: seqRows } = await db.query(
+        `SELECT COUNT(DISTINCT source_database)::int AS cnt
+           FROM prospect_companies
+          WHERE tenant_id = $1 AND imported_by = $2
+            AND source_database LIKE $3
+            AND imported_at::date = CURRENT_DATE`,
+        [tenantId, req.user.id, `${prefix}_%`],
+      );
+      const sourceName = `${prefix}_${(seqRows[0]?.cnt || 0) + 1}`;
+
+      // Ta sama reguła grupy co przy imporcie CSV — pierwsza grupa użytkownika
+      // z dostępem 'full'. Bez tego rekordy wpadłyby jako legacy (group_id NULL),
+      // czyli widoczne dla całego tenanta niezależnie od grup.
+      const { rows: groupRows } = await db.query(
+        `SELECT group_id FROM user_group_roles
+          WHERE user_id = $1 AND access_level = 'full'
+          ORDER BY group_id LIMIT 1`,
+        [req.user.id],
+      );
+      const groupId = groupRows[0]?.group_id || null;
+
+      let added = 0, skipped = 0;
+      for (const c of companies) {
+        const nipClean = String(c.nip || '').replace(/\D/g, '');
+        if (nipClean.length !== 10) { skipped++; continue; }
+
+        try {
+          const { rowCount } = await db.query(
+            `INSERT INTO prospect_companies
+               (tenant_id, nip, company_name, website_url, website_source,
+                source_database, group_id, imported_by, enrichment_status)
+             VALUES ($1, $2, $3, $4, 'ai_discovery', $5, $6, $7, 'pending')
+             ON CONFLICT (tenant_id, nip) DO NOTHING`,
+            [tenantId, nipClean, c.company_name || null, c.website_url || null,
+             sourceName, groupId, req.user.id],
+          );
+          if (rowCount > 0) added++; else skipped++;
+        } catch (err) {
+          logger.warn('[Discovery] Insert failed', { tenantId, nip: nipClean, error: err.message });
+          skipped++;
+        }
+      }
+
+      // Batch enrichmentu jest per-tenant — uruchamiamy TYLKO dla tego tenanta
+      // i tylko jeśli jego własny batch nie jest już w toku.
+      let batchStarted = false;
+      if (added > 0 && !enrichSvc.getBatchProgress(tenantId).running) {
+        enrichSvc.runBatch(tenantId).catch(err =>
+          logger.error('[Discovery] Batch failed', { tenantId, error: err.message }));
+        batchStarted = true;
+      }
+
+      logger.info('[Discovery] Bulk add', { tenantId, sourceName, added, skipped, batchStarted });
+      res.json({ source_database: sourceName, added, skipped, batchStarted });
+    } catch (err) { next(err); }
+  },
+);
+
 // ── GET /:id/prompt — rekonstrukcja promptu wysłanego do Claude ────
 
 router.get('/:id/prompt',
@@ -1026,7 +1188,6 @@ router.get('/:id/prompt',
     } catch (err) { next(err); }
   }
 );
-
 // ── POST /:id/to-lead ──────────────────────────────────────────────
 
 router.post('/:id/to-lead',
@@ -1076,17 +1237,17 @@ router.post('/:id/to-lead',
         }
         if (Array.isArray(contacts409) && contacts409.length) {
           const { rows: existingC } = await db.query(
-            'SELECT COUNT(*) AS cnt FROM crm_lead_contacts WHERE lead_id = $1',
-            [p.crm_lead_id]
+            'SELECT COUNT(*) AS cnt FROM crm_lead_contacts WHERE lead_id = $1 AND tenant_id = $2',
+            [p.crm_lead_id, req.user.tenant_id]
           );
           if (parseInt(existingC[0].cnt) === 0) {
             for (const c of contacts409) {
-              if (!c.name && !c.email) continue;
+              if (!c.name && !c.email && !c.phone) continue;
               try {
                 await db.query(
-                  `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone)
-                   VALUES ($1, $2, $3, $4, $5)`,
-                  [p.crm_lead_id, c.name || null, c.title || null, c.email || null, c.phone || null]
+                  `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone, tenant_id)
+                   VALUES ($1, $2, $3, $4, $5, $6)`,
+                  [p.crm_lead_id, cut(c.name, 200), cut(c.title, 100), cut(c.email, 200), cut(c.phone, 50), req.user.tenant_id]
                 );
               } catch (e) {
                 logger.warn('[Prospects] Could not sync contact to existing lead', { error: e.message });
@@ -1156,36 +1317,12 @@ router.post('/:id/to-lead',
 
       const nipForLead = p.nip ? `PL${p.nip}` : null;
 
-      const { rows: leadRows } = await db.query(
-        `INSERT INTO crm_leads
-           (tenant_id, company, nip, notes, tags, stage, probability, source, website, assigned_to, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, 'new', $6, 'Prospekt', $7, $8, NOW(), NOW())
-         RETURNING id`,
-        [
-          req.user.tenant_id,
-          p.company_name || p.nip,
-          nipForLead,
-          notes || null,
-          tags,
-          p.icp_score != null ? p.icp_score : null,
-          p.website_url || null,
-          assignedTo,
-        ]
-      );
-      const leadId = leadRows[0].id;
-
-      await db.query(
-        `UPDATE prospect_companies
-         SET crm_lead_id = $2, enrichment_status = 'lead'
-         WHERE id = $1`,
-        [p.id, leadId]
-      );
-
-      // Zbierz kontakty: (1) osoba decyzyjna z importu, (2) kontakty znalezione przez AI
+      // Zbierz kontakty: (1) osoba decyzyjna z importu, (2) kontakty znalezione przez AI.
+      // Budowane PRZED insertem leada, bo główny kontakt leada bierzemy z tej listy.
       const allContacts = [];
 
-      // Kontakt z pliku importu
-      if (p.decision_maker_name || p.decision_maker_email) {
+      // Kontakt z pliku importu — sam telefon bez nazwiska też się liczy
+      if (p.decision_maker_name || p.decision_maker_email || p.decision_maker_phone) {
         const titleParts = [p.decision_maker_title, p.decision_maker_dept].filter(Boolean);
         allContacts.push({
           name:  p.decision_maker_name  || null,
@@ -1202,26 +1339,77 @@ router.post('/:id/to-lead',
       }
       if (Array.isArray(aiContacts)) {
         for (const c of aiContacts) {
-          if (!c.name && !c.email) continue;
+          if (!c.name && !c.email && !c.phone) continue;
           const dupEmail = c.email && allContacts.some(x => x.email && x.email.toLowerCase() === c.email.toLowerCase());
           const dupName  = c.name  && allContacts.some(x => x.name  && x.name.toLowerCase()  === c.name.toLowerCase());
           if (!dupEmail && !dupName) allContacts.push(c);
         }
       }
 
+      // Główny kontakt leada (pola contact_*/email/phone na karcie) — pierwszy kontakt
+      // z telefonem, a osoba decyzyjna z importu jest pierwsza na liście, więc ma
+      // pierwszeństwo przed kontaktami z AI.
+      const primaryContact = allContacts.find(c => c.phone) || allContacts[0] || null;
+
+      const { rows: leadRows } = await db.query(
+        `INSERT INTO crm_leads
+           (tenant_id, company, nip, notes, tags, stage, probability, source, website,
+            contact_name, contact_title, email, phone, assigned_to, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'new', $6, 'Prospekt', $7, $8, $9, $10, $11, $12, NOW(), NOW())
+         RETURNING id`,
+        [
+          req.user.tenant_id,
+          p.company_name || p.nip,
+          nipForLead,
+          notes || null,
+          tags,
+          p.icp_score != null ? p.icp_score : null,
+          p.website_url || null,
+          cut(primaryContact?.name,  150),
+          cut(primaryContact?.title, 100),
+          cut(primaryContact?.email, 200),
+          cut(primaryContact?.phone,  50),
+          assignedTo,
+        ]
+      );
+      const leadId = leadRows[0].id;
+
+      await db.query(
+        `UPDATE prospect_companies
+         SET crm_lead_id = $2, enrichment_status = 'lead'
+         WHERE id = $1`,
+        [p.id, leadId]
+      );
+
+      let contactsSaved = 0;
+      const contactErrors = [];
       for (const c of allContacts) {
         try {
           await db.query(
-            `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [leadId, c.name || null, c.title || null, c.email || null, c.phone || null]
+            `INSERT INTO crm_lead_contacts (lead_id, contact_name, contact_title, email, phone, tenant_id)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [leadId, cut(c.name, 200), cut(c.title, 100), cut(c.email, 200), cut(c.phone, 50), req.user.tenant_id]
           );
+          contactsSaved++;
         } catch (e) {
-          logger.warn('[Prospects] Could not insert lead contact', { error: e.message });
+          contactErrors.push(e.message);
+          logger.warn('[Prospects] Could not insert lead contact', { leadId, error: e.message });
         }
       }
+      // Nieudany zapis kontaktów nie przerywa konwersji, ale musi być widoczny w
+      // odpowiedzi — wcześniej lądował tylko w logu i UI pokazywało sam sukces.
+      if (contactErrors.length) {
+        logger.error('[Prospects] Lead contacts partially failed', {
+          leadId, failed: contactErrors.length, total: allContacts.length, firstError: contactErrors[0],
+        });
+      }
 
-      res.json({ crm_lead_id: leadId });
+      res.json({
+        crm_lead_id:     leadId,
+        contacts_total:  allContacts.length,
+        contacts_saved:  contactsSaved,
+        contacts_failed: contactErrors.length,
+      });
     } catch (err) { next(err); }
   }
 );

@@ -23,7 +23,7 @@ const { encrypt, decrypt } = require('../../utils/encrypt');
 
 const AUTH_BASE = 'https://www.linkedin.com/oauth/v2';
 const API_BASE = 'https://api.linkedin.com';
-const LINKEDIN_API_VERSION = '202502'; // verify/bump against current LinkedIn docs
+const LINKEDIN_API_VERSION = '202606'; // bumped 2026-09-28 (docs list li-lms-2026-06); LinkedIn sunsets versions after ~1 year
 const SCOPES = ['w_organization_social', 'r_organization_admin'];
 
 function makeOAuthState(tenantId, userId) {

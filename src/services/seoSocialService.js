@@ -58,6 +58,24 @@ async function generateCopyVariants({ title, metaDescription, articleUrl }) {
   return response.parsed_output;
 }
 
+// Publishing must not depend on the LLM being reachable: when the API was over
+// its usage limit (2026-09-28) the whole publish silently did nothing. A plain
+// title + description post is worse copy but still a real post the editor can
+// see, edit and re-send.
+async function copyVariantsOrFallback({ title, metaDescription, articleUrl }) {
+  try {
+    return await generateCopyVariants({ title, metaDescription, articleUrl });
+  } catch (err) {
+    logger.warn('SEO social copy generation failed — using plain fallback copy', { error: err.message });
+    const summary = [title, metaDescription].filter(Boolean).join('\n\n');
+    return {
+      linkedin: `${summary}\n\n${articleUrl}`,
+      facebook: `${summary}\n\n${articleUrl}`,
+      instagram: `${summary}\n\nLink w bio.`,
+    };
+  }
+}
+
 async function upsertPost(tenantId, contentId, platform, patch) {
   const fields = Object.keys(patch);
   const setClause = fields.map((f, i) => `${f} = $${i + 4}`).join(', ');
@@ -103,7 +121,7 @@ async function publishToConnectedPlatforms(contentId, tenantId, siteUrl) {
 
     const needsSocialCopy = connected.has('linkedin') || connected.has('facebook') || connected.has('instagram');
     if (!needsSocialCopy) return;
-    const copy = await generateCopyVariants({ title: article.title, metaDescription: article.meta_description, articleUrl });
+    const copy = await copyVariantsOrFallback({ title: article.title, metaDescription: article.meta_description, articleUrl });
 
     if (connected.has('linkedin')) {
       await publishOne(tenantId, contentId, 'linkedin', copy.linkedin, () =>
@@ -137,8 +155,8 @@ async function publishOne(tenantId, contentId, platform, body, publishFn) {
 /** Manual retry for a single failed platform, or (re)publish one platform on demand. */
 async function retryPlatform(contentId, tenantId, platform, siteUrl) {
   const { rows: articleRows } = await db.query(
-    `SELECT title, meta_description, slug, header_image_url FROM seo_content_pieces WHERE id = $1`,
-    [contentId],
+    `SELECT title, meta_description, slug, header_image_url, body FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
+    [contentId, tenantId],
   );
   const article = articleRows[0];
   if (!article) throw new Error('Nie znaleziono artykułu.');
@@ -151,7 +169,7 @@ async function retryPlatform(contentId, tenantId, platform, siteUrl) {
 
   let body = existing[0]?.body;
   if (!body) {
-    body = platform === 'wordpress' ? article.body : (await generateCopyVariants({ title: article.title, metaDescription: article.meta_description, articleUrl }))[platform];
+    body = platform === 'wordpress' ? article.body : (await copyVariantsOrFallback({ title: article.title, metaDescription: article.meta_description, articleUrl }))[platform];
   }
 
   const publishFn = {

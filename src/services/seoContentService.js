@@ -2,15 +2,35 @@
 // ─────────────────────────────────────────────────────────────────
 // services/seoContentService.js — SEObot article generation pipeline.
 //
-// 4-stage pipeline per article, gated by automatic pre-checks before it
+// 5-stage pipeline per article, gated by automatic pre-checks before it
 // ever reaches a human editor (crm-seo.js still owns the mandatory human
 // approval gate — this only decides in_review vs needs_update):
 //   1. Keyword research   (Sonnet 5) — picks a phrase within the least-
-//      covered content pillar (see seoStrategyService).
-//   2. Outline             (Sonnet 5)
-//   3. Draft                (Opus 4.8, adaptive thinking)
-//   4. Critique/revise      (Opus 4.8) — mandatory quality pass, always run
+//      covered content pillar (see seoStrategyService), plus the entity
+//      graph (main + related + contextual entities) that phrase sits in.
+//   2. Facts research      (Sonnet 5 + web_search) — 0-4 real, cited
+//      numeric data points (seoFactsService). Never invents statistics;
+//      this is how real numbers get in instead (see BANNED_PATTERNS).
+//   3. Outline             (Sonnet 5)
+//   4. Draft                (Opus 4.8, adaptive thinking)
+//   5. Critique/revise      (Opus 4.8) — mandatory quality pass, always run
 //      once; re-run again (max 2 extra attempts) if pre-gate checks fail.
+//
+// Structure and validation here follow two source documents Adam supplied
+// 2026-09-25 (classic on-page SEO + an AI-Overview/GEO citation strategy).
+// Where the two disagreed or fully implementing both would have meant an
+// unbounded article length, Adam picked an explicit middle ground
+// ("wersja pośrednia", 2026-09-25): ~1200-1600 words and a trimmed set of
+// the AI-citation framework's mandatory sections (dropped: a separate case
+// study section) rather than its full ~12-section structure at 1500-4000
+// words. Don't re-expand scope back to the full framework without asking —
+// that was a deliberate, explicit trade-off, not an oversight.
+//
+// After an external expert review (2026-09-28) every stage also gets the
+// tenant's product description (so articles show a named product feature
+// instead of generic advice), and each new article carries enrichment slots
+// (utils/seoSlots.js) for an expert comment, attributed quotes and product
+// screenshots that a human fills before approval.
 // ─────────────────────────────────────────────────────────────────
 
 const { z } = require('zod');
@@ -20,8 +40,11 @@ const db = require('../config/database');
 const config = require('../config');
 const logger = require('../utils/logger');
 const strategyService = require('./seoStrategyService');
+const factsService = require('./seoFactsService');
 const pexelsService = require('./pexelsService');
 const gscService = require('./gscService');
+const { ensureValidSlug } = require('../utils/slugify');
+const slots = require('../utils/seoSlots');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 
@@ -36,18 +59,56 @@ const PRICING = {
   'claude-opus-4-8': { input: 5, output: 25 },
 };
 
-const BRAND_VOICE = `Ton: profesjonalny, konkretny, B2B, bez sprzedażowego przegięcia i banalnych wstępów (unikaj fraz typu "W dzisiejszych czasach…").
-Odbiorca: menedżerowie sprzedaży i właściciele firm z różnych branż, rozważający lub już używający CRM.
-Fokus tematyczny: dynamiczna praca handlowców, zarządzanie lejkiem sprzedażowym, upsell i cross-sell.
-Zero wymyślonych statystyk i case studies — jeśli potrzebna liczba, albo uogólnienie bez fałszywego źródła, albo pominięcie.
+const BRAND_VOICE = `Ton: profesjonalny, konkretny, B2B, bez sprzedażowego przegięcia i banalnych wstępów (unikaj fraz typu "W dzisiejszych czasach…", "Warto zauważyć, że…", ogólników i metafor).
+Zero wymyślonych statystyk, cytatów i case studies — jeśli dostarczono realne, zacytowane dane (z linkiem do źródła), wykorzystaj je i podlinkuj źródło; w przeciwnym razie albo uogólnienie bez fałszywego źródła, albo pominięcie liczby.
+Każda sekcja musi być zrozumiała samodzielnie, bez kontekstu z innych sekcji — nigdy nie pisz "jak wspomniano wyżej" ani "w powyższym przykładzie": AI wycina fragmenty z artykułu pojedynczo, więc każdy fragment musi działać jako osobny, kompletny moduł wiedzy.
+Czytelność: akapit ma maksymalnie 3-4 zdania (ok. 80 słów), między akapitami pusta linia. Kroki procesu zawsze jako lista numerowana ("1. "), wyliczenia cech/kryteriów jako lista punktowana ("- "); przed listą pusta linia.
 Cała treść po polsku.`;
 
+// Articles read as generic until the draft was told what the product does
+// (expert review, 2026-09-28) — before that only the pillar name reached it.
+function productContextBlock(product) {
+  if (!product?.description) return 'Brak opisu produktu — nie opisuj funkcji żadnego konkretnego produktu.';
+  const name = product.name || 'produkt';
+  return [
+    `Produkt firmy publikującej artykuł: ${name}.`,
+    `Opis produktu (jedyne źródło wiedzy o jego funkcjach):\n${product.description}`,
+    `W 1-2 miejscach w sekcjach merytorycznych (nie w leadzie, "W skrócie" ani FAQ) pokaż konkretnie, jak opisany problem rozwiązuje się w ${name}, odwołując się do nazwanej funkcji z opisu powyżej i do tego, co handlowiec lub menedżer realnie w niej robi. Nazwij produkt z nazwy ("${name}"). Nigdy nie przypisuj ${name} funkcji, których nie ma w opisie. Rzeczowo, bez sprzedażowego tonu i bez porównań z konkurencją.`,
+  ].join('\n');
+}
+
+function slotInstructions({ screenshots, quotes }) {
+  const quoteList = quotes.length
+    ? 'Jeśli któryś z poniższych zweryfikowanych cytatów pasuje, ustaw quote_index na jego numer (od 0) — nie przepisuj cytatu do treści, redaktor go zatwierdzi:\n'
+      + quotes.map((q, i) => `  [${i}] „${q.quote}” — ${q.author}${q.author_role ? `, ${q.author_role}` : ''} (${q.source_url})`).join('\n')
+    : 'Brak zweryfikowanych cytatów — quote_index zawsze null.';
+  const screenshotList = screenshots.length
+    ? 'Jeśli któryś z poniższych screenów z biblioteki pasuje, ustaw screenshot_id na jego id:\n'
+      + screenshots.map((s) => `  id ${s.id}: [${s.feature_tag}] ${s.caption}`).join('\n')
+    : 'Biblioteka screenów jest pusta — screenshot_id zawsze null.';
+  const { expert_comment: comment, quote, screenshot } = slots.SLOT_LIMITS;
+  return [
+    'Miejsca do uzupełnienia przez redaktora (enrichment_slots). Wstaw w treść sekcji (content_markdown) znaczniki w osobnej linii, otoczone pustymi liniami: [[SLOT:<id>]]. Id krótkie, np. "komentarz-1", "cytat-1", "screen-1".',
+    `- dokładnie ${comment.max} "expert_comment": miejsce na komentarz eksperta z praktyki (własne doświadczenie, obserwacja z wdrożeń). Wstaw tam, gdzie opinia praktyka realnie wzmacnia tekst. W "brief" napisz konkretnie, o co zapytać eksperta w kontekście tej sekcji (np. "Jaki próg scoringu ICP sprawdza się u Państwa klientów i dlaczego?").`,
+    `- ${quote.min}-${quote.max} "quote": cytat z zewnętrznego, wiarygodnego źródła z podpisem autora. W "brief" napisz, jaki cytat pasuje w tym miejscu. ${quoteList}`,
+    `- ${screenshot.min}-${screenshot.max} "screenshot": zrzut ekranu produktu obok fragmentu, który opisuje konkretną funkcję. W "brief" napisz, co dokładnie ma być widać na ekranie; w "feature_tag" krótka nazwa funkcji. ${screenshotList}`,
+    'Znaczniki tylko w sekcjach, nigdy w leadzie, "W skrócie" ani FAQ. Każdy znacznik dokładnie raz. Tekst wokół znacznika musi czytać się poprawnie także wtedy, gdy redaktor usunie to miejsce.',
+  ].join('\n');
+}
+
 const CRITIQUE_INSTRUCTIONS = `Skrytykuj i popraw ten artykuł pod kątem:
-(1) halucynacji — wymyślonych statystyk, case studies, lub twierdzeń o konkurencji,
+(1) halucynacji — wymyślonych statystyk, case studies, lub twierdzeń o konkurencji (dane z prawdziwym źródłem/linkiem są OK i pożądane),
 (2) naturalności użycia frazy kluczowej,
 (3) zgodności z tonem marki,
 (4) obecności sensownego linkowania wewnętrznego (jeśli byli kandydaci),
-(5) braku banalnych wstępów i sprzedażowego przegięcia.
+(5) braku banalnych wstępów i sprzedażowego przegięcia,
+(6) samodzielności każdej sekcji — usuń każde odniesienie wstecz typu "jak wspomniano", "jak wyżej", "w powyższym przykładzie",
+(7) czy pierwszy akapit pod każdym H2 daje konkretną odpowiedź w 40-60 słowach, bez lania wody, zanim rozwinięcie,
+(8) czy nagłówki H2 (poza "Dla kogo"/"Dla kogo nie"/"Najczęstsze błędy"/"Tabela porównawcza") są sformułowane jako pytania,
+(9) czy artykuł zawiera min. 2-3 jednozdaniowe definicje w stylu "X to proces polegający na…",
+(10) konkretności — czy w 1-2 miejscach pokazano, jak problem rozwiązuje się w produkcie z opisu, z nazwą produktu i nazwaną funkcją, bez przypisywania mu funkcji spoza opisu i bez sprzedażowego tonu,
+(11) czytelności — akapity maks. 3-4 zdania, kroki jako lista numerowana, wyliczenia jako lista punktowana, żadnych ścian tekstu,
+(12) znaczników [[SLOT:...]] — zostaw je dokładnie tam, gdzie są, w osobnych liniach, i nie zmieniaj enrichment_slots bez powodu.
 Popraw wszystko co znajdziesz.`;
 
 const BANNED_PATTERNS = [
@@ -55,28 +116,49 @@ const BANNED_PATTERNS = [
     reason: 'podejrzana, niepotwierdzona statystyka procentowa' },
   { regex: /najlepsz\w*\s+(crm|system)\w*\s+(na świecie|w polsce|na rynku)/i,
     reason: 'nieuzasadniony superlatyw' },
+  { regex: /w dzisiejszych czasach/i,
+    reason: 'banalny wstęp ("w dzisiejszych czasach")' },
+  { regex: /warto (też\s+)?zauważyć,?\s*że/i,
+    reason: 'wypełniacz stylistyczny ("warto zauważyć, że")' },
+  { regex: /jak (już\s+)?wspomniano|jak wspomnieliśmy|w powyższym przykładzie|jak wcześniej pisaliśmy|jak napisaliśmy wyżej/i,
+    reason: 'odniesienie wstecz do innej sekcji — łamie zasadę samodzielności fragmentu (RAG/AI Overview)' },
 ];
 
 // ── Zod schemas (structured output — client.messages.parse) ───────────────
 
 const KeywordResearchSchema = z.object({
   phrase: z.string(),
-  intent: z.enum(['informational', 'transactional']),
+  intent: z.enum(['informational', 'transactional', 'commercial']),
   difficulty: z.enum(['low', 'medium', 'high']),
-  // Capped so the finished article stays under ~5 min reading time (200 wpm).
-  recommended_word_count: z.number().int().min(600).max(1000),
+  // "Wersja pośrednia" (Adam, 2026-09-25): raised from 600-1000 so the
+  // trimmed AI-citation section set below actually has room to breathe,
+  // but capped well short of the source material's own 1500-4000 ceiling.
+  recommended_word_count: z.number().int().min(1100).max(1600),
+  // Entity mapping (doc: "graf tematyczny", not keyword-only writing) — main
+  // entity is `phrase` itself; these are what should be naturally woven in.
+  related_entities: z.array(z.string()).min(2).max(6),
+  is_expert_topic: z
+    .boolean()
+    .describe('true dla tematów wymagających źródeł eksperckich: prawo i regulacje (np. AI Act, RODO), bezpieczeństwo, finanse, działanie modeli AI'),
   reasoning: z.string(),
 });
 
 const OutlineSchema = z.object({
   h1: z.string(),
-  // Fewer sections than before (was 8) — with a ~1000-word cap, 8 sections
-  // would leave each one too thin to say anything useful.
+  lead: z.string().describe('3-4 zdania: definicja tematu + kontekst biznesowy + dla kogo się przyda. Bez marketingu.'),
+  tldr_bullets: z
+    .array(z.string())
+    .min(5)
+    .max(8)
+    .describe('Sekcja "W skrócie" pod chunking AI: czym jest, dla kogo, ile trwa/kosztuje, największe ryzyko, największa korzyść.'),
   sections: z
     .array(z.object({ heading: z.string(), level: z.enum(['h2', 'h3']), summary: z.string() }))
-    .min(3)
-    .max(5),
-  faq_questions: z.array(z.string()).min(3).max(5),
+    .min(6)
+    .max(8)
+    .describe(
+      'Musi zawierać dokładnie te sekcje wśród H2 (dosłownie w tych rolach, mogą być dostosowane tematycznie): "Dla kogo jest [temat]", "Dla kogo NIE jest to rozwiązanie", "Najczęstsze błędy", "Tabela porównawcza" (opisz w summary jaką tabelę). Pozostałe 2-4 sekcje dowolne, tematyczne, w miarę możliwości sformułowane jako pytania.',
+    ),
+  faq_questions: z.array(z.string()).min(5).max(8),
   meta_title_draft: z.string(),
   meta_description_draft: z.string(),
   internal_link_candidates: z
@@ -90,12 +172,26 @@ const ArticleSchema = z.object({
   meta_title: z.string(),
   meta_description: z.string(),
   primary_keyword: z.string(),
+  lead: z.string(),
+  tldr_bullets: z.array(z.string()).min(5).max(8),
   sections: z
     .array(z.object({ heading: z.string(), level: z.enum(['h2', 'h3']), content_markdown: z.string() }))
-    .min(3),
-  faq: z.array(z.object({ question: z.string(), answer: z.string() })).min(3).max(5),
+    .min(6),
+  faq: z.array(z.object({ question: z.string(), answer: z.string() })).min(5).max(8),
   internal_link_suggestions: z
     .array(z.object({ target_slug: z.string(), anchor_text: z.string() }))
+    .max(6),
+  enrichment_slots: z
+    .array(
+      z.object({
+        id: z.string(),
+        type: z.enum(slots.SLOT_TYPES),
+        brief: z.string(),
+        feature_tag: z.string().nullable(),
+        screenshot_id: z.number().int().nullable(),
+        quote_index: z.number().int().nullable(),
+      }),
+    )
     .max(6),
   // No `cta` field at all — the marketing site has no demo/contact/pricing page for
   // the model to link to, only /login exists. Letting the model invent a CTA url
@@ -119,59 +215,206 @@ function costOf(model, usage) {
   return (usage.input_tokens || 0) * (pricing.input / 1e6) + (usage.output_tokens || 0) * (pricing.output / 1e6);
 }
 
-function slugify(text) {
-  return (text || '')
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function ensureValidSlug(slug, fallbackTitle) {
-  if (slug && /^[a-z0-9-]+$/.test(slug)) return slug;
-  return slugify(fallbackTitle) || `artykul-${Date.now()}`;
-}
-
 function countWords(text) {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
-function validateArticle(article, primaryKeyword, validSlugSet) {
+// Heuristic "core word" of a keyword phrase — the longest word in it — used
+// to soft-check keyword presence in H2s/meta/slug without needing exact
+// phrase matching, which breaks constantly on Polish inflection (e.g.
+// "zarządzanie lejkiem" vs. a heading using "zarządzaniu lejkami").
+function coreWord(phrase) {
+  const words = (phrase || '').split(/\s+/).filter((w) => w.length >= 4);
+  if (!words.length) return (phrase || '').toLowerCase();
+  return words.reduce((a, b) => (b.length > a.length ? b : a)).toLowerCase();
+}
+
+function containsMarkdownTable(text) {
+  const lines = (text || '').split('\n').map((l) => l.trim());
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (lines[i].startsWith('|') && lines[i].endsWith('|') && /^\|?[\s:-]+\|[\s:|-]*\|?$/.test(lines[i + 1])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const LIST_ITEM_LINE = /^\s*([-*]|\d+[.)])\s+/;
+const NON_PARAGRAPH_LINE = /^\s*(#{2,3} |>|\||!\[|\[\[SLOT:)/;
+const MAX_PARAGRAPH_WORDS = 110;
+
+function paragraphsOf(markdown) {
+  const paragraphs = [];
+  let current = [];
+  for (const line of (markdown || '').split('\n')) {
+    if (!line.trim() || LIST_ITEM_LINE.test(line) || NON_PARAGRAPH_LINE.test(line)) {
+      if (current.length) paragraphs.push(current.join(' '));
+      current = [];
+    } else {
+      current.push(line.trim());
+    }
+  }
+  if (current.length) paragraphs.push(current.join(' '));
+  return paragraphs;
+}
+
+function countLists(markdown) {
+  const lines = (markdown || '').split('\n');
+  return lines.filter((line, i) => LIST_ITEM_LINE.test(line) && !(i > 0 && LIST_ITEM_LINE.test(lines[i - 1]))).length;
+}
+
+function validateSlots(article, { screenshotIds, quoteCount }) {
   const errors = [];
-  const bodyText = article.sections.map((s) => s.content_markdown).join(' ');
+  const defined = article.enrichment_slots || [];
+  const ids = defined.map((s) => s.id);
+  for (const type of slots.SLOT_TYPES) {
+    const count = defined.filter((s) => s.type === type).length;
+    const { min, max } = slots.SLOT_LIMITS[type];
+    if (count < min || count > max) errors.push(`Miejsc do uzupełnienia typu "${type}" jest ${count} — oczekiwano ${min}-${max}.`);
+  }
+  if (new Set(ids).size !== ids.length) errors.push('Id w enrichment_slots muszą być unikalne.');
+  for (const slot of defined) {
+    if (!/^[a-z0-9_-]+$/i.test(slot.id)) errors.push(`Id miejsca "${slot.id}" może zawierać tylko litery, cyfry, "-" i "_".`);
+    if ((slot.brief || '').trim().length < 20) errors.push(`Miejsce "${slot.id}" ma zbyt ogólny opis (brief) — napisz konkretnie, czego potrzeba.`);
+    if (slot.screenshot_id != null && !screenshotIds.has(slot.screenshot_id)) errors.push(`Miejsce "${slot.id}" wskazuje nieistniejący screen (id ${slot.screenshot_id}).`);
+    if (slot.quote_index != null && (slot.quote_index < 0 || slot.quote_index >= quoteCount)) errors.push(`Miejsce "${slot.id}" wskazuje nieistniejący cytat (quote_index ${slot.quote_index}).`);
+  }
+  const sectionMarkers = article.sections.flatMap((s) => slots.openSlotIds(s.content_markdown));
+  for (const id of ids) {
+    const occurrences = sectionMarkers.filter((m) => m === id).length;
+    if (occurrences !== 1) errors.push(`Znacznik [[SLOT:${id}]] występuje w sekcjach ${occurrences} razy — oczekiwano dokładnie raz, w osobnej linii.`);
+  }
+  for (const id of new Set(sectionMarkers)) {
+    if (!ids.includes(id)) errors.push(`Znacznik [[SLOT:${id}]] nie ma definicji w enrichment_slots.`);
+  }
+  const outsideSections = [article.lead, ...(article.tldr_bullets || []), ...(article.faq || []).map((f) => f.answer)].join('\n');
+  if (/\[\[SLOT:/i.test(outsideSections)) errors.push('Znaczniki [[SLOT:...]] mogą być tylko w sekcjach, nie w leadzie, "W skrócie" ani FAQ.');
+  return errors;
+}
 
-  // 5 min reading time cap at ~200 wpm → max 1000 words.
+// skipSlugCheck: a refreshed article keeps its existing, already-indexed slug.
+// Older slugs may not contain the keyword's core word, and the model isn't
+// allowed to change the slug anyway, so that check could never be fixed.
+// requireSlots is off for refreshes: they keep already-filled quotes and
+// screenshots instead of asking the editor for new ones.
+function validateArticle(article, primaryKeyword, validSlugSet, {
+  hasFacts = false, skipSlugCheck = false, requireSlots = false, productName = null,
+  minSources = 1, screenshotIds = new Set(), quoteCount = 0,
+} = {}) {
+  const errors = [];
+  const bodyText = [article.lead, ...(article.tldr_bullets || []), ...article.sections.map((s) => s.content_markdown)]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\[\[SLOT:[^\]]*\]\]/gi, ' ');
+  const core = coreWord(primaryKeyword);
+
+  // "Wersja pośrednia" target: ~1200-1600 words, with slack either side to
+  // avoid needless retry churn over a handful of words.
   const wordCount = countWords(bodyText);
-  if (wordCount < 500 || wordCount > 1000) {
-    errors.push(`Liczba słów (${wordCount}) poza zakresem 500-1000 (limit: ok. 5 minut czytania).`);
+  if (wordCount < 900 || wordCount > 1700) {
+    errors.push(`Liczba słów (${wordCount}) poza zakresem 900-1700.`);
   }
 
-  if (!article.meta_title || article.meta_title.length > 60) {
-    errors.push(`meta_title musi mieć ≤60 znaków (obecnie: ${article.meta_title?.length ?? 0}).`);
+  if (!article.meta_title || article.meta_title.length < 55 || article.meta_title.length > 70) {
+    errors.push(`meta_title musi mieć 55-70 znaków (obecnie: ${article.meta_title?.length ?? 0}).`);
   }
-  if (!article.meta_description || article.meta_description.length < 100 || article.meta_description.length > 160) {
-    errors.push(`meta_description musi mieć 100-160 znaków (obecnie: ${article.meta_description?.length ?? 0}).`);
+  if (!article.meta_description || article.meta_description.length < 150 || article.meta_description.length > 160) {
+    errors.push(`meta_description musi mieć 150-160 znaków (obecnie: ${article.meta_description?.length ?? 0}).`);
+  }
+  if (core && !article.meta_title?.toLowerCase().includes(core)) {
+    errors.push(`Fraza kluczowa (lub jej rdzeń "${core}") nie występuje w meta_title.`);
+  }
+  if (core && !article.meta_description?.toLowerCase().includes(core)) {
+    errors.push(`Fraza kluczowa (lub jej rdzeń "${core}") nie występuje w meta_description.`);
   }
 
   const first100Words = bodyText.split(/\s+/).slice(0, 100).join(' ').toLowerCase();
   if (primaryKeyword && !first100Words.includes(primaryKeyword.toLowerCase())) {
-    errors.push('Fraza kluczowa nie występuje w pierwszych ~100 słowach treści.');
+    errors.push('Fraza kluczowa nie występuje w pierwszych ~100 słowach treści (lead).');
   }
 
-  if (!/^[a-z0-9-]+$/.test(article.slug || '')) {
-    errors.push(`Slug "${article.slug}" nie pasuje do formatu kebab-case ASCII.`);
+  if (!skipSlugCheck) {
+    if (!/^[a-z0-9-]+$/.test(article.slug || '')) {
+      errors.push(`Slug "${article.slug}" nie pasuje do formatu kebab-case ASCII.`);
+    } else if (core && !article.slug.includes(core.normalize('NFD').replace(/[̀-ͯ]/g, ''))) {
+      errors.push(`Slug "${article.slug}" nie zawiera rdzenia frazy kluczowej ("${core}").`);
+    }
   }
 
-  if (!Array.isArray(article.faq) || article.faq.length < 3 || article.faq.length > 5) {
-    errors.push(`FAQ musi mieć 3-5 pozycji (obecnie: ${article.faq?.length ?? 0}).`);
+  const phraseRegex = primaryKeyword
+    ? new RegExp(primaryKeyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+    : null;
+  if (phraseRegex) {
+    const occurrences = (bodyText.match(phraseRegex) || []).length;
+    if (occurrences < 3 || occurrences > 10) {
+      errors.push(`Fraza kluczowa występuje ${occurrences} razy w treści — oczekiwano 3-10.`);
+    }
   }
 
+  const h2Headings = article.sections.filter((s) => s.level === 'h2').map((s) => s.heading);
+  if (core && !h2Headings.some((h) => h.toLowerCase().includes(core))) {
+    errors.push(`Żaden nagłówek H2 nie zawiera frazy kluczowej (lub jej rdzenia "${core}").`);
+  }
+  const questionHeadings = h2Headings.filter((h) => /\?\s*$/.test(h.trim())).length;
+  if (questionHeadings < 2) {
+    errors.push(`Za mało nagłówków H2 sformułowanych jako pytania (${questionHeadings}, oczekiwano min. 2).`);
+  }
+  const dlaKogoCount = article.sections.filter((s) => /dla kogo/i.test(s.heading)).length;
+  if (dlaKogoCount < 2) {
+    errors.push('Brak wymaganej pary sekcji "Dla kogo" / "Dla kogo NIE jest to rozwiązanie".');
+  }
+  const mistakesCount = article.sections.filter((s) => /błęd/i.test(s.heading)).length;
+  if (mistakesCount < 1) {
+    errors.push('Brak wymaganej sekcji o najczęstszych błędach.');
+  }
+  if (!article.sections.some((s) => containsMarkdownTable(s.content_markdown))) {
+    errors.push('Brak wymaganej tabeli porównawczej (markdown table) w treści.');
+  }
+
+  if (!Array.isArray(article.faq) || article.faq.length < 5 || article.faq.length > 8) {
+    errors.push(`FAQ musi mieć 5-8 pozycji (obecnie: ${article.faq?.length ?? 0}).`);
+  }
+  for (const item of article.faq || []) {
+    const words = countWords(item.answer || '');
+    if (words < 15 || words > 90) {
+      errors.push(`Odpowiedź FAQ "${item.question}" ma ${words} słów — oczekiwano ok. 15-90 (cel: 40-60).`);
+    }
+  }
+
+  if (validSlugSet.size > 0 && (article.internal_link_suggestions || []).length < 2) {
+    errors.push('Za mało linków wewnętrznych — minimum 2, gdy istnieją opublikowane artykuły do podlinkowania.');
+  }
   for (const link of article.internal_link_suggestions || []) {
     if (!validSlugSet.has(link.target_slug)) {
       errors.push(`Sugerowany link wewnętrzny wskazuje na nieistniejący slug: "${link.target_slug}".`);
     }
   }
+
+  const sourceCount = sourceLinks(bodyText).length;
+  if (hasFacts && sourceCount < minSources) {
+    errors.push(`Dostarczono realne dane ze źródłami, ale artykuł cytuje ${sourceCount} źródeł (link https://) — oczekiwano min. ${minSources}.`);
+  }
+
+  for (const section of article.sections) {
+    const tooLong = paragraphsOf(section.content_markdown).filter((p) => countWords(p) > MAX_PARAGRAPH_WORDS);
+    if (tooLong.length) {
+      errors.push(`Sekcja "${section.heading}" ma akapit dłuższy niż ${MAX_PARAGRAPH_WORDS} słów — podziel go albo zamień wyliczenie na listę.`);
+    }
+  }
+  const listCount = article.sections.reduce((sum, s) => sum + countLists(s.content_markdown), 0);
+  if (listCount < 2) {
+    errors.push(`Za mało list w treści (${listCount}, oczekiwano min. 2) — kroki jako lista numerowana, wyliczenia jako punktowana.`);
+  }
+
+  if (productName) {
+    const sectionsText = article.sections.map((s) => s.content_markdown).join(' ');
+    const mentions = sectionsText.split(productName).length - 1;
+    if (mentions < 1 || mentions > 5) {
+      errors.push(`Nazwa produktu "${productName}" występuje w sekcjach ${mentions} razy — oczekiwano 1-5 (konkretne zastosowanie funkcji, bez reklamy).`);
+    }
+  }
+
+  if (requireSlots) errors.push(...validateSlots(article, { screenshotIds, quoteCount }));
 
   for (const { regex, reason } of BANNED_PATTERNS) {
     if (regex.test(bodyText)) errors.push(`Wykryto zakazany wzorzec: ${reason}.`);
@@ -180,8 +423,23 @@ function validateArticle(article, primaryKeyword, validSlugSet) {
   return { ok: errors.length === 0, errors };
 }
 
-function renderBody(article) {
+// Collected from the inline citations, so the list can never name a source
+// the article doesn't actually cite.
+function sourceLinks(markdown) {
+  const byUrl = new Map();
+  for (const m of (markdown || '').matchAll(/\[([^\]]+)\]\((https:\/\/[^)\s]+)\)/g)) {
+    if (!byUrl.has(m[2])) byUrl.set(m[2], { label: m[1], url: m[2] });
+  }
+  return [...byUrl.values()];
+}
+
+function renderBody(article, pillar) {
   const parts = [];
+  parts.push(article.lead);
+  if (article.tldr_bullets?.length) {
+    parts.push('## W skrócie');
+    parts.push(article.tldr_bullets.map((b) => `- ${b}`).join('\n'));
+  }
   for (const section of article.sections) {
     parts.push(`${section.level === 'h3' ? '###' : '##'} ${section.heading}`);
     parts.push(section.content_markdown);
@@ -193,9 +451,17 @@ function renderBody(article) {
       parts.push(item.answer);
     }
   }
+  const sources = sourceLinks(article.sections.map((s) => s.content_markdown).join('\n'));
+  if (sources.length) {
+    parts.push('## Źródła');
+    parts.push(sources.map((s) => `- [${s.label}](${s.url})`).join('\n'));
+  }
   if (article.internal_link_suggestions?.length) {
     parts.push('## Zobacz też');
     parts.push(article.internal_link_suggestions.map((l) => `- [${l.anchor_text}](/blog/${l.target_slug})`).join('\n'));
+  }
+  if (pillar?.slug) {
+    parts.push(`[Zobacz wszystkie artykuły o: ${pillar.name}](/blog/temat/${pillar.slug})`);
   }
   parts.push(LOGIN_CTA);
   parts.push(DEMO_CTA);
@@ -209,8 +475,8 @@ async function researchKeyword({ pillar, existingPhrases, gapQueries = [] }) {
     model: RESEARCH_MODEL,
     max_tokens: 2000,
     system:
-      'You are an SEO keyword researcher for a B2B CRM company blog. Given a content pillar, propose ONE new target keyword phrase that fits within it, is distinct from already-used phrases, and has realistic search intent. ' +
-      'If a real Google Search Console query is provided and fits the pillar well, strongly prefer reusing it verbatim — it is a confirmed, real search, not a guess. Write the phrase and reasoning in Polish.',
+      'You are an SEO/entity-graph keyword researcher for a B2B CRM company blog. Given a content pillar, propose ONE new target keyword phrase that fits within it, is distinct from already-used phrases, and has realistic search intent. Also map the entity graph around that phrase: related entities (closely tied concepts) and contextual entities (broader business context) it should naturally cover — not just synonyms. ' +
+      'If a real Google Search Console query is provided and fits the pillar well, strongly prefer reusing it verbatim — it is a confirmed, real search, not a guess. Write the phrase, entities, and reasoning in Polish.',
     messages: [
       {
         role: 'user',
@@ -235,23 +501,27 @@ async function researchKeyword({ pillar, existingPhrases, gapQueries = [] }) {
   return { result: response.parsed_output, usage: response.usage, model: RESEARCH_MODEL };
 }
 
-async function generateOutline({ keyword, pillar, publishedArticles }) {
+async function generateOutline({ keyword, pillar, publishedArticles, facts, product }) {
   const response = await client.messages.parse({
     model: OUTLINE_MODEL,
-    // 3000 was tight enough that a full 8-section outline + FAQ + link candidates
-    // occasionally got cut off mid-string, producing invalid JSON.
-    max_tokens: 4500,
-    system: `You are an SEO content outline writer. ${BRAND_VOICE}`,
+    max_tokens: 6000,
+    system: `You are an SEO content outline writer, building outlines that are both keyword-optimized and structured for AI Overview/RAG citation (self-contained, chunkable sections). ${BRAND_VOICE}
+
+${productContextBlock(product)}`,
     messages: [
       {
         role: 'user',
         content: [
           `Fraza kluczowa: ${keyword.phrase} (intencja: ${keyword.intent}, sugerowana długość: ~${keyword.recommended_word_count} słów)`,
+          `Encje powiązane do naturalnego uwzględnienia: ${keyword.related_entities.join(', ')}`,
           `Filar tematyczny: ${pillar.name} — ${pillar.description}`,
+          facts.length
+            ? `Realne, zacytowane dane do wykorzystania (podaj link do źródła przy użyciu):\n${facts.map((f) => `- ${f.claim} (źródło: ${f.source_url})`).join('\n')}`
+            : 'Brak realnych danych liczbowych na ten temat — nie wymyślaj statystyk, pisz bez liczb tam gdzie ich brak.',
           publishedArticles.length
             ? `Już opublikowane artykuły (kandydaci do linkowania wewnętrznego):\n${publishedArticles.map((a) => `- ${a.slug}: ${a.title}`).join('\n')}`
             : 'Brak jeszcze opublikowanych artykułów do linkowania wewnętrznego — zostaw internal_link_candidates puste.',
-          `Zaproponuj strukturę artykułu: H1, sekcje H2/H3 z krótkim opisem zawartości (maksymalnie 5 sekcji łącznie — połącz pokrewne wątki, jeśli masz ich więcej), pytania FAQ (3-5), szkic meta title/description, kandydatów na linki wewnętrzne. Cały artykuł ma zmieścić się w ok. ${keyword.recommended_word_count} słowach (maks. 1000 słów / ~5 minut czytania) — planuj sekcje odpowiednio zwięźle.`,
+          `Zaproponuj: lead (3-4 zdania), sekcję "W skrócie" (5-8 punktów pod chunking AI), strukturę sekcji H2/H3 (6-8 łącznie, patrz opis pola sections co jest obowiązkowe), pytania FAQ (5-8), szkic meta title/description, kandydatów na linki wewnętrzne. Cały artykuł ma zmieścić się w ok. ${keyword.recommended_word_count} słowach (maks. 1600).`,
         ].join('\n\n'),
       },
     ],
@@ -261,28 +531,40 @@ async function generateOutline({ keyword, pillar, publishedArticles }) {
   return { result: response.parsed_output, usage: response.usage, model: OUTLINE_MODEL };
 }
 
-async function generateDraft({ outline, keyword }) {
+async function generateDraft({ outline, keyword, facts, product, quotes, screenshots }) {
   const response = await client.messages.parse({
     model: DRAFT_MODEL,
-    max_tokens: 8000,
+    max_tokens: 12000,
     thinking: { type: 'adaptive' },
-    system: `You are an expert B2B content writer. ${BRAND_VOICE}`,
+    system: `You are an expert B2B content writer, writing for both classic SEO and AI Overview citation. ${BRAND_VOICE}
+
+${productContextBlock(product)}`,
     messages: [
       {
         role: 'user',
         content: [
           "Napisz pełny artykuł na podstawie tego outline'u.",
-          `Twardy limit długości: cały artykuł (bez FAQ) maksymalnie ${keyword.recommended_word_count} słów, w żadnym razie więcej niż 1000 słów łącznie — to ma być czytelne w ok. 5 minut, nie wyczerpujący poradnik. Pisz zwięźle, bez rozwlekania sekcji.`,
+          `Twardy limit długości: cały artykuł (lead + sekcje, bez FAQ) maksymalnie ${keyword.recommended_word_count} słów, w żadnym razie więcej niż 1600 słów łącznie.`,
           `H1: ${outline.h1}`,
+          `Lead (użyj prawie dosłownie, dopracuj): ${outline.lead}`,
           `Fraza kluczowa: ${keyword.phrase}`,
+          `Encje powiązane: ${keyword.related_entities.join(', ')}`,
+          `Punkty "W skrócie": ${outline.tldr_bullets.join(' | ')}`,
           `Sekcje:\n${outline.sections.map((s) => `- [${s.level}] ${s.heading}: ${s.summary}`).join('\n')}`,
-          `Pytania FAQ do rozwinięcia:\n${outline.faq_questions.map((q) => `- ${q}`).join('\n')}`,
+          'Pod sekcją "Tabela porównawcza" (lub odpowiednikiem) zbuduj prawdziwą tabelę w markdown (nagłówek + wiersz separatora `|---|---|` + wiersze danych) — nie opisową listę.',
+          'Pierwszy akapit pod KAŻDYM H2 to 40-60 słów czystej, konkretnej odpowiedzi (definicja/liczba/konkret), bez wstępu — dopiero potem rozwinięcie. Każda sekcja musi być zrozumiała sama, bez odwołań do innych sekcji ("jak wspomniano" itp. — zakazane).',
+          'Wpleć minimum 2-3 jednozdaniowe definicje w stylu "X to proces polegający na…".',
+          facts.length
+            ? `Realne, zacytowane dane — wykorzystaj naturalnie w treści, z linkiem markdown do źródła:\n${facts.map((f) => `- ${f.claim} (źródło: ${f.source_url})`).join('\n')}`
+            : 'Brak realnych danych na ten temat — nie wymyślaj liczb ani statystyk.',
+          `Pytania FAQ do rozwinięcia (każda odpowiedź 40-60 słów, bez CTA/sprzedaży):\n${outline.faq_questions.map((q) => `- ${q}`).join('\n')}`,
           `Szkic meta title: ${outline.meta_title_draft}`,
           `Szkic meta description: ${outline.meta_description_draft}`,
           outline.internal_link_candidates.length
             ? `Kandydaci na linki wewnętrzne:\n${outline.internal_link_candidates.map((l) => `- ${l.target_slug} (${l.reason})`).join('\n')}`
             : 'Brak kandydatów na linki wewnętrzne — zostaw internal_link_suggestions puste.',
-          'Zwróć kompletny artykuł: title, slug (kebab-case, ASCII), meta_title (≤60 znaków), meta_description (100-160 znaków), primary_keyword, sections (z pełną treścią w content_markdown), faq (3-5 pozycji), internal_link_suggestions.',
+          slotInstructions({ screenshots, quotes }),
+          'Zwróć kompletny artykuł: title, slug (kebab-case, ASCII, zawierający rdzeń frazy kluczowej), meta_title (55-70 znaków), meta_description (150-160 znaków), primary_keyword, lead, tldr_bullets, sections (z pełną treścią w content_markdown), faq (5-8 pozycji), internal_link_suggestions, enrichment_slots.',
         ].join('\n\n'),
       },
     ],
@@ -292,12 +574,14 @@ async function generateDraft({ outline, keyword }) {
   return { result: response.parsed_output, usage: response.usage, model: DRAFT_MODEL };
 }
 
-async function reviseArticle({ article, instructions }) {
+async function reviseArticle({ article, instructions, product }) {
   const response = await client.messages.parse({
     model: CRITIQUE_MODEL,
-    max_tokens: 8000,
+    max_tokens: 12000,
     thinking: { type: 'adaptive' },
-    system: `You are an expert SEO/content editor. ${BRAND_VOICE}`,
+    system: `You are an expert SEO/AI-citation content editor. ${BRAND_VOICE}
+
+${productContextBlock(product)}`,
     messages: [
       {
         role: 'user',
@@ -325,6 +609,50 @@ async function countGeneratedToday(tenantId) {
   return rows[0].cnt;
 }
 
+async function loadProductContext(tenantId) {
+  const { rows } = await db.query(`SELECT product_name, business_description FROM tenants WHERE id = $1`, [tenantId]);
+  return { name: rows[0]?.product_name || null, description: rows[0]?.business_description || null };
+}
+
+async function loadScreenshots(tenantId) {
+  const { rows } = await db.query(
+    `SELECT id, feature_tag, caption FROM seo_screenshots WHERE tenant_id = $1 ORDER BY feature_tag, id`,
+    [tenantId],
+  );
+  return rows;
+}
+
+// Turns the model's slot definitions into the stored enrichment_slots and
+// fills screenshot slots that already have a matching library image. A marker
+// without a definition (or the reverse) would leave the editor with something
+// they can neither fill nor remove, so both are dropped here.
+function materializeSlots(body, article, { quotes, screenshots }) {
+  const markerIds = new Set(slots.openSlotIds(body));
+  const definitions = (article.enrichment_slots || []).filter((s) => markerIds.has(s.id));
+  const definedIds = new Set(definitions.map((s) => s.id));
+  let result = body;
+  for (const id of markerIds) {
+    if (!definedIds.has(id)) result = slots.replaceMarker(result, id, '');
+  }
+  const records = [];
+  for (const def of definitions) {
+    const record = { id: def.id, type: def.type, brief: def.brief, feature_tag: def.feature_tag || null, status: 'pending', suggestion: null, value: null };
+    if (def.type === 'quote' && def.quote_index != null && quotes[def.quote_index]) {
+      record.suggestion = quotes[def.quote_index];
+    }
+    const screenshot = def.type === 'screenshot' && def.screenshot_id != null
+      ? screenshots.find((sc) => sc.id === def.screenshot_id)
+      : null;
+    if (screenshot) {
+      record.value = { screenshot_id: screenshot.id, caption: screenshot.caption };
+      record.status = 'filled';
+      result = slots.replaceMarker(result, def.id, slots.renderSlotMarkdown('screenshot', record.value));
+    }
+    records.push(record);
+  }
+  return { body: result, records };
+}
+
 async function generateArticle(tenantId) {
   const pillar = await strategyService.pickLeastCoveredPillar(tenantId);
   if (!pillar) throw new Error('No content pillar available for this tenant.');
@@ -335,6 +663,8 @@ async function generateArticle(tenantId) {
     [tenantId],
   );
   const validSlugs = new Set(published.map((p) => p.slug));
+  const product = await loadProductContext(tenantId);
+  const screenshots = await loadScreenshots(tenantId);
 
   let totalCostUsd = 0;
   const track = (stage) => { totalCostUsd += costOf(stage.model, stage.usage); };
@@ -359,35 +689,56 @@ async function generateArticle(tenantId) {
   );
   const keywordId = keywordRows[0].id;
 
-  const outlineResp = await generateOutline({ keyword, pillar, publishedArticles: published });
+  let facts = [];
+  let quotes = [];
+  try {
+    const factsResp = await factsService.findFacts({ keyword: keyword.phrase, pillar, isExpertTopic: keyword.is_expert_topic });
+    track(factsResp);
+    facts = factsResp.facts;
+    quotes = factsResp.quotes;
+  } catch (err) {
+    logger.info('SEO facts research failed — proceeding without cited data', { tenantId, reason: err.message });
+  }
+
+  const outlineResp = await generateOutline({ keyword, pillar, publishedArticles: published, facts, product });
   track(outlineResp);
   const outline = outlineResp.result;
 
-  const draftResp = await generateDraft({ outline, keyword });
+  const draftResp = await generateDraft({ outline, keyword, facts, product, quotes, screenshots });
   track(draftResp);
   let article = draftResp.result;
 
-  const critiqueResp = await reviseArticle({ article, instructions: CRITIQUE_INSTRUCTIONS });
+  const critiqueResp = await reviseArticle({ article, instructions: CRITIQUE_INSTRUCTIONS, product });
   track(critiqueResp);
   article = critiqueResp.result;
   article.slug = ensureValidSlug(article.slug, article.title);
 
-  let validation = validateArticle(article, keyword.phrase, validSlugs);
+  const validationOpts = {
+    hasFacts: facts.length > 0,
+    minSources: keyword.is_expert_topic && facts.length >= 2 ? 2 : 1,
+    requireSlots: true,
+    productName: product.description ? product.name : null,
+    screenshotIds: new Set(screenshots.map((sc) => sc.id)),
+    quoteCount: quotes.length,
+  };
+  let validation = validateArticle(article, keyword.phrase, validSlugs, validationOpts);
   let attempts = 0;
   while (!validation.ok && attempts < 2) {
     const fixResp = await reviseArticle({
       article,
+      product,
       instructions: `Ten artykuł nie przeszedł automatycznej walidacji. Popraw dokładnie te problemy:\n${validation.errors.map((e) => `- ${e}`).join('\n')}`,
     });
     track(fixResp);
     article = fixResp.result;
     article.slug = ensureValidSlug(article.slug, article.title);
-    validation = validateArticle(article, keyword.phrase, validSlugs);
+    validation = validateArticle(article, keyword.phrase, validSlugs, validationOpts);
     attempts++;
   }
 
   const status = validation.ok ? 'in_review' : 'needs_update';
-  const renderedBody = renderBody(article);
+  const materialized = materializeSlots(renderBody(article, pillar), article, { quotes, screenshots });
+  const renderedBody = materialized.body;
   const body = validation.ok
     ? renderedBody
     : `[Automatyczna walidacja nie przeszła po ${attempts} próbach poprawy — wymaga ręcznej korekty]:\n${validation.errors.join('\n')}\n\n${renderedBody}`;
@@ -396,10 +747,10 @@ async function generateArticle(tenantId) {
 
   const { rows: contentRows } = await db.query(
     `INSERT INTO seo_content_pieces
-       (tenant_id, locale, title, slug, body, meta_description, status, target_keyword, category, generation_cost_usd, header_image_url)
-     VALUES ($1, 'pl', $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       (tenant_id, locale, title, slug, body, meta_description, status, target_keyword, category, generation_cost_usd, header_image_url, faq, enrichment_slots)
+     VALUES ($1, 'pl', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING *`,
-    [tenantId, article.title, article.slug, body, article.meta_description, status, keyword.phrase, pillar.name, totalCostUsd.toFixed(4), headerImageUrl],
+    [tenantId, article.title, article.slug, body, article.meta_description, status, keyword.phrase, pillar.name, totalCostUsd.toFixed(4), headerImageUrl, JSON.stringify(article.faq), JSON.stringify(materialized.records)],
   );
 
   await db.query(`UPDATE seo_keywords SET content_id = $1 WHERE id = $2`, [contentRows[0].id, keywordId]);
@@ -424,9 +775,161 @@ async function generateArticle(tenantId) {
     status,
     costUsd: totalCostUsd.toFixed(4),
     validationAttempts: attempts,
+    factsUsed: facts.length,
+    verifiedQuotes: quotes.length,
+    slots: materialized.records.length,
   });
 
   return contentRows[0];
 }
 
-module.exports = { generateArticle, countGeneratedToday, validateArticle, renderBody, BRAND_VOICE };
+// ── Refresh of an already-published article ─────────────────────────────
+// Produces a proposed revision only; seoRefreshService stages it in
+// refresh_draft and it goes live when an editor applies it. Held to the same
+// structure and validation as a new article, so a refresh also brings older,
+// pre-2026-09 articles up to the current standard. It additionally targets
+// the real queries the page already shows up for in Search Console.
+
+const REFRESH_REASON_TEXT = {
+  striking_distance: (s) => `Artykuł jest blisko pierwszej strony Google (śr. pozycja ${s.position}, ${s.impressions} wyświetleń w 28 dni) — celem jest wejście do TOP 10.`,
+  position_drop: (s) => `Artykuł stracił pozycję w Google (z ${s.positionBefore} na ${s.positionNow}) — celem jest odzyskanie jej przez lepsze dopasowanie do zapytań i aktualność.`,
+  age: () => 'Artykuł nie był aktualizowany od ponad 90 dni — celem jest aktualność danych i zgodność z bieżącymi standardami treści.',
+  manual: () => 'Redaktor oznaczył artykuł do odświeżenia.',
+};
+
+async function refreshArticle(contentId, tenantId) {
+  const { rows } = await db.query(
+    `SELECT c.id, c.title, c.slug, c.body, c.meta_description, c.target_keyword, c.category,
+            c.refresh_reason, c.refresh_signal, wp.remote_url AS wordpress_url
+       FROM seo_content_pieces c
+       LEFT JOIN seo_social_posts wp ON wp.content_id = c.id AND wp.platform = 'wordpress' AND wp.status = 'published'
+      WHERE c.id = $1 AND c.tenant_id = $2`,
+    [contentId, tenantId],
+  );
+  const current = rows[0];
+  if (!current) throw new Error('Nie znaleziono artykułu.');
+
+  const { rows: pillarRows } = await db.query(
+    `SELECT p.id, p.name, p.description, p.slug
+       FROM seo_keywords k JOIN seo_content_pillars p ON p.id = k.pillar_id
+      WHERE k.content_id = $1 LIMIT 1`,
+    [contentId],
+  );
+  // Seed articles predate content pillars — fall back to the category text.
+  const pillar = pillarRows[0] || { name: current.category || '', description: current.category || '', slug: null };
+  const keyword = current.target_keyword || current.title;
+
+  const { rows: published } = await db.query(
+    `SELECT id, slug, title FROM seo_content_pieces
+      WHERE tenant_id = $1 AND locale = 'pl' AND status = 'published' AND id <> $2`,
+    [tenantId, contentId],
+  );
+  const validSlugs = new Set(published.map((p) => p.slug));
+  const product = await loadProductContext(tenantId);
+
+  let totalCostUsd = 0;
+  const track = (stage) => { totalCostUsd += costOf(stage.model, stage.usage); };
+
+  let queries = [];
+  try {
+    queries = await gscService.getQueriesForArticle(tenantId, current);
+  } catch (err) {
+    logger.info('SEO refresh: no GSC query data for page', { contentId, reason: err.message });
+  }
+
+  let facts = [];
+  try {
+    const factsResp = await factsService.findFacts({ keyword, pillar });
+    track(factsResp);
+    facts = factsResp.facts;
+  } catch (err) {
+    logger.info('SEO refresh: facts research failed — proceeding without cited data', { contentId, reason: err.message });
+  }
+
+  const reasonText = REFRESH_REASON_TEXT[current.refresh_reason]?.(current.refresh_signal || {}) ?? REFRESH_REASON_TEXT.manual();
+
+  const response = await client.messages.parse({
+    model: DRAFT_MODEL,
+    max_tokens: 12000,
+    thinking: { type: 'adaptive' },
+    system: `You are an expert B2B content editor refreshing an already-published, already-indexed article — improve it, don't discard what already works. ${BRAND_VOICE}\n\n${productContextBlock(product)}`,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          'Odśwież ten opublikowany artykuł. Zachowaj temat, główną frazę i to, co w nim dobre — to aktualizacja, nie nowy tekst od zera.',
+          `Powód odświeżenia: ${reasonText}`,
+          `Obecny tytuł: ${current.title}`,
+          `Obecny meta description: ${current.meta_description || '(brak)'}`,
+          `Fraza kluczowa: ${keyword}`,
+          `Obecna treść (markdown; pomiń sekcje "Źródła" i "Zobacz też", link do tematu i CTA — dodawane są automatycznie):\n\n${current.body}`,
+          'Cytaty i komentarze w blokach "> " oraz obrazy "![...](...)" zostały dodane i zatwierdzone przez redaktora — przenieś je do nowej wersji dosłownie, bez zmian, w pasujące miejsca. Nie dodawaj nowych znaczników [[SLOT:...]]; enrichment_slots zwróć jako pustą tablicę.',
+          queries.length
+            ? `Zapytania z Google Search Console, na które ten artykuł JUŻ się wyświetla (ostatnie 28 dni):\n${queries.map((q) => `- "${q.phrase}" (${q.impressions} wyśw., śr. poz. ${q.position})`).join('\n')}\nDopisz lub przebuduj treść tak, żeby odpowiadała na te zapytania wprost — najlepiej jako nagłówek H2 w formie pytania albo pytanie w FAQ, z 40-60-słowną konkretną odpowiedzią na początku. Nie upychaj fraz sztucznie; pomiń zapytania niezwiązane z tematem.`
+            : 'Brak danych o zapytaniach z Search Console — skup się na aktualności treści i zgodności ze strukturą poniżej.',
+          facts.length
+            ? `Realne, zacytowane dane — wykorzystaj naturalnie, z linkiem markdown do źródła:\n${facts.map((f) => `- ${f.claim} (źródło: ${f.source_url})`).join('\n')}`
+            : 'Brak realnych danych na ten temat — nie wymyślaj liczb ani statystyk.',
+          'Wymagana struktura (jak każdy nowy artykuł): lead (3-4 zdania, fraza w pierwszych 100 słowach), "W skrócie" (5-8 punktów), wśród H2 sekcje "Dla kogo jest…" i "Dla kogo NIE jest to rozwiązanie", "Najczęstsze błędy" oraz prawdziwa tabela porównawcza w markdown; pozostałe H2 w miarę możliwości jako pytania, pierwszy akapit pod każdym H2 to 40-60 słów czystej odpowiedzi; min. 2-3 jednozdaniowe definicje "X to…"; każda sekcja zrozumiała samodzielnie; FAQ 5-8 pytań po 40-60 słów; łącznie maks. 1600 słów (bez FAQ).',
+          `Slug MUSI pozostać dokładnie: ${current.slug} — adres jest już zaindeksowany.`,
+          published.length
+            ? `Kandydaci na linki wewnętrzne (użyj 2-5 pasujących):\n${published.map((p) => `- ${p.slug}: ${p.title}`).join('\n')}`
+            : 'Brak innych opublikowanych artykułów — zostaw internal_link_suggestions puste.',
+          'Zwróć kompletny artykuł: title, slug, meta_title (55-70 znaków), meta_description (150-160 znaków), primary_keyword, lead, tldr_bullets, sections, faq, internal_link_suggestions.',
+        ].join('\n\n'),
+      },
+    ],
+    output_config: { format: zodOutputFormat(ArticleSchema) },
+  });
+  if (!response.parsed_output) throw new Error('Refresh generation failed to parse.');
+  track({ model: DRAFT_MODEL, usage: response.usage });
+  let article = { ...response.parsed_output, slug: current.slug };
+
+  const critiqueResp = await reviseArticle({ article, instructions: CRITIQUE_INSTRUCTIONS, product });
+  track(critiqueResp);
+  article = { ...critiqueResp.result, slug: current.slug };
+
+  const validationOpts = {
+    hasFacts: facts.length > 0,
+    skipSlugCheck: true,
+    productName: product.description ? product.name : null,
+  };
+  let validation = validateArticle(article, keyword, validSlugs, validationOpts);
+  let attempts = 0;
+  while (!validation.ok && attempts < 2) {
+    const fixResp = await reviseArticle({
+      article,
+      product,
+      instructions: `Ten artykuł nie przeszedł automatycznej walidacji. Popraw dokładnie te problemy (slug zostaw bez zmian):\n${validation.errors.map((e) => `- ${e}`).join('\n')}`,
+    });
+    track(fixResp);
+    article = { ...fixResp.result, slug: current.slug };
+    validation = validateArticle(article, keyword, validSlugs, validationOpts);
+    attempts++;
+  }
+
+  // A refresh never opens new slots (see prompt), so any marker the model
+  // still added is stripped rather than blocking a live article.
+  let refreshedBody = renderBody(article, pillar);
+  for (const id of slots.openSlotIds(refreshedBody)) refreshedBody = slots.replaceMarker(refreshedBody, id, '');
+
+  logger.info('SEO refresh draft generated', {
+    tenantId, contentId, costUsd: totalCostUsd.toFixed(4), queriesUsed: queries.length, factsUsed: facts.length, validationOk: validation.ok,
+  });
+
+  return {
+    title: article.title,
+    meta_description: article.meta_description,
+    body: refreshedBody,
+    faq: article.faq,
+    queries,
+    facts_used: facts.length,
+    // Kept rather than blocking the draft: the editor decides whether the
+    // remaining issues matter enough to reject it.
+    validation_errors: validation.ok ? [] : validation.errors,
+    cost_usd: Number(totalCostUsd.toFixed(4)),
+    generated_at: new Date().toISOString(),
+  };
+}
+
+module.exports = { generateArticle, refreshArticle, countGeneratedToday, validateArticle, renderBody, BRAND_VOICE };

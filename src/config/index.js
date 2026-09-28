@@ -96,9 +96,15 @@ module.exports = {
       "GOOGLE_REDIRECT_URI",
       "http://localhost:3000/api/crm/gmail/oauth/callback",
     ),
-    // SEObot — Search Console (reuses the same OAuth client as Gmail above;
-    // this redirect URI must be added to that client's "Authorized redirect
-    // URIs" in Google Cloud Console before the flow works).
+    // SEObot — Search Console uses its own OAuth client in CRMtree's own GCP
+    // project. The shared GOOGLE_CLIENT_ID above belongs to a Worktrips GCP
+    // project CRMtree can't administer (can't add test users, so the consent
+    // screen 403s). Falls back to the shared client only so an environment
+    // keeps working until its GOOGLE_GSC_CLIENT_* secrets are set. The pair
+    // falls back together — a new ID with the old secret would never auth.
+    ...(optional("GOOGLE_GSC_CLIENT_ID") && optional("GOOGLE_GSC_CLIENT_SECRET")
+      ? { gscClientId: optional("GOOGLE_GSC_CLIENT_ID"), gscClientSecret: optional("GOOGLE_GSC_CLIENT_SECRET") }
+      : { gscClientId: optional("GOOGLE_CLIENT_ID"), gscClientSecret: optional("GOOGLE_CLIENT_SECRET") }),
     gscRedirectUri: optional(
       "GOOGLE_GSC_REDIRECT_URI",
       "http://localhost:3000/api/crm/seo/gsc/oauth/callback",
@@ -167,6 +173,13 @@ module.exports = {
 
   pexels: {
     apiKey: optional("PEXELS_API_KEY"),
+  },
+
+  // IndexNow key — not a secret (it's published as crmtree.pl/<key>.txt from
+  // the crmtree-landing repo). Unset = IndexNow pings disabled, which is what
+  // local dev and INT should be: only production publishes the real blog.
+  indexNow: {
+    key: optional("INDEXNOW_KEY"),
   },
 
   // SEObot Social — one-click multi-platform publishing at article publish time.

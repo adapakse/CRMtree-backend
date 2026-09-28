@@ -19,6 +19,7 @@ npm-debug.log*
 dist/
 build/
 .tmp/
+.azurite/
 
 # OS
 .DS_Store
