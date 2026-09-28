@@ -1135,11 +1135,22 @@ router.delete('/social/accounts/:platform',
   },
 );
 
+// Without the app credentials the user was sent to LinkedIn/Facebook with an
+// empty client_id and only saw the provider's own cryptic error page
+// ("You need to pass the client_id parameter", 2026-09-28).
 router.get('/social/linkedin/oauth/url', requireSeoEditor, (req, res) => {
+  if (!config.linkedin.clientId || !config.linkedin.clientSecret) {
+    logger.error('LinkedIn connect attempted without LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET configured');
+    return res.status(503).json({ error: 'Integracja z LinkedIn nie jest skonfigurowana na serwerze (brak danych aplikacji LinkedIn). Skontaktuj się z administratorem.' });
+  }
   res.json({ url: linkedinService.getAuthUrl(req.user.tenant_id, req.user.id) });
 });
 
 router.get('/social/facebook/oauth/url', requireSeoEditor, (req, res) => {
+  if (!config.meta.appId || !config.meta.appSecret) {
+    logger.error('Facebook connect attempted without META_APP_ID / META_APP_SECRET configured');
+    return res.status(503).json({ error: 'Integracja z Facebookiem nie jest skonfigurowana na serwerze (brak danych aplikacji Meta). Skontaktuj się z administratorem.' });
+  }
   res.json({ url: metaService.getAuthUrl(req.user.tenant_id, req.user.id) });
 });
 
