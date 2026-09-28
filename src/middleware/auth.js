@@ -157,11 +157,17 @@ function signRefreshToken(user) {
   return { token, hash };
 }
 
-async function saveRefreshToken(userId, tenantId, hash) {
-  const expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000);
+const REFRESH_TTL_DAYS = { web: 7, mobile: 60 };
+
+// Mobile tokens (ADR 001 §4) are bound to one device and live longer —
+// biometric unlock replaces typing the password — which is also why reusing
+// a rotated one revokes the whole device family (see POST /auth/refresh).
+async function saveRefreshToken(userId, tenantId, hash, { client = "web", deviceId = null, deviceName = null } = {}) {
+  const expiresAt = new Date(Date.now() + REFRESH_TTL_DAYS[client] * 24 * 3600 * 1000);
   await db.query(
-    "INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at) VALUES ($1,$2,$3,$4)",
-    [userId, tenantId, hash, expiresAt]
+    `INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at, client, device_id, device_name)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [userId, tenantId, hash, expiresAt, client, deviceId, deviceName]
   );
 }
 
