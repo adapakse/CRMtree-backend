@@ -11,7 +11,7 @@
 // until granted, calls here fail with a permissions error from Meta, same
 // as any other publish failure (see seoSocialService).
 //
-// NOTE: Graph API is versioned in the URL (v21.0 below). Bump periodically —
+// NOTE: Graph API is versioned in the URL (GRAPH_VERSION below). Bump periodically —
 // Meta deprecates old versions on a schedule, check developers.facebook.com.
 // ─────────────────────────────────────────────────────────────────
 
