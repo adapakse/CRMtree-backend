@@ -25,6 +25,12 @@
 // study section) rather than its full ~12-section structure at 1500-4000
 // words. Don't re-expand scope back to the full framework without asking —
 // that was a deliberate, explicit trade-off, not an oversight.
+//
+// After an external expert review (2026-09-28) every stage also gets the
+// tenant's product description (so articles show a named product feature
+// instead of generic advice), and each new article carries enrichment slots
+// (utils/seoSlots.js) for an expert comment, attributed quotes and product
+// screenshots that a human fills before approval.
 // ─────────────────────────────────────────────────────────────────
 
 const { z } = require('zod');
@@ -38,6 +44,7 @@ const factsService = require('./seoFactsService');
 const pexelsService = require('./pexelsService');
 const gscService = require('./gscService');
 const { ensureValidSlug } = require('../utils/slugify');
+const slots = require('../utils/seoSlots');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 
@@ -53,11 +60,41 @@ const PRICING = {
 };
 
 const BRAND_VOICE = `Ton: profesjonalny, konkretny, B2B, bez sprzedażowego przegięcia i banalnych wstępów (unikaj fraz typu "W dzisiejszych czasach…", "Warto zauważyć, że…", ogólników i metafor).
-Odbiorca: menedżerowie sprzedaży i właściciele firm z różnych branż, rozważający lub już używający CRM.
-Fokus tematyczny: dynamiczna praca handlowców, zarządzanie lejkiem sprzedażowym, upsell i cross-sell.
-Zero wymyślonych statystyk i case studies — jeśli dostarczono realne, zacytowane dane (z linkiem do źródła), wykorzystaj je i podlinkuj źródło; w przeciwnym razie albo uogólnienie bez fałszywego źródła, albo pominięcie liczby.
+Zero wymyślonych statystyk, cytatów i case studies — jeśli dostarczono realne, zacytowane dane (z linkiem do źródła), wykorzystaj je i podlinkuj źródło; w przeciwnym razie albo uogólnienie bez fałszywego źródła, albo pominięcie liczby.
 Każda sekcja musi być zrozumiała samodzielnie, bez kontekstu z innych sekcji — nigdy nie pisz "jak wspomniano wyżej" ani "w powyższym przykładzie": AI wycina fragmenty z artykułu pojedynczo, więc każdy fragment musi działać jako osobny, kompletny moduł wiedzy.
+Czytelność: akapit ma maksymalnie 3-4 zdania (ok. 80 słów), między akapitami pusta linia. Kroki procesu zawsze jako lista numerowana ("1. "), wyliczenia cech/kryteriów jako lista punktowana ("- "); przed listą pusta linia.
 Cała treść po polsku.`;
+
+// Articles read as generic until the draft was told what the product does
+// (expert review, 2026-09-28) — before that only the pillar name reached it.
+function productContextBlock(product) {
+  if (!product?.description) return 'Brak opisu produktu — nie opisuj funkcji żadnego konkretnego produktu.';
+  const name = product.name || 'produkt';
+  return [
+    `Produkt firmy publikującej artykuł: ${name}.`,
+    `Opis produktu (jedyne źródło wiedzy o jego funkcjach):\n${product.description}`,
+    `W 1-2 miejscach w sekcjach merytorycznych (nie w leadzie, "W skrócie" ani FAQ) pokaż konkretnie, jak opisany problem rozwiązuje się w ${name}, odwołując się do nazwanej funkcji z opisu powyżej i do tego, co handlowiec lub menedżer realnie w niej robi. Nazwij produkt z nazwy ("${name}"). Nigdy nie przypisuj ${name} funkcji, których nie ma w opisie. Rzeczowo, bez sprzedażowego tonu i bez porównań z konkurencją.`,
+  ].join('\n');
+}
+
+function slotInstructions({ screenshots, quotes }) {
+  const quoteList = quotes.length
+    ? 'Jeśli któryś z poniższych zweryfikowanych cytatów pasuje, ustaw quote_index na jego numer (od 0) — nie przepisuj cytatu do treści, redaktor go zatwierdzi:\n'
+      + quotes.map((q, i) => `  [${i}] „${q.quote}” — ${q.author}${q.author_role ? `, ${q.author_role}` : ''} (${q.source_url})`).join('\n')
+    : 'Brak zweryfikowanych cytatów — quote_index zawsze null.';
+  const screenshotList = screenshots.length
+    ? 'Jeśli któryś z poniższych screenów z biblioteki pasuje, ustaw screenshot_id na jego id:\n'
+      + screenshots.map((s) => `  id ${s.id}: [${s.feature_tag}] ${s.caption}`).join('\n')
+    : 'Biblioteka screenów jest pusta — screenshot_id zawsze null.';
+  const { expert_comment: comment, quote, screenshot } = slots.SLOT_LIMITS;
+  return [
+    'Miejsca do uzupełnienia przez redaktora (enrichment_slots). Wstaw w treść sekcji (content_markdown) znaczniki w osobnej linii, otoczone pustymi liniami: [[SLOT:<id>]]. Id krótkie, np. "komentarz-1", "cytat-1", "screen-1".',
+    `- dokładnie ${comment.max} "expert_comment": miejsce na komentarz eksperta z praktyki (własne doświadczenie, obserwacja z wdrożeń). Wstaw tam, gdzie opinia praktyka realnie wzmacnia tekst. W "brief" napisz konkretnie, o co zapytać eksperta w kontekście tej sekcji (np. "Jaki próg scoringu ICP sprawdza się u Państwa klientów i dlaczego?").`,
+    `- ${quote.min}-${quote.max} "quote": cytat z zewnętrznego, wiarygodnego źródła z podpisem autora. W "brief" napisz, jaki cytat pasuje w tym miejscu. ${quoteList}`,
+    `- ${screenshot.min}-${screenshot.max} "screenshot": zrzut ekranu produktu obok fragmentu, który opisuje konkretną funkcję. W "brief" napisz, co dokładnie ma być widać na ekranie; w "feature_tag" krótka nazwa funkcji. ${screenshotList}`,
+    'Znaczniki tylko w sekcjach, nigdy w leadzie, "W skrócie" ani FAQ. Każdy znacznik dokładnie raz. Tekst wokół znacznika musi czytać się poprawnie także wtedy, gdy redaktor usunie to miejsce.',
+  ].join('\n');
+}
 
 const CRITIQUE_INSTRUCTIONS = `Skrytykuj i popraw ten artykuł pod kątem:
 (1) halucynacji — wymyślonych statystyk, case studies, lub twierdzeń o konkurencji (dane z prawdziwym źródłem/linkiem są OK i pożądane),
@@ -68,7 +105,10 @@ const CRITIQUE_INSTRUCTIONS = `Skrytykuj i popraw ten artykuł pod kątem:
 (6) samodzielności każdej sekcji — usuń każde odniesienie wstecz typu "jak wspomniano", "jak wyżej", "w powyższym przykładzie",
 (7) czy pierwszy akapit pod każdym H2 daje konkretną odpowiedź w 40-60 słowach, bez lania wody, zanim rozwinięcie,
 (8) czy nagłówki H2 (poza "Dla kogo"/"Dla kogo nie"/"Najczęstsze błędy"/"Tabela porównawcza") są sformułowane jako pytania,
-(9) czy artykuł zawiera min. 2-3 jednozdaniowe definicje w stylu "X to proces polegający na…".
+(9) czy artykuł zawiera min. 2-3 jednozdaniowe definicje w stylu "X to proces polegający na…",
+(10) konkretności — czy w 1-2 miejscach pokazano, jak problem rozwiązuje się w produkcie z opisu, z nazwą produktu i nazwaną funkcją, bez przypisywania mu funkcji spoza opisu i bez sprzedażowego tonu,
+(11) czytelności — akapity maks. 3-4 zdania, kroki jako lista numerowana, wyliczenia jako lista punktowana, żadnych ścian tekstu,
+(12) znaczników [[SLOT:...]] — zostaw je dokładnie tam, gdzie są, w osobnych liniach, i nie zmieniaj enrichment_slots bez powodu.
 Popraw wszystko co znajdziesz.`;
 
 const BANNED_PATTERNS = [
@@ -97,6 +137,9 @@ const KeywordResearchSchema = z.object({
   // Entity mapping (doc: "graf tematyczny", not keyword-only writing) — main
   // entity is `phrase` itself; these are what should be naturally woven in.
   related_entities: z.array(z.string()).min(2).max(6),
+  is_expert_topic: z
+    .boolean()
+    .describe('true dla tematów wymagających źródeł eksperckich: prawo i regulacje (np. AI Act, RODO), bezpieczeństwo, finanse, działanie modeli AI'),
   reasoning: z.string(),
 });
 
@@ -137,6 +180,18 @@ const ArticleSchema = z.object({
   faq: z.array(z.object({ question: z.string(), answer: z.string() })).min(5).max(8),
   internal_link_suggestions: z
     .array(z.object({ target_slug: z.string(), anchor_text: z.string() }))
+    .max(6),
+  enrichment_slots: z
+    .array(
+      z.object({
+        id: z.string(),
+        type: z.enum(slots.SLOT_TYPES),
+        brief: z.string(),
+        feature_tag: z.string().nullable(),
+        screenshot_id: z.number().int().nullable(),
+        quote_index: z.number().int().nullable(),
+      }),
+    )
     .max(6),
   // No `cta` field at all — the marketing site has no demo/contact/pricing page for
   // the model to link to, only /login exists. Letting the model invent a CTA url
@@ -184,14 +239,73 @@ function containsMarkdownTable(text) {
   return false;
 }
 
+const LIST_ITEM_LINE = /^\s*([-*]|\d+[.)])\s+/;
+const NON_PARAGRAPH_LINE = /^\s*(#{2,3} |>|\||!\[|\[\[SLOT:)/;
+const MAX_PARAGRAPH_WORDS = 110;
+
+function paragraphsOf(markdown) {
+  const paragraphs = [];
+  let current = [];
+  for (const line of (markdown || '').split('\n')) {
+    if (!line.trim() || LIST_ITEM_LINE.test(line) || NON_PARAGRAPH_LINE.test(line)) {
+      if (current.length) paragraphs.push(current.join(' '));
+      current = [];
+    } else {
+      current.push(line.trim());
+    }
+  }
+  if (current.length) paragraphs.push(current.join(' '));
+  return paragraphs;
+}
+
+function countLists(markdown) {
+  const lines = (markdown || '').split('\n');
+  return lines.filter((line, i) => LIST_ITEM_LINE.test(line) && !(i > 0 && LIST_ITEM_LINE.test(lines[i - 1]))).length;
+}
+
+function validateSlots(article, { screenshotIds, quoteCount }) {
+  const errors = [];
+  const defined = article.enrichment_slots || [];
+  const ids = defined.map((s) => s.id);
+  for (const type of slots.SLOT_TYPES) {
+    const count = defined.filter((s) => s.type === type).length;
+    const { min, max } = slots.SLOT_LIMITS[type];
+    if (count < min || count > max) errors.push(`Miejsc do uzupełnienia typu "${type}" jest ${count} — oczekiwano ${min}-${max}.`);
+  }
+  if (new Set(ids).size !== ids.length) errors.push('Id w enrichment_slots muszą być unikalne.');
+  for (const slot of defined) {
+    if (!/^[a-z0-9_-]+$/i.test(slot.id)) errors.push(`Id miejsca "${slot.id}" może zawierać tylko litery, cyfry, "-" i "_".`);
+    if ((slot.brief || '').trim().length < 20) errors.push(`Miejsce "${slot.id}" ma zbyt ogólny opis (brief) — napisz konkretnie, czego potrzeba.`);
+    if (slot.screenshot_id != null && !screenshotIds.has(slot.screenshot_id)) errors.push(`Miejsce "${slot.id}" wskazuje nieistniejący screen (id ${slot.screenshot_id}).`);
+    if (slot.quote_index != null && (slot.quote_index < 0 || slot.quote_index >= quoteCount)) errors.push(`Miejsce "${slot.id}" wskazuje nieistniejący cytat (quote_index ${slot.quote_index}).`);
+  }
+  const sectionMarkers = article.sections.flatMap((s) => slots.openSlotIds(s.content_markdown));
+  for (const id of ids) {
+    const occurrences = sectionMarkers.filter((m) => m === id).length;
+    if (occurrences !== 1) errors.push(`Znacznik [[SLOT:${id}]] występuje w sekcjach ${occurrences} razy — oczekiwano dokładnie raz, w osobnej linii.`);
+  }
+  for (const id of new Set(sectionMarkers)) {
+    if (!ids.includes(id)) errors.push(`Znacznik [[SLOT:${id}]] nie ma definicji w enrichment_slots.`);
+  }
+  const outsideSections = [article.lead, ...(article.tldr_bullets || []), ...(article.faq || []).map((f) => f.answer)].join('\n');
+  if (/\[\[SLOT:/i.test(outsideSections)) errors.push('Znaczniki [[SLOT:...]] mogą być tylko w sekcjach, nie w leadzie, "W skrócie" ani FAQ.');
+  return errors;
+}
+
 // skipSlugCheck: a refreshed article keeps its existing, already-indexed slug.
 // Older slugs may not contain the keyword's core word, and the model isn't
 // allowed to change the slug anyway, so that check could never be fixed.
-function validateArticle(article, primaryKeyword, validSlugSet, hasFacts = false, { skipSlugCheck = false } = {}) {
+// requireSlots is off for refreshes: they keep already-filled quotes and
+// screenshots instead of asking the editor for new ones.
+function validateArticle(article, primaryKeyword, validSlugSet, {
+  hasFacts = false, skipSlugCheck = false, requireSlots = false, productName = null,
+  minSources = 1, screenshotIds = new Set(), quoteCount = 0,
+} = {}) {
   const errors = [];
   const bodyText = [article.lead, ...(article.tldr_bullets || []), ...article.sections.map((s) => s.content_markdown)]
     .filter(Boolean)
-    .join(' ');
+    .join(' ')
+    .replace(/\[\[SLOT:[^\]]*\]\]/gi, ' ');
   const core = coreWord(primaryKeyword);
 
   // "Wersja pośrednia" target: ~1200-1600 words, with slack either side to
@@ -276,15 +390,47 @@ function validateArticle(article, primaryKeyword, validSlugSet, hasFacts = false
     }
   }
 
-  if (hasFacts && !/\]\(https:\/\//.test(bodyText)) {
-    errors.push('Dostarczono realne dane ze źródłami, ale artykuł nie zawiera żadnego linku zewnętrznego (https://) cytującego źródło.');
+  const sourceCount = sourceLinks(bodyText).length;
+  if (hasFacts && sourceCount < minSources) {
+    errors.push(`Dostarczono realne dane ze źródłami, ale artykuł cytuje ${sourceCount} źródeł (link https://) — oczekiwano min. ${minSources}.`);
   }
+
+  for (const section of article.sections) {
+    const tooLong = paragraphsOf(section.content_markdown).filter((p) => countWords(p) > MAX_PARAGRAPH_WORDS);
+    if (tooLong.length) {
+      errors.push(`Sekcja "${section.heading}" ma akapit dłuższy niż ${MAX_PARAGRAPH_WORDS} słów — podziel go albo zamień wyliczenie na listę.`);
+    }
+  }
+  const listCount = article.sections.reduce((sum, s) => sum + countLists(s.content_markdown), 0);
+  if (listCount < 2) {
+    errors.push(`Za mało list w treści (${listCount}, oczekiwano min. 2) — kroki jako lista numerowana, wyliczenia jako punktowana.`);
+  }
+
+  if (productName) {
+    const sectionsText = article.sections.map((s) => s.content_markdown).join(' ');
+    const mentions = sectionsText.split(productName).length - 1;
+    if (mentions < 1 || mentions > 5) {
+      errors.push(`Nazwa produktu "${productName}" występuje w sekcjach ${mentions} razy — oczekiwano 1-5 (konkretne zastosowanie funkcji, bez reklamy).`);
+    }
+  }
+
+  if (requireSlots) errors.push(...validateSlots(article, { screenshotIds, quoteCount }));
 
   for (const { regex, reason } of BANNED_PATTERNS) {
     if (regex.test(bodyText)) errors.push(`Wykryto zakazany wzorzec: ${reason}.`);
   }
 
   return { ok: errors.length === 0, errors };
+}
+
+// Collected from the inline citations, so the list can never name a source
+// the article doesn't actually cite.
+function sourceLinks(markdown) {
+  const byUrl = new Map();
+  for (const m of (markdown || '').matchAll(/\[([^\]]+)\]\((https:\/\/[^)\s]+)\)/g)) {
+    if (!byUrl.has(m[2])) byUrl.set(m[2], { label: m[1], url: m[2] });
+  }
+  return [...byUrl.values()];
 }
 
 function renderBody(article, pillar) {
@@ -304,6 +450,11 @@ function renderBody(article, pillar) {
       parts.push(`**${item.question}**`);
       parts.push(item.answer);
     }
+  }
+  const sources = sourceLinks(article.sections.map((s) => s.content_markdown).join('\n'));
+  if (sources.length) {
+    parts.push('## Źródła');
+    parts.push(sources.map((s) => `- [${s.label}](${s.url})`).join('\n'));
   }
   if (article.internal_link_suggestions?.length) {
     parts.push('## Zobacz też');
@@ -350,11 +501,13 @@ async function researchKeyword({ pillar, existingPhrases, gapQueries = [] }) {
   return { result: response.parsed_output, usage: response.usage, model: RESEARCH_MODEL };
 }
 
-async function generateOutline({ keyword, pillar, publishedArticles, facts }) {
+async function generateOutline({ keyword, pillar, publishedArticles, facts, product }) {
   const response = await client.messages.parse({
     model: OUTLINE_MODEL,
     max_tokens: 6000,
-    system: `You are an SEO content outline writer, building outlines that are both keyword-optimized and structured for AI Overview/RAG citation (self-contained, chunkable sections). ${BRAND_VOICE}`,
+    system: `You are an SEO content outline writer, building outlines that are both keyword-optimized and structured for AI Overview/RAG citation (self-contained, chunkable sections). ${BRAND_VOICE}
+
+${productContextBlock(product)}`,
     messages: [
       {
         role: 'user',
@@ -378,12 +531,14 @@ async function generateOutline({ keyword, pillar, publishedArticles, facts }) {
   return { result: response.parsed_output, usage: response.usage, model: OUTLINE_MODEL };
 }
 
-async function generateDraft({ outline, keyword, facts }) {
+async function generateDraft({ outline, keyword, facts, product, quotes, screenshots }) {
   const response = await client.messages.parse({
     model: DRAFT_MODEL,
     max_tokens: 12000,
     thinking: { type: 'adaptive' },
-    system: `You are an expert B2B content writer, writing for both classic SEO and AI Overview citation. ${BRAND_VOICE}`,
+    system: `You are an expert B2B content writer, writing for both classic SEO and AI Overview citation. ${BRAND_VOICE}
+
+${productContextBlock(product)}`,
     messages: [
       {
         role: 'user',
@@ -408,7 +563,8 @@ async function generateDraft({ outline, keyword, facts }) {
           outline.internal_link_candidates.length
             ? `Kandydaci na linki wewnętrzne:\n${outline.internal_link_candidates.map((l) => `- ${l.target_slug} (${l.reason})`).join('\n')}`
             : 'Brak kandydatów na linki wewnętrzne — zostaw internal_link_suggestions puste.',
-          'Zwróć kompletny artykuł: title, slug (kebab-case, ASCII, zawierający rdzeń frazy kluczowej), meta_title (55-70 znaków), meta_description (150-160 znaków), primary_keyword, lead, tldr_bullets, sections (z pełną treścią w content_markdown), faq (5-8 pozycji), internal_link_suggestions.',
+          slotInstructions({ screenshots, quotes }),
+          'Zwróć kompletny artykuł: title, slug (kebab-case, ASCII, zawierający rdzeń frazy kluczowej), meta_title (55-70 znaków), meta_description (150-160 znaków), primary_keyword, lead, tldr_bullets, sections (z pełną treścią w content_markdown), faq (5-8 pozycji), internal_link_suggestions, enrichment_slots.',
         ].join('\n\n'),
       },
     ],
@@ -418,12 +574,14 @@ async function generateDraft({ outline, keyword, facts }) {
   return { result: response.parsed_output, usage: response.usage, model: DRAFT_MODEL };
 }
 
-async function reviseArticle({ article, instructions }) {
+async function reviseArticle({ article, instructions, product }) {
   const response = await client.messages.parse({
     model: CRITIQUE_MODEL,
     max_tokens: 12000,
     thinking: { type: 'adaptive' },
-    system: `You are an expert SEO/AI-citation content editor. ${BRAND_VOICE}`,
+    system: `You are an expert SEO/AI-citation content editor. ${BRAND_VOICE}
+
+${productContextBlock(product)}`,
     messages: [
       {
         role: 'user',
@@ -451,6 +609,50 @@ async function countGeneratedToday(tenantId) {
   return rows[0].cnt;
 }
 
+async function loadProductContext(tenantId) {
+  const { rows } = await db.query(`SELECT product_name, business_description FROM tenants WHERE id = $1`, [tenantId]);
+  return { name: rows[0]?.product_name || null, description: rows[0]?.business_description || null };
+}
+
+async function loadScreenshots(tenantId) {
+  const { rows } = await db.query(
+    `SELECT id, feature_tag, caption FROM seo_screenshots WHERE tenant_id = $1 ORDER BY feature_tag, id`,
+    [tenantId],
+  );
+  return rows;
+}
+
+// Turns the model's slot definitions into the stored enrichment_slots and
+// fills screenshot slots that already have a matching library image. A marker
+// without a definition (or the reverse) would leave the editor with something
+// they can neither fill nor remove, so both are dropped here.
+function materializeSlots(body, article, { quotes, screenshots }) {
+  const markerIds = new Set(slots.openSlotIds(body));
+  const definitions = (article.enrichment_slots || []).filter((s) => markerIds.has(s.id));
+  const definedIds = new Set(definitions.map((s) => s.id));
+  let result = body;
+  for (const id of markerIds) {
+    if (!definedIds.has(id)) result = slots.replaceMarker(result, id, '');
+  }
+  const records = [];
+  for (const def of definitions) {
+    const record = { id: def.id, type: def.type, brief: def.brief, feature_tag: def.feature_tag || null, status: 'pending', suggestion: null, value: null };
+    if (def.type === 'quote' && def.quote_index != null && quotes[def.quote_index]) {
+      record.suggestion = quotes[def.quote_index];
+    }
+    const screenshot = def.type === 'screenshot' && def.screenshot_id != null
+      ? screenshots.find((sc) => sc.id === def.screenshot_id)
+      : null;
+    if (screenshot) {
+      record.value = { screenshot_id: screenshot.id, caption: screenshot.caption };
+      record.status = 'filled';
+      result = slots.replaceMarker(result, def.id, slots.renderSlotMarkdown('screenshot', record.value));
+    }
+    records.push(record);
+  }
+  return { body: result, records };
+}
+
 async function generateArticle(tenantId) {
   const pillar = await strategyService.pickLeastCoveredPillar(tenantId);
   if (!pillar) throw new Error('No content pillar available for this tenant.');
@@ -461,6 +663,8 @@ async function generateArticle(tenantId) {
     [tenantId],
   );
   const validSlugs = new Set(published.map((p) => p.slug));
+  const product = await loadProductContext(tenantId);
+  const screenshots = await loadScreenshots(tenantId);
 
   let totalCostUsd = 0;
   const track = (stage) => { totalCostUsd += costOf(stage.model, stage.usage); };
@@ -486,43 +690,55 @@ async function generateArticle(tenantId) {
   const keywordId = keywordRows[0].id;
 
   let facts = [];
+  let quotes = [];
   try {
-    const factsResp = await factsService.findFacts({ keyword: keyword.phrase, pillar });
+    const factsResp = await factsService.findFacts({ keyword: keyword.phrase, pillar, isExpertTopic: keyword.is_expert_topic });
     track(factsResp);
     facts = factsResp.facts;
+    quotes = factsResp.quotes;
   } catch (err) {
     logger.info('SEO facts research failed — proceeding without cited data', { tenantId, reason: err.message });
   }
 
-  const outlineResp = await generateOutline({ keyword, pillar, publishedArticles: published, facts });
+  const outlineResp = await generateOutline({ keyword, pillar, publishedArticles: published, facts, product });
   track(outlineResp);
   const outline = outlineResp.result;
 
-  const draftResp = await generateDraft({ outline, keyword, facts });
+  const draftResp = await generateDraft({ outline, keyword, facts, product, quotes, screenshots });
   track(draftResp);
   let article = draftResp.result;
 
-  const critiqueResp = await reviseArticle({ article, instructions: CRITIQUE_INSTRUCTIONS });
+  const critiqueResp = await reviseArticle({ article, instructions: CRITIQUE_INSTRUCTIONS, product });
   track(critiqueResp);
   article = critiqueResp.result;
   article.slug = ensureValidSlug(article.slug, article.title);
 
-  let validation = validateArticle(article, keyword.phrase, validSlugs, facts.length > 0);
+  const validationOpts = {
+    hasFacts: facts.length > 0,
+    minSources: keyword.is_expert_topic && facts.length >= 2 ? 2 : 1,
+    requireSlots: true,
+    productName: product.description ? product.name : null,
+    screenshotIds: new Set(screenshots.map((sc) => sc.id)),
+    quoteCount: quotes.length,
+  };
+  let validation = validateArticle(article, keyword.phrase, validSlugs, validationOpts);
   let attempts = 0;
   while (!validation.ok && attempts < 2) {
     const fixResp = await reviseArticle({
       article,
+      product,
       instructions: `Ten artykuł nie przeszedł automatycznej walidacji. Popraw dokładnie te problemy:\n${validation.errors.map((e) => `- ${e}`).join('\n')}`,
     });
     track(fixResp);
     article = fixResp.result;
     article.slug = ensureValidSlug(article.slug, article.title);
-    validation = validateArticle(article, keyword.phrase, validSlugs, facts.length > 0);
+    validation = validateArticle(article, keyword.phrase, validSlugs, validationOpts);
     attempts++;
   }
 
   const status = validation.ok ? 'in_review' : 'needs_update';
-  const renderedBody = renderBody(article, pillar);
+  const materialized = materializeSlots(renderBody(article, pillar), article, { quotes, screenshots });
+  const renderedBody = materialized.body;
   const body = validation.ok
     ? renderedBody
     : `[Automatyczna walidacja nie przeszła po ${attempts} próbach poprawy — wymaga ręcznej korekty]:\n${validation.errors.join('\n')}\n\n${renderedBody}`;
@@ -531,10 +747,10 @@ async function generateArticle(tenantId) {
 
   const { rows: contentRows } = await db.query(
     `INSERT INTO seo_content_pieces
-       (tenant_id, locale, title, slug, body, meta_description, status, target_keyword, category, generation_cost_usd, header_image_url, faq)
-     VALUES ($1, 'pl', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       (tenant_id, locale, title, slug, body, meta_description, status, target_keyword, category, generation_cost_usd, header_image_url, faq, enrichment_slots)
+     VALUES ($1, 'pl', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING *`,
-    [tenantId, article.title, article.slug, body, article.meta_description, status, keyword.phrase, pillar.name, totalCostUsd.toFixed(4), headerImageUrl, JSON.stringify(article.faq)],
+    [tenantId, article.title, article.slug, body, article.meta_description, status, keyword.phrase, pillar.name, totalCostUsd.toFixed(4), headerImageUrl, JSON.stringify(article.faq), JSON.stringify(materialized.records)],
   );
 
   await db.query(`UPDATE seo_keywords SET content_id = $1 WHERE id = $2`, [contentRows[0].id, keywordId]);
@@ -560,6 +776,8 @@ async function generateArticle(tenantId) {
     costUsd: totalCostUsd.toFixed(4),
     validationAttempts: attempts,
     factsUsed: facts.length,
+    verifiedQuotes: quotes.length,
+    slots: materialized.records.length,
   });
 
   return contentRows[0];
@@ -607,6 +825,7 @@ async function refreshArticle(contentId, tenantId) {
     [tenantId, contentId],
   );
   const validSlugs = new Set(published.map((p) => p.slug));
+  const product = await loadProductContext(tenantId);
 
   let totalCostUsd = 0;
   const track = (stage) => { totalCostUsd += costOf(stage.model, stage.usage); };
@@ -633,7 +852,7 @@ async function refreshArticle(contentId, tenantId) {
     model: DRAFT_MODEL,
     max_tokens: 12000,
     thinking: { type: 'adaptive' },
-    system: `You are an expert B2B content editor refreshing an already-published, already-indexed article — improve it, don't discard what already works. ${BRAND_VOICE}`,
+    system: `You are an expert B2B content editor refreshing an already-published, already-indexed article — improve it, don't discard what already works. ${BRAND_VOICE}\n\n${productContextBlock(product)}`,
     messages: [
       {
         role: 'user',
@@ -643,7 +862,8 @@ async function refreshArticle(contentId, tenantId) {
           `Obecny tytuł: ${current.title}`,
           `Obecny meta description: ${current.meta_description || '(brak)'}`,
           `Fraza kluczowa: ${keyword}`,
-          `Obecna treść (markdown; pomiń stopkę z linkami "Zobacz też", linkiem do tematu i CTA — dodawane są automatycznie):\n\n${current.body}`,
+          `Obecna treść (markdown; pomiń sekcje "Źródła" i "Zobacz też", link do tematu i CTA — dodawane są automatycznie):\n\n${current.body}`,
+          'Cytaty i komentarze w blokach "> " oraz obrazy "![...](...)" zostały dodane i zatwierdzone przez redaktora — przenieś je do nowej wersji dosłownie, bez zmian, w pasujące miejsca. Nie dodawaj nowych znaczników [[SLOT:...]]; enrichment_slots zwróć jako pustą tablicę.',
           queries.length
             ? `Zapytania z Google Search Console, na które ten artykuł JUŻ się wyświetla (ostatnie 28 dni):\n${queries.map((q) => `- "${q.phrase}" (${q.impressions} wyśw., śr. poz. ${q.position})`).join('\n')}\nDopisz lub przebuduj treść tak, żeby odpowiadała na te zapytania wprost — najlepiej jako nagłówek H2 w formie pytania albo pytanie w FAQ, z 40-60-słowną konkretną odpowiedzią na początku. Nie upychaj fraz sztucznie; pomiń zapytania niezwiązane z tematem.`
             : 'Brak danych o zapytaniach z Search Console — skup się na aktualności treści i zgodności ze strukturą poniżej.',
@@ -665,23 +885,33 @@ async function refreshArticle(contentId, tenantId) {
   track({ model: DRAFT_MODEL, usage: response.usage });
   let article = { ...response.parsed_output, slug: current.slug };
 
-  const critiqueResp = await reviseArticle({ article, instructions: CRITIQUE_INSTRUCTIONS });
+  const critiqueResp = await reviseArticle({ article, instructions: CRITIQUE_INSTRUCTIONS, product });
   track(critiqueResp);
   article = { ...critiqueResp.result, slug: current.slug };
 
-  const validationOpts = { skipSlugCheck: true };
-  let validation = validateArticle(article, keyword, validSlugs, facts.length > 0, validationOpts);
+  const validationOpts = {
+    hasFacts: facts.length > 0,
+    skipSlugCheck: true,
+    productName: product.description ? product.name : null,
+  };
+  let validation = validateArticle(article, keyword, validSlugs, validationOpts);
   let attempts = 0;
   while (!validation.ok && attempts < 2) {
     const fixResp = await reviseArticle({
       article,
+      product,
       instructions: `Ten artykuł nie przeszedł automatycznej walidacji. Popraw dokładnie te problemy (slug zostaw bez zmian):\n${validation.errors.map((e) => `- ${e}`).join('\n')}`,
     });
     track(fixResp);
     article = { ...fixResp.result, slug: current.slug };
-    validation = validateArticle(article, keyword, validSlugs, facts.length > 0, validationOpts);
+    validation = validateArticle(article, keyword, validSlugs, validationOpts);
     attempts++;
   }
+
+  // A refresh never opens new slots (see prompt), so any marker the model
+  // still added is stripped rather than blocking a live article.
+  let refreshedBody = renderBody(article, pillar);
+  for (const id of slots.openSlotIds(refreshedBody)) refreshedBody = slots.replaceMarker(refreshedBody, id, '');
 
   logger.info('SEO refresh draft generated', {
     tenantId, contentId, costUsd: totalCostUsd.toFixed(4), queriesUsed: queries.length, factsUsed: facts.length, validationOk: validation.ok,
@@ -690,7 +920,7 @@ async function refreshArticle(contentId, tenantId) {
   return {
     title: article.title,
     meta_description: article.meta_description,
-    body: renderBody(article, pillar),
+    body: refreshedBody,
     faq: article.faq,
     queries,
     facts_used: facts.length,

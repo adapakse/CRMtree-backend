@@ -9,6 +9,7 @@ const { query, param } = require('express-validator');
 const db = require('../config/database');
 const { validate } = require('../middleware/errorHandler');
 const strategyService = require('../services/seoStrategyService');
+const storageService = require('../services/storageService');
 // crmtree.pl/blog is single-tenant by design (see file header).
 const { CRMTREE_BLOG_TENANT_ID: CRMTREE_TENANT_ID } = require('../utils/crmtreeBlog');
 
@@ -102,6 +103,24 @@ router.get('/:slug',
       );
       if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono wpisu' });
       res.json({ ...rows[0], author_photo_url: resolveAuthorPhotoUrl(rows[0]) });
+    } catch (err) { next(err); }
+  },
+);
+
+// ── GET /api/public/blog/screenshots/:id — product screenshots embedded in
+// articles (utils/seoSlots.js). Served for any tenant, like author photos:
+// they also appear in articles published to client WordPress sites. ────────
+router.get('/screenshots/:id',
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query('SELECT blob_path FROM seo_screenshots WHERE id = $1', [req.params.id]);
+      if (!rows[0]) return res.status(404).end();
+      const { buffer, contentType } = await storageService.downloadDocument(rows[0].blob_path);
+      res.setHeader('Content-Type', contentType || 'image/png');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.send(buffer);
     } catch (err) { next(err); }
   },
 );

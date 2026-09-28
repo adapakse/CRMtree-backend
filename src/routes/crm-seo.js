@@ -6,7 +6,7 @@
 
 const router = require('express').Router();
 const multer = require('multer');
-const { body, param, query } = require('express-validator');
+const { body, param, query, validationResult } = require('express-validator');
 const db = require('../config/database');
 const config = require('../config');
 const storageService = require('../services/storageService');
@@ -27,6 +27,7 @@ const indexNowService = require('../services/indexNowService');
 const refreshService = require('../services/seoRefreshService');
 const generationJobService = require('../services/seoGenerationJobService');
 const { mondayOf, addDays, toDateStr } = require('../utils/isoWeek');
+const slots = require('../utils/seoSlots');
 const logger = require('../utils/logger');
 
 // ── OAuth callbacks — registered BEFORE the auth gate below on purpose.
@@ -264,6 +265,20 @@ router.patch('/content/:id',
         [req.params.id, req.user.tenant_id, ...fields.map((f) => req.body[f])],
       );
       if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      // An editor deleting a [[SLOT:..]] marker by hand removed that slot —
+      // otherwise the panel would keep asking to fill a place that's gone.
+      if (req.body.body !== undefined) {
+        const open = new Set(slots.openSlotIds(rows[0].body));
+        const stale = rows[0].enrichment_slots.some((s) => s.status === 'pending' && !open.has(s.id));
+        if (stale) {
+          const synced = rows[0].enrichment_slots.map((s) => (s.status === 'pending' && !open.has(s.id) ? { ...s, status: 'removed' } : s));
+          const { rows: updated } = await db.query(
+            `UPDATE seo_content_pieces SET enrichment_slots = $2 WHERE id = $1 RETURNING *`,
+            [rows[0].id, JSON.stringify(synced)],
+          );
+          return res.json(updated[0]);
+        }
+      }
       res.json(rows[0]);
     } catch (err) { next(err); }
   },
@@ -289,6 +304,110 @@ router.post('/content/:id/reroll-image',
         [newUrl, req.params.id, req.user.tenant_id],
       );
       res.json(updated[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// ── Enrichment slots (utils/seoSlots.js): the editor fills or removes each
+// place the article asks for before it can be approved. ────────────────────
+const SLOT_VALUE_VALIDATORS = {
+  expert_comment: [
+    body('text').isString().trim().isLength({ min: 20, max: 1500 }),
+    body('author_name').isString().trim().notEmpty().isLength({ max: 150 }),
+    body('author_role').optional({ nullable: true }).isString().trim().isLength({ max: 150 }),
+  ],
+  quote: [
+    body('text').isString().trim().isLength({ min: 10, max: 1000 }),
+    body('author').isString().trim().notEmpty().isLength({ max: 150 }),
+    body('author_role').optional({ nullable: true }).isString().trim().isLength({ max: 150 }),
+    body('source_title').optional({ nullable: true }).isString().trim().isLength({ max: 250 }),
+    body('source_url').optional({ nullable: true, checkFalsy: true }).isURL({ protocols: ['https'], require_protocol: true }),
+  ],
+  screenshot: [body('screenshot_id').isInt()],
+};
+
+async function loadEditableContent(contentId, tenantId) {
+  const { rows } = await db.query(
+    `SELECT id, status, body, enrichment_slots FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
+    [contentId, tenantId],
+  );
+  return rows[0] || null;
+}
+
+async function saveSlotChange(content, slotId, markdown, slotPatch) {
+  const newBody = slots.replaceMarker(content.body, slotId, markdown);
+  if (newBody === null) return null;
+  const updatedSlots = content.enrichment_slots.map((s) => (s.id === slotId ? { ...s, ...slotPatch } : s));
+  const { rows } = await db.query(
+    `UPDATE seo_content_pieces SET body = $2, enrichment_slots = $3 WHERE id = $1 RETURNING *`,
+    [content.id, newBody, JSON.stringify(updatedSlots)],
+  );
+  return rows[0];
+}
+
+router.post('/content/:id/slots/:slotId/fill',
+  requireSeoEditor,
+  [param('id').isInt(), param('slotId').matches(/^[a-z0-9_-]+$/i)],
+  validate,
+  async (req, res, next) => {
+    try {
+      const content = await loadEditableContent(req.params.id, req.user.tenant_id);
+      if (!content) return res.status(404).json({ error: 'Nie znaleziono.' });
+      if (!['draft', 'in_review', 'needs_update'].includes(content.status)) {
+        return res.status(409).json({ error: 'Miejsca można uzupełniać tylko przed zatwierdzeniem wpisu.' });
+      }
+      const slot = content.enrichment_slots.find((s) => s.id === req.params.slotId);
+      if (!slot) return res.status(404).json({ error: 'Nie znaleziono miejsca do uzupełnienia.' });
+
+      // Which fields are required depends on the slot's type, known only after loading it.
+      for (const check of SLOT_VALUE_VALIDATORS[slot.type]) await check.run(req);
+      const invalid = validationResult(req);
+      if (!invalid.isEmpty()) {
+        return res.status(400).json({
+          error: 'Uzupełnij wymagane pola.',
+          details: invalid.array().map((e) => ({ field: e.path, message: e.msg })),
+        });
+      }
+
+      let value;
+      if (slot.type === 'screenshot') {
+        const { rows } = await db.query(
+          `SELECT id, caption FROM seo_screenshots WHERE id = $1 AND tenant_id = $2`,
+          [req.body.screenshot_id, req.user.tenant_id],
+        );
+        if (!rows[0]) return res.status(400).json({ error: 'Nieznany screen.' });
+        value = { screenshot_id: rows[0].id, caption: rows[0].caption };
+      } else if (slot.type === 'quote') {
+        const { text, author, author_role, source_title, source_url } = req.body;
+        value = { text, author, author_role: author_role || null, source_title: source_title || null, source_url: source_url || null };
+      } else {
+        const { text, author_name, author_role } = req.body;
+        value = { text, author_name, author_role: author_role || null };
+      }
+
+      const updated = await saveSlotChange(content, slot.id, slots.renderSlotMarkdown(slot.type, value), { status: 'filled', value });
+      if (!updated) return res.status(409).json({ error: 'Znacznika tego miejsca nie ma już w treści (usunięty przy edycji?).' });
+      res.json(updated);
+    } catch (err) { next(err); }
+  },
+);
+
+router.post('/content/:id/slots/:slotId/remove',
+  requireSeoEditor,
+  [param('id').isInt(), param('slotId').matches(/^[a-z0-9_-]+$/i)],
+  validate,
+  async (req, res, next) => {
+    try {
+      const content = await loadEditableContent(req.params.id, req.user.tenant_id);
+      if (!content) return res.status(404).json({ error: 'Nie znaleziono.' });
+      if (!['draft', 'in_review', 'needs_update'].includes(content.status)) {
+        return res.status(409).json({ error: 'Miejsca można usuwać tylko przed zatwierdzeniem wpisu.' });
+      }
+      const slot = content.enrichment_slots.find((s) => s.id === req.params.slotId);
+      if (!slot) return res.status(404).json({ error: 'Nie znaleziono miejsca do uzupełnienia.' });
+      const updated = await saveSlotChange(content, slot.id, '', { status: 'removed' });
+      if (!updated) return res.status(409).json({ error: 'Znacznika tego miejsca nie ma już w treści (usunięty przy edycji?).' });
+      res.json(updated);
     } catch (err) { next(err); }
   },
 );
@@ -355,11 +474,15 @@ router.post('/content/:id/approve',
       // Author is mandatory before publish (E-E-A-T requirement) — checked here rather
       // than a NOT NULL column, so drafts can still be written/edited without one.
       const { rows: existing } = await db.query(
-        `SELECT status, author_id FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
+        `SELECT status, author_id, body FROM seo_content_pieces WHERE id = $1 AND tenant_id = $2`,
         [req.params.id, req.user.tenant_id],
       );
       if (!existing[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
       if (!existing[0].author_id) return res.status(409).json({ error: 'Wpis musi mieć przypisanego autora przed zatwierdzeniem.' });
+      const openSlots = slots.openSlotIds(existing[0].body);
+      if (openSlots.length) {
+        return res.status(409).json({ error: `Uzupełnij albo usuń miejsca do uzupełnienia przed zatwierdzeniem (pozostało: ${openSlots.length}).` });
+      }
 
       // Approving with a future scheduled_at queues it instead of publishing immediately —
       // the scheduler job (jobs/seo-scheduler.js) flips it to published when the time comes.
@@ -724,6 +847,98 @@ router.delete('/authors/:id',
   },
 );
 
+// ── Product screenshot library — tagged by feature so the generator can put a
+// matching screenshot into an article by itself (utils/seoSlots.js). ────────
+const screenshotUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    cb(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype));
+  },
+});
+
+router.get('/screenshots', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, feature_tag, caption, created_at FROM seo_screenshots WHERE tenant_id = $1 ORDER BY feature_tag, id`,
+      [req.user.tenant_id],
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+router.post('/screenshots',
+  requireSeoEditor,
+  screenshotUpload.single('file'),
+  [
+    body('feature_tag').isString().trim().notEmpty().isLength({ max: 80 }),
+    body('caption').isString().trim().notEmpty().isLength({ max: 300 }),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'Brak pliku (dozwolone: JPEG, PNG, WebP, max 8 MB).' });
+      const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[req.file.mimetype];
+      const blobPath = `seo-screenshots/${req.user.tenant_id}/${Date.now()}.${ext}`;
+      await storageService.uploadBuffer(blobPath, req.file.buffer, req.file.mimetype);
+      const { rows } = await db.query(
+        `INSERT INTO seo_screenshots (tenant_id, blob_path, feature_tag, caption)
+         VALUES ($1, $2, $3, $4) RETURNING id, feature_tag, caption, created_at`,
+        [req.user.tenant_id, blobPath, req.body.feature_tag, req.body.caption],
+      );
+      res.status(201).json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+router.patch('/screenshots/:id',
+  requireSeoEditor,
+  [
+    param('id').isInt(),
+    body('feature_tag').optional().isString().trim().notEmpty().isLength({ max: 80 }),
+    body('caption').optional().isString().trim().notEmpty().isLength({ max: 300 }),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const fields = ['feature_tag', 'caption'].filter((f) => req.body[f] !== undefined);
+      if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
+      const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(', ');
+      const { rows } = await db.query(
+        `UPDATE seo_screenshots SET ${setClause} WHERE id = $1 AND tenant_id = $2
+         RETURNING id, feature_tag, caption, created_at`,
+        [req.params.id, req.user.tenant_id, ...fields.map((f) => req.body[f])],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  },
+);
+
+// Same posture as deleting an author: an article already showing the image
+// would silently lose it, so deleting is blocked while one does.
+router.delete('/screenshots/:id',
+  requireSeoEditor,
+  [param('id').isInt()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows: inUse } = await db.query(
+        `SELECT 1 FROM seo_content_pieces WHERE tenant_id = $1 AND body LIKE $2 LIMIT 1`,
+        [req.user.tenant_id, `%(${slots.screenshotUrl(req.params.id)})%`],
+      );
+      if (inUse.length) return res.status(409).json({ error: 'Screen jest użyty w artykule — usuń go najpierw z treści.' });
+      const { rows } = await db.query(
+        `DELETE FROM seo_screenshots WHERE id = $1 AND tenant_id = $2 RETURNING blob_path`,
+        [req.params.id, req.user.tenant_id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Nie znaleziono.' });
+      await storageService.deleteBlob(rows[0].blob_path);
+      res.status(204).end();
+    } catch (err) { next(err); }
+  },
+);
+
 // ── Competitor research — editors maintain the list, seoStrategyService reads
 // it when (re)generating the content pillar map ───────────────────────────
 router.get('/competitors', async (req, res, next) => {
@@ -951,12 +1166,13 @@ router.post('/social/wordpress/connect',
 );
 
 // ── Tenant SEO settings — business_description/industry_vertical feed the
-// content-pillar generator (seoStrategyService). Any SEO editor can tune
+// content-pillar generator (seoStrategyService); business_description and
+// product_name also tell every article what the product actually does. Any SEO editor can tune
 // these, same permission as the rest of this module. ─────────────────────
 router.get('/tenant-settings', async (req, res, next) => {
   try {
     const { rows } = await db.query(
-      `SELECT t.business_description, t.industry_vertical,
+      `SELECT t.business_description, t.industry_vertical, t.product_name,
               w.site_url AS wordpress_site_url
          FROM tenants t
          LEFT JOIN tenant_wordpress_connections w ON w.tenant_id = t.id
@@ -972,16 +1188,17 @@ router.patch('/tenant-settings',
   [
     body('business_description').optional({ nullable: true }).isString().trim(),
     body('industry_vertical').optional({ nullable: true }).isString().trim(),
+    body('product_name').optional({ nullable: true }).isString().trim().isLength({ max: 120 }),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const fields = ['business_description', 'industry_vertical'].filter((f) => req.body[f] !== undefined);
+      const fields = ['business_description', 'industry_vertical', 'product_name'].filter((f) => req.body[f] !== undefined);
       if (!fields.length) return res.status(400).json({ error: 'Brak pól do aktualizacji.' });
       const values = fields.map((f) => req.body[f]);
       const setClause = fields.map((f, i) => `${f} = $${i + 2}`).join(', ');
       const { rows } = await db.query(
-        `UPDATE tenants SET ${setClause} WHERE id = $1 RETURNING business_description, industry_vertical`,
+        `UPDATE tenants SET ${setClause} WHERE id = $1 RETURNING business_description, industry_vertical, product_name`,
         [req.user.tenant_id, ...values],
       );
       res.json(rows[0]);
