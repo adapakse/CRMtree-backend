@@ -624,11 +624,15 @@ router.post('/:nip/re-analyze', async (req, res, next) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Rekord nie znaleziony lub aktualnie analizowany' });
 
-    if (!callAnalysisSvc.isBatchRunning()) {
-      callAnalysisSvc.runBatch(req.tenantId).catch(err =>
-        logger.error('[CallAnalysis] Re-analyze batch failed', { error: err.message })
-      );
-    }
+    // Analizuj wyłącznie ten jeden NIP. runBatch() brało wszystkie rekordy
+    // pending/error tenanta, więc re-analiza jednej firmy odpalała analizę
+    // całej listy (koszt DeepSeek + nadpisanie wyników, których user nie ruszał).
+    // analyzeOne() działa też w trakcie batcha — wcześniej rekord zostawał
+    // wtedy w 'pending' i nikt go już nie podnosił (batch ma listę NIP-ów
+    // pobraną na starcie), więc klik nie robił nic.
+    callAnalysisSvc.analyzeOne(req.tenantId, nip).catch(err =>
+      logger.error('[CallAnalysis] Single re-analyze failed', { nip, error: err.message })
+    );
 
     res.json({ queued: true, nip });
   } catch (err) { next(err); }
