@@ -38,6 +38,12 @@ async function isTenantDeleted(tenantId) {
   return !!rows[0]?.deleted_at;
 }
 
+async function isTenantSuspended(tenantId) {
+  if (!tenantId) return false;
+  const { rows } = await db.query('SELECT is_active FROM tenants WHERE id = $1', [tenantId]);
+  return rows[0]?.is_active === false;
+}
+
 // ─── SAML routes — aktywne TYLKO na produkcji (NODE_ENV=production) ──────────
 // Lokalnie i na htcd (NODE_ENV=development) używany jest stub poniżej.
 if (process.env.NODE_ENV !== 'development') {
@@ -173,6 +179,12 @@ router.post('/refresh', injectAuditContext, async (req, res, next) => {
     }
     if (!row.is_active) return res.status(401).json({ error: 'Account inactive' });
     if (await isTenantDeleted(row.tenant_id)) return res.status(401).json({ error: 'Tenant nie jest już dostępny.' });
+    // Mobile only, matching /auth/mobile/login: a suspended tenant (is_active
+    // = false, toggled by a superadmin) must not keep 60-day device sessions
+    // alive. Web login doesn't check suspension today, so web refresh doesn't either.
+    if (row.client === 'mobile' && await isTenantSuspended(row.tenant_id)) {
+      return res.status(401).json({ error: 'Tenant nie jest już dostępny.', code: 'TENANT_INACTIVE' });
+    }
 
     // Rotacja: unieważnij stary, wydaj nowy. revoked = FALSE in the WHERE
     // makes it atomic — two concurrent refreshes with one token can't both win.
@@ -183,7 +195,7 @@ router.post('/refresh', injectAuditContext, async (req, res, next) => {
     if (!rowCount) return res.status(401).json({ error: 'Invalid or expired refresh token' });
     const user       = { id: row.uid, email: row.email, display_name: row.display_name,
                          is_admin: row.is_admin, tenant_id: row.tenant_id, is_super_admin: row.is_super_admin };
-    const newAccess  = signAccessToken(user);
+    const newAccess  = signAccessToken(user, { client: row.client });
     const { token: newRefresh, hash: newHash } = signRefreshToken(user);
     await saveRefreshToken(user.id, user.tenant_id, newHash, {
       client: row.client, deviceId: row.device_id, deviceName: row.device_name,
@@ -356,7 +368,7 @@ router.post('/mobile/login', mobileLoginLimitByIp, mobileLoginLimitByEmail, inje
 
     const accounts = [];
     for (const user of allowed) {
-      const accessToken = signAccessToken(user);
+      const accessToken = signAccessToken(user, { client: 'mobile' });
       const { token: refreshToken, hash } = signRefreshToken(user);
       await saveRefreshToken(user.id, user.tenant_id, hash, { client: 'mobile', deviceId, deviceName: safeDeviceName });
       await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
@@ -423,6 +435,47 @@ router.post('/change-password', requireAuth, async (req, res, next) => {
 
     logger.info('Password changed', { userId: req.user.id });
     res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/auth/devices — phones signed in to this account ───────────────
+// One row per device with a live mobile refresh token (ADR 001 §4), so a user
+// can sign out a lost company phone from the web.
+router.get('/devices', requireAuth, async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT device_id,
+              (array_agg(device_name ORDER BY created_at DESC))[1] AS device_name,
+              MIN(created_at) AS first_seen_at,
+              GREATEST(MAX(created_at), MAX(last_used_at)) AS last_active_at
+         FROM refresh_tokens
+        WHERE user_id = $1 AND client = 'mobile' AND revoked = FALSE AND expires_at > NOW()
+        GROUP BY device_id
+        ORDER BY last_active_at DESC`,
+      [req.user.id]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// ─── DELETE /api/auth/devices/:deviceId — sign one phone out ────────────────
+router.delete('/devices/:deviceId', requireAuth, injectAuditContext, async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `UPDATE refresh_tokens SET revoked = TRUE
+        WHERE user_id = $1 AND device_id = $2 AND client = 'mobile' AND revoked = FALSE
+        RETURNING device_name`,
+      [req.user.id, req.params.deviceId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Nie znaleziono zalogowanego urządzenia.' });
+    await audit.log({
+      user:      req.user,
+      action:    'device_signed_out',
+      metadata:  { device_name: rows[0].device_name },
+      ipAddress: req.auditContext?.ipAddress,
+      userAgent: req.auditContext?.userAgent,
+    });
+    res.status(204).end();
   } catch (err) { next(err); }
 });
 

@@ -136,7 +136,14 @@ passport.deserializeUser(async (id, done) => {
 });
 
 // ─── JWT helpers ────────────────────────────────────────────────────────────
-function signAccessToken(user) {
+// Mobile access tokens are short-lived: signing a phone out (DELETE
+// /auth/devices) or a password change revokes only its refresh token, so the
+// access token's lifetime is how long a lost phone keeps working. Web keeps
+// the configured lifetime (default 8h).
+const MOBILE_ACCESS_TOKEN_TTL = "15m";
+
+function signAccessToken(user, { client = "web" } = {}) {
+  const expiresIn = client === "mobile" ? MOBILE_ACCESS_TOKEN_TTL : config.jwt.expiresIn;
   return jwt.sign(
     {
       sub:            user.id,
@@ -147,7 +154,7 @@ function signAccessToken(user) {
       is_super_admin: user.is_super_admin ?? false,
     },
     config.jwt.secret,
-    { expiresIn: config.jwt.expiresIn, algorithm: "HS256" }
+    { expiresIn, algorithm: "HS256" }
   );
 }
 

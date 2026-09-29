@@ -41,6 +41,7 @@ const smsRoutes       = require('./routes/sms');
 const adminCallAnalysisRoutes = require('./routes/admin-call-analysis');
 const publicBlogRoutes    = require('./routes/public-blog');
 const publicTenantsRoutes = require('./routes/public-tenants');
+const publicAppConfigRoutes = require('./routes/public-app-config');
 
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
@@ -172,6 +173,7 @@ app.get('/health', async (req, res) => {
 // ─── API Routes ───────────────────────────────────────────
 app.use('/api/public/blog',     publicBlogRoutes);
 app.use('/api/public/tenants',  publicTenantsRoutes);
+app.use('/api/public/app-config', publicAppConfigRoutes);
 app.use('/api/auth',            authRoutes);
 app.use('/api/documents',       documentRoutes);
 
