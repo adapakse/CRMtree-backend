@@ -5072,21 +5072,28 @@ function getTenantBatchState(tenantId) {
 }
 
 async function runBatch(tenantId, { onlyPending = true } = {}) {
+  const where = onlyPending
+    ? `WHERE tenant_id = $1 AND enrichment_status IN ('pending', 'error')`
+    : `WHERE tenant_id = $1 AND enrichment_status != 'done'`;
+
+  const { rows } = await db.query(
+    `SELECT id FROM prospect_companies ${where} ORDER BY imported_at ASC`,
+    [tenantId]
+  );
+
+  return runBatchForIds(tenantId, rows.map(r => r.id));
+}
+
+// Wzbogaca dokładnie podaną listę prospektów. Używane tam, gdzie zakres wynika
+// z wyboru użytkownika (np. firmy zaznaczone w wynikach "Znajdź konkurencję"),
+// a nie z całego backlogu tenanta — runBatch() zaciągnąłby wszystkie rekordy
+// pending/error, więc dodanie jednego konkurenta odpalało enrichment całej bazy.
+async function runBatchForIds(tenantId, ids) {
   const state = getTenantBatchState(tenantId);
   if (state.running) return { alreadyRunning: true };
   state.running = true;
 
   try {
-    const where = onlyPending
-      ? `WHERE tenant_id = $1 AND enrichment_status IN ('pending', 'error')`
-      : `WHERE tenant_id = $1 AND enrichment_status != 'done'`;
-
-    const { rows } = await db.query(
-      `SELECT id FROM prospect_companies ${where} ORDER BY imported_at ASC`,
-      [tenantId]
-    );
-
-    const ids = rows.map(r => r.id);
     state.progress = { total: ids.length, done: 0, errors: 0, running: true };
 
     // Pula BATCH_CONCURRENCY równoległych workerów ciągnących z kolejki
@@ -5170,7 +5177,7 @@ function getBatchProgress(tenantId) {
 }
 
 module.exports = {
-  enrichOne, reEnrichOne, runBatch, getBatchProgress, buildPromptText,
+  enrichOne, reEnrichOne, runBatch, runBatchForIds, getBatchProgress, buildPromptText,
   // Eksport dodatkowy na potrzeby menuAuditTool.js — diagnostyczne narzędzie
   // audytu menu nawigacyjnego, reużywa scrapingu zamiast duplikować go.
   fetchKRS, findWebsiteUrl, scrapeWebsite, normalizeName, fetchPage, extractText, extractInternalLinks, scoreLinkRelevance,

@@ -1103,33 +1103,37 @@ router.post('/discover-competitors/bulk-add',
       );
       const groupId = groupRows[0]?.group_id || null;
 
-      let added = 0, skipped = 0;
+      let skipped = 0;
+      const addedIds = [];
       for (const c of companies) {
         const nipClean = String(c.nip || '').replace(/\D/g, '');
         if (nipClean.length !== 10) { skipped++; continue; }
 
         try {
-          const { rowCount } = await db.query(
+          const { rows: insRows } = await db.query(
             `INSERT INTO prospect_companies
                (tenant_id, nip, company_name, website_url, website_source,
                 source_database, group_id, imported_by, enrichment_status)
              VALUES ($1, $2, $3, $4, 'ai_discovery', $5, $6, $7, 'pending')
-             ON CONFLICT (tenant_id, nip) DO NOTHING`,
+             ON CONFLICT (tenant_id, nip) DO NOTHING
+             RETURNING id`,
             [tenantId, nipClean, c.company_name || null, c.website_url || null,
              sourceName, groupId, req.user.id],
           );
-          if (rowCount > 0) added++; else skipped++;
+          if (insRows.length) addedIds.push(insRows[0].id); else skipped++;
         } catch (err) {
           logger.warn('[Discovery] Insert failed', { tenantId, nip: nipClean, error: err.message });
           skipped++;
         }
       }
+      const added = addedIds.length;
 
-      // Batch enrichmentu jest per-tenant — uruchamiamy TYLKO dla tego tenanta
-      // i tylko jeśli jego własny batch nie jest już w toku.
+      // Wzbogacamy WYŁĄCZNIE firmy dodane w tym żądaniu (zaznaczone przez
+      // użytkownika). Wcześniejsze runBatch() brało cały backlog pending/error
+      // tenanta, więc dodanie jednego konkurenta odpalało enrichment całej bazy.
       let batchStarted = false;
       if (added > 0 && !enrichSvc.getBatchProgress(tenantId).running) {
-        enrichSvc.runBatch(tenantId).catch(err =>
+        enrichSvc.runBatchForIds(tenantId, addedIds).catch(err =>
           logger.error('[Discovery] Batch failed', { tenantId, error: err.message }));
         batchStarted = true;
       }
