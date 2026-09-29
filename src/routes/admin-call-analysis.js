@@ -693,6 +693,20 @@ router.post('/bulk', async (req, res, next) => {
       return res.status(400).json({ error: 'Nieznana akcja' });
     }
 
+    if (action === 're-analyze' && result.rows.length) {
+      const queuedNips = result.rows.map(r => r.nip);
+      if (queuedNips.length === 1) {
+        callAnalysisSvc.analyzeOne(req.tenantId, queuedNips[0]).catch(err =>
+          logger.error('[CallAnalysis] Bulk single analyze failed', { nip: queuedNips[0], error: err.message })
+        );
+      } else {
+        callAnalysisSvc.runBatchForNips(req.tenantId, queuedNips).catch(err =>
+          logger.error('[CallAnalysis] Bulk analyze failed', { count: queuedNips.length, error: err.message })
+        );
+      }
+      return res.json({ affected: result.rows.length, action, started: true, nips: queuedNips });
+    }
+
     res.json({ affected: result.rows.length, action });
   } catch (err) { next(err); }
 });
