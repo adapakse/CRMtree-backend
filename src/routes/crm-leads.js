@@ -10,13 +10,13 @@ const audit  = require('../services/auditService');
 const logger = require('../utils/logger');
 const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
-const { crmAuth, loadCrmScope, crmScope, requireCrmManager, assertOwnership, canOperateForOwner } = require('../middleware/crm-rbac');
+const { crmAuth, loadCrmScope, loadCrmModuleGrants, crmScope, requireCrmManager, assertOwnership, canOperateForOwner } = require('../middleware/crm-rbac');
 const testAccountSvc = require('../services/testAccountService');
 const crmLeadHoldSvc = require('../services/crmLeadHoldService');
 const email          = require('../utils/email');
 const { autoSaveLeadContacts } = require('../services/gmailProcessor');
 
-router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope);
+router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope, loadCrmModuleGrants('leads'));
 
 // ── GET /api/crm/leads ────────────────────────────────────────────
 router.get('/',
