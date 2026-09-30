@@ -16,16 +16,17 @@
  *     dosłownie ujawniłyby tenantowi A, że firma X jest leadem/partnerem
  *     tenanta B — to dane handlowe innego klienta, nie metadana.
  *   - klucz cache zawiera tenant_id (ten sam seed u dwóch tenantów daje inne
- *     flagi obecności, więc wynik nie jest współdzielony).
+ *     flagi obecności, więc wynik nie jest współdzielony). Wewnątrz tenanta
+ *     cache jest wspólny dla userów — patrz cacheKey().
  *
  * Limity (MAX_RESULTS, PAGE_SIZE, TTL cache, max_uses web_search, timeouty) są
  * takie same jak w worktrips-doc. Poza globalnym rate limitem HTTP (200 żądań
  * / 15 min, app.js) NIE ma limitu użyć — świadoma decyzja: zasady mają być te
  * same co w worktrips-doc.
  *
- * Cache in-memory (klucz: tenantId_userId_seedNip, TTL: CACHE_TTL_MS). Na wielu
+ * Cache in-memory (klucz: tenantId_seedNip, TTL: CACHE_TTL_MS). Na wielu
  * replikach Container Appa cache jest per-replika — to akceptowalne, bo służy
- * wyłącznie paginacji wyników (offset 5/10) w ciągu jednej sesji użytkownika,
+ * paginacji wyników (offset 5/10) i oszczędzeniu powtórnego pipeline'u,
  * a nie spójności danych.
  */
 
@@ -33,31 +34,52 @@ const axios    = require('axios');
 const gusRegon = require('./gusRegonService');
 const db       = require('../config/database');
 const logger   = require('../utils/logger');
+const { normalizeName } = require('./prospectEnrichmentService');
 
 const ANTHROPIC_API    = 'https://api.anthropic.com/v1/messages';
 const DISCOVERY_MODEL  = 'claude-sonnet-4-6';
 const NIP_SEARCH_MODEL = 'claude-haiku-4-5-20251001';
 const PAGE_SIZE        = 5;
 const MAX_RESULTS      = 15;
-const CACHE_TTL_MS     = 15 * 60 * 1000; // 15 min
+const CACHE_TTL_MS     = 24 * 60 * 60 * 1000; // 24 h
 
 
 // ── In-memory cache ────────────────────────────────────────────────
+// Klucz zawiera tenant_id (flagi obecności są per tenant), ale NIE user_id —
+// dwóch userów tego samego tenanta szukających tej samej firmy dostaje ten sam
+// wynik, więc nie ma powodu odpalać pipeline'u AI + GUS dwa razy.
 const cache = new Map(); // key → { companies: [], expiresAt: number }
 
-function cacheKey(tenantId, userId, seedNip) {
-  return `${tenantId}_${userId}_${String(seedNip).replace(/\D/g, '')}`;
+function cacheKey(tenantId, seedNip) {
+  return `${tenantId}_${String(seedNip).replace(/\D/g, '')}`;
 }
 
-function getCache(tenantId, userId, seedNip) {
-  const key = cacheKey(tenantId, userId, seedNip);
+function getCache(tenantId, seedNip) {
+  const key = cacheKey(tenantId, seedNip);
   const e = cache.get(key);
   if (!e || Date.now() > e.expiresAt) { cache.delete(key); return null; }
   return e.companies;
 }
 
-function setCache(tenantId, userId, seedNip, companies) {
-  cache.set(cacheKey(tenantId, userId, seedNip), { companies, expiresAt: Date.now() + CACHE_TTL_MS });
+function setCache(tenantId, seedNip, companies) {
+  cache.set(cacheKey(tenantId, seedNip), { companies, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
+// ── Rozpoznanie błędu "brak środków" ──────────────────────────────
+// Anthropic zwraca w tym przypadku 400, nie 402 — bez rozpoznania komunikatu
+// user widzi w UI surowe "Request failed with status code 400".
+
+function isLowBalanceError(err) {
+  if (err.response?.status !== 400) return false;
+  const payload = `${JSON.stringify(err.response?.data ?? '')} ${err.message ?? ''}`;
+  return /credit balance is too low|insufficient\s+(credit|balance|funds)/i.test(payload);
+}
+
+function toBillingError() {
+  const err = new Error('Brak środków na koncie AI — uzupełnij saldo w Anthropic API.');
+  err.isBillingError = true;
+  err.status = 402;
+  return err;
 }
 
 // ── Helper: pętla Claude z web_search ─────────────────────────────
@@ -88,7 +110,7 @@ async function claudeWebSearch(prompt, maxTokens, maxUses, timeoutMs, model = DI
       logger.error('[Discovery] Anthropic API error', {
         status: axiosErr.response?.status, message: axiosErr.message,
       });
-      throw axiosErr;
+      throw isLowBalanceError(axiosErr) ? toBillingError() : axiosErr;
     }
 
     const { stop_reason, content } = data;
@@ -130,18 +152,26 @@ async function askClaude(companyName, seedNip, seedPkd) {
     `Odpowiedz WYŁĄCZNIE jako JSON (bez markdown, bez komentarzy):\n` +
     `{"industry":"krótki opis profilu firmy (2-5 słów)","companies":[{"company_name":"Przykład Sp. z o.o.","nip":"1234567890","website_url":"https://www.przyklad.pl"}]}`;
 
-  const { data } = await axios.post(ANTHROPIC_API, {
-    model:      DISCOVERY_MODEL,
-    max_tokens: 2000,
-    messages:   [{ role: 'user', content: prompt }],
-  }, {
-    headers: {
-      'x-api-key':         apiKey,
-      'anthropic-version': '2023-06-01',
-      'Content-Type':      'application/json',
-    },
-    timeout: 30_000,
-  });
+  let data;
+  try {
+    ({ data } = await axios.post(ANTHROPIC_API, {
+      model:      DISCOVERY_MODEL,
+      max_tokens: 2000,
+      messages:   [{ role: 'user', content: prompt }],
+    }, {
+      headers: {
+        'x-api-key':         apiKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Type':      'application/json',
+      },
+      timeout: 30_000,
+    }));
+  } catch (axiosErr) {
+    logger.error('[Discovery] Anthropic API error', {
+      status: axiosErr.response?.status, message: axiosErr.message,
+    });
+    throw isLowBalanceError(axiosErr) ? toBillingError() : axiosErr;
+  }
 
   const text = data.content?.find(b => b.type === 'text')?.text || '';
 
@@ -186,15 +216,44 @@ async function findNipViaSearch(companyName) {
   return null;
 }
 
+// ── Zgodność nazwy: GUS potwierdza NIP, nie firmę ─────────────────
+// Sam fakt, że GUS zwrócił dane dla jakiegoś NIP-u, nie znaczy, że to NIP firmy,
+// której szukamy. Bez tego guarda błędny NIP podany przez AI był "potwierdzany"
+// danymi zupełnie innej firmy i pokazywany z zielonym checkiem.
+
+function nameLooksLike(candidateName, officialName) {
+  const norm = (n) => normalizeName(n || '').replace(/[^a-z0-9]+/g, ' ').trim();
+  const a = norm(candidateName);
+  const b = norm(officialName);
+  if (!a || !b) return false;
+
+  const compactA = a.replace(/ /g, '');
+  const compactB = b.replace(/ /g, '');
+  if (compactA.includes(compactB) || compactB.includes(compactA)) return true;
+
+  // Nazwa rejestrowa bywa dłuższa niż potoczna ("Kowalski Transport" vs
+  // "Przedsiębiorstwo Kowalski Transport Międzynarodowy") — wystarczy, że
+  // wszystkie znaczące słowa krótszej nazwy występują w dłuższej.
+  const significantTokens = (s) => s.split(' ').filter(t => t.length >= 4);
+  const [shortTokens, longTokens] = compactA.length <= compactB.length
+    ? [significantTokens(a), new Set(significantTokens(b))]
+    : [significantTokens(b), new Set(significantTokens(a))];
+
+  return shortTokens.length > 0 && shortTokens.every(t => longTokens.has(t));
+}
+
 // ── GUS: walidacja NIP + PKD ───────────────────────────────────────
+// Bez web searchu — patrz resolveNipOnDemand(). Automatyczne dociąganie NIP-u
+// przez Claude + web_search dla KAŻDEGO kandydata (do MAX_RESULTS na jedno
+// wyszukiwanie) było dominującą pozycją kosztową tej funkcji.
 
 async function validateWithGus(raw) {
-  let nipClean = String(raw.nip || '').replace(/\D/g, '');
+  const nipClean = String(raw.nip || '').replace(/\D/g, '');
 
   if (nipClean.length === 10) {
     try {
       const gus = await gusRegon.getCompanyData(nipClean);
-      if (gus) {
+      if (gus && nameLooksLike(raw.company_name, gus.officialName)) {
         return {
           company_name: gus.officialName || raw.company_name,
           nip:          nipClean,
@@ -205,48 +264,26 @@ async function validateWithGus(raw) {
           nip_verified: true,
         };
       }
+      if (gus) {
+        logger.debug('[Discovery] GUS name mismatch — NIP odrzucony', {
+          nip: nipClean, candidate: raw.company_name, gusName: gus.officialName,
+        });
+      }
     } catch (err) {
       logger.debug('[Discovery] GUS by NIP failed', { nip: nipClean, error: err.message });
     }
   }
 
-  let searchedWebsite = null;
-  if (raw.company_name) {
-    const found = await findNipViaSearch(raw.company_name);
-    searchedWebsite = found?.website_url || null;
-    if (found?.nip) {
-      nipClean = found.nip;
-      const resolvedWebsite = found.website_url || raw.website_url || null;
-      try {
-        const gus = await gusRegon.getCompanyData(nipClean);
-        if (gus) {
-          return {
-            company_name: gus.officialName || raw.company_name,
-            nip:          nipClean,
-            website_url:  resolvedWebsite,
-            pkd_main:     gus.pkdMain || null,
-            pkd_codes:    gus.pkdCodes?.map(c => c.kod) || [],
-            regon:        gus.regon || null,
-            nip_verified: true,
-          };
-        }
-      } catch (err) {
-        logger.debug('[Discovery] GUS by searched NIP failed', { nip: nipClean, error: err.message });
-      }
-    }
-  }
-
-  const resolvedWebsite = searchedWebsite || raw.website_url || null;
   if (raw.company_name) {
     try {
       const gusByName = await gusRegon.searchByName(raw.company_name);
-      if (gusByName?.length > 0) {
-        const match   = gusByName[0];
+      const match     = gusByName?.[0];
+      if (match && nameLooksLike(raw.company_name, match.name)) {
         const gusData = await gusRegon.getCompanyData(match.nip).catch(() => null);
         return {
           company_name: gusData?.officialName || match.name || raw.company_name,
           nip:          match.nip,
-          website_url:  resolvedWebsite,
+          website_url:  raw.website_url || null,
           pkd_main:     gusData?.pkdMain || null,
           pkd_codes:    gusData?.pkdCodes?.map(c => c.kod) || [],
           regon:        match.regon || null,
@@ -258,14 +295,53 @@ async function validateWithGus(raw) {
     }
   }
 
+  // Ani NIP, ani nazwa nie zostały potwierdzone w GUS. nip_verified MUSI być
+  // false — 10 cyfr to poprawny format, nie potwierdzenie istnienia firmy.
   return {
     company_name: raw.company_name,
     nip:          nipClean.length === 10 ? nipClean : null,
-    website_url:  resolvedWebsite,
+    website_url:  raw.website_url || null,
     pkd_main:     null,
     pkd_codes:    [],
     regon:        null,
-    nip_verified: nipClean.length === 10,
+    nip_verified: false,
+  };
+}
+
+/**
+ * Web search po NIP JEDNEJ firmy — wyłącznie na żądanie użytkownika (przycisk
+ * w wierszu wyników), nigdy automatycznie dla całej listy.
+ */
+async function resolveNipOnDemand(companyName) {
+  const found = await findNipViaSearch(companyName);
+
+  if (!found?.nip) {
+    return {
+      nip: null, nip_verified: false, company_name: companyName,
+      website_url: found?.website_url || null,
+      pkd_main: null, pkd_codes: [], regon: null,
+    };
+  }
+
+  const gus = await gusRegon.getCompanyData(found.nip).catch(() => null);
+  if (gus && nameLooksLike(companyName, gus.officialName)) {
+    return {
+      company_name: gus.officialName || companyName,
+      nip:          found.nip,
+      website_url:  found.website_url || null,
+      pkd_main:     gus.pkdMain || null,
+      pkd_codes:    gus.pkdCodes?.map(c => c.kod) || [],
+      regon:        gus.regon || null,
+      nip_verified: true,
+    };
+  }
+
+  return {
+    company_name: companyName,
+    nip:          found.nip,
+    website_url:  found.website_url || null,
+    pkd_main:     null, pkd_codes: [], regon: null,
+    nip_verified: false,
   };
 }
 
@@ -302,6 +378,30 @@ async function checkTenantPresence(tenantId, nips) {
   }]));
 }
 
+// ── SQL: obecność po ZNORMALIZOWANEJ NAZWIE (uzupełnienie dla NIP) ─
+// Świeżo odkryte firmy często nie mają jeszcze potwierdzonego NIP-u, więc realny
+// duplikat przechodził niezauważony przez sprawdzanie wyłącznie po NIP. Dotyczy
+// TYLKO bazy prospektów — leady i partnerzy mają własny, wcześniejszy mechanizm.
+
+function nameIndexKey(name) {
+  return normalizeName(name || '').replace(/[^a-z0-9]/g, '');
+}
+
+async function getProspectsNameIndex(tenantId) {
+  if (!tenantId) return new Set();
+  const { rows } = await db.query(
+    `SELECT company_name FROM prospect_companies
+      WHERE tenant_id = $1 AND company_name IS NOT NULL`,
+    [tenantId],
+  );
+  const index = new Set();
+  for (const r of rows) {
+    const key = nameIndexKey(r.company_name);
+    if (key) index.add(key);
+  }
+  return index;
+}
+
 // ── Public API ─────────────────────────────────────────────────────
 
 async function resolveSeedPkd(seedNip) {
@@ -318,15 +418,18 @@ async function discoverStream(tenantId, userId, companyName, seedNip, { onIndust
   logger.info('[Discovery] Claude returned', { tenantId, count: rawList.length, industry });
   onIndustry(industry);
 
+  const nameIndex = await getProspectsNameIndex(tenantId);
+
   await Promise.all(rawList.map(async (raw) => {
     const company = await validateWithGus(raw);
 
-    let inProspects = false, inLeads = false, inPartners = false;
+    let inProspects = nameIndex.has(nameIndexKey(company.company_name));
+    let inLeads = false, inPartners = false;
     if (company.nip) {
       const p = (await checkTenantPresence(tenantId, [company.nip])).get(company.nip);
-      inProspects = p?.inProspects || false;
-      inLeads     = p?.inLeads     || false;
-      inPartners  = p?.inPartners  || false;
+      inProspects = inProspects || (p?.inProspects || false);
+      inLeads     = p?.inLeads   || false;
+      inPartners  = p?.inPartners || false;
     }
 
     onCompany({ ...company, industry, in_prospects: inProspects, in_leads: inLeads, in_partners: inPartners });
@@ -338,7 +441,7 @@ async function discoverStream(tenantId, userId, companyName, seedNip, { onIndust
  * offset 5/10 → z cache (bez kosztu)
  */
 async function discover(tenantId, userId, companyName, seedNip, offset = 0) {
-  let allCompanies = getCache(tenantId, userId, seedNip);
+  let allCompanies = getCache(tenantId, seedNip);
   let industry     = null;
 
   if (!allCompanies) {
@@ -350,16 +453,18 @@ async function discover(tenantId, userId, companyName, seedNip, offset = 0) {
     const enriched  = await Promise.all(rawList.map(validateWithGus));
     const validNips = enriched.map(c => c.nip).filter(Boolean);
     const presence  = await checkTenantPresence(tenantId, validNips);
+    const nameIndex = await getProspectsNameIndex(tenantId);
 
     allCompanies = enriched.map(c => ({
       ...c,
-      in_prospects: c.nip ? (presence.get(c.nip)?.inProspects || false) : false,
+      in_prospects: nameIndex.has(nameIndexKey(c.company_name))
+                    || (c.nip ? (presence.get(c.nip)?.inProspects || false) : false),
       in_leads:     c.nip ? (presence.get(c.nip)?.inLeads     || false) : false,
       in_partners:  c.nip ? (presence.get(c.nip)?.inPartners  || false) : false,
       industry:     aiIndustry,
     }));
 
-    setCache(tenantId, userId, seedNip, allCompanies);
+    setCache(tenantId, seedNip, allCompanies);
   } else {
     industry = allCompanies[0]?.industry || null;
   }
@@ -373,8 +478,8 @@ async function discover(tenantId, userId, companyName, seedNip, offset = 0) {
 }
 
 module.exports = {
-  discover, discoverStream,
+  discover, discoverStream, resolveNipOnDemand,
   // Eksport na potrzeby testów jednostkowych (bez sieci i bez AI).
-  checkTenantPresence, cacheKey, getCache, setCache,
+  checkTenantPresence, getProspectsNameIndex, nameLooksLike, cacheKey, getCache, setCache,
   PAGE_SIZE, MAX_RESULTS,
 };

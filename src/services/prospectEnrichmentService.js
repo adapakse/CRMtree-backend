@@ -2562,6 +2562,34 @@ function extractText($) {
   return combined.slice(0, 6000);
 }
 
+// Numer z prefiksem kierunkowym kraju — wysoka pewność, nie potrzebuje kontekstu.
+const PHONE_COUNTRY_PREFIX_RE = /(?:\+48|0048)[\s./-]?(?:\d[\s./-]?){9}/g;
+// Numer poprzedzony etykietą — bez niej ciąg 9 cyfr w tekście to równie dobrze NIP,
+// REGON, numer konta albo data, więc etykieta jest tu jedynym sygnałem.
+const PHONE_LABELLED_RE = /\b(?:tel|telefon|kom|fax|faks)\b\.?\s*:?\s*((?:\+?\d[\s()./-]?){9,15})/gi;
+
+// Telefon wpisany jako zwykły tekst (np. w popupie zgody RODO renderowanym przez JS)
+// nie ma linku tel: ani wpisu JSON-LD — bez tego fallbacku ginął, mimo że e-mail
+// z tego samego bloku tekstu łapał się regexem e-mailowym niżej.
+function extractPhonesFromText(text) {
+  const phones = new Set();
+  if (!text) return [];
+
+  // Separator jest dozwolony też PO ostatniej cyfrze (żeby złapać "12 345 67 89,"),
+  // więc dopasowanie trzeba obciąć do ostatniej cyfry.
+  const trimTail = (s) => s.trim().replace(/[^\d)]+$/, '');
+
+  for (const m of text.matchAll(PHONE_COUNTRY_PREFIX_RE)) {
+    if (m[0].replace(/\D/g, '').length === 11) phones.add(trimTail(m[0]));
+  }
+  for (const m of text.matchAll(PHONE_LABELLED_RE)) {
+    const digits = m[1].replace(/\D/g, '');
+    if (digits.length >= 9 && digits.length <= 11) phones.add(trimTail(m[1]));
+  }
+
+  return [...phones];
+}
+
 // Wyciąga emaile i telefony ze strony: mailto:/tel: linki, Schema.org, regex na tekście
 function extractContactsFromHtml(html, $) {
   const emails = new Set();
@@ -2600,6 +2628,7 @@ function extractContactsFromHtml(html, $) {
     const e = m[0].toLowerCase();
     if (!e.includes('..') && e.length < 100) emails.add(e);
   }
+  for (const p of extractPhonesFromText(textForRegex)) phones.add(p);
 
   return { emails: [...emails], phones: [...phones] };
 }
@@ -5181,6 +5210,7 @@ module.exports = {
   // Eksport dodatkowy na potrzeby menuAuditTool.js — diagnostyczne narzędzie
   // audytu menu nawigacyjnego, reużywa scrapingu zamiast duplikować go.
   fetchKRS, findWebsiteUrl, scrapeWebsite, normalizeName, fetchPage, extractText, extractInternalLinks, scoreLinkRelevance,
+  extractContactsFromHtml, extractPhonesFromText,
   checkDomainIdentity, isDomainParkingPage, isDomainTrustedForThisRun,
   matchesIcpBlacklist, getIcpScoringRules, calcIcpScore, buildSignalReasoningMap,
   // Eksport na potrzeby ręcznego/testowego wywołania fallbacku drugiej domeny

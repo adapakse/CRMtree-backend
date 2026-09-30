@@ -92,15 +92,33 @@ describe('izolacja tenantów — checkTenantPresence', () => {
   });
 });
 
-describe('klucz cache zawiera tenanta', () => {
-  test('ten sam user i seed w dwóch tenantach to dwa różne wpisy', () => {
-    const k1 = discoverySvc.cacheKey(tenantA, userA.id, SHARED_NIP);
-    const k2 = discoverySvc.cacheKey(tenantB, userA.id, SHARED_NIP);
+describe('klucz cache zawiera tenanta, ale nie usera', () => {
+  test('ten sam seed w dwóch tenantach to dwa różne wpisy', () => {
+    const k1 = discoverySvc.cacheKey(tenantA, SHARED_NIP);
+    const k2 = discoverySvc.cacheKey(tenantB, SHARED_NIP);
     expect(k1).not.toBe(k2);
 
-    discoverySvc.setCache(tenantA, userA.id, SHARED_NIP, [{ company_name: 'A' }]);
-    expect(discoverySvc.getCache(tenantB, userA.id, SHARED_NIP)).toBeNull();
-    expect(discoverySvc.getCache(tenantA, userA.id, SHARED_NIP)).toHaveLength(1);
+    discoverySvc.setCache(tenantA, SHARED_NIP, [{ company_name: 'A' }]);
+    expect(discoverySvc.getCache(tenantB, SHARED_NIP)).toBeNull();
+    expect(discoverySvc.getCache(tenantA, SHARED_NIP)).toHaveLength(1);
+  });
+});
+
+describe('nameLooksLike — GUS potwierdza NIP, nie firmę', () => {
+  test('forma prawna i polskie znaki nie psują dopasowania', () => {
+    expect(discoverySvc.nameLooksLike('Lux Med Sp. z o.o.', 'LUX MED SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ')).toBe(true);
+  });
+
+  test('dłuższa nazwa rejestrowa zawierająca nazwę potoczną przechodzi', () => {
+    expect(discoverySvc.nameLooksLike('Kowalski Transport', 'Przedsiębiorstwo Kowalski Transport Międzynarodowy')).toBe(true);
+  });
+
+  test('zupełnie inna firma o wspólnym słowie nie przechodzi', () => {
+    expect(discoverySvc.nameLooksLike('Transport Polska', 'Transport Europa Sp. z o.o.')).toBe(false);
+  });
+
+  test('brak nazwy → brak dopasowania', () => {
+    expect(discoverySvc.nameLooksLike('', 'Cokolwiek Sp. z o.o.')).toBe(false);
   });
 });
 
