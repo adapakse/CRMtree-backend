@@ -866,13 +866,16 @@ router.get('/icp-config', requireAdmin, async (req, res, next) => {
   try {
     const cfg = await tenantIcpConfigService.getActiveConfig(req.user.tenant_id);
     const validity = enrichSvc.evaluateIcpConfigValidity(cfg);
+    const activeVersion = cfg.currentVersionId
+      ? await tenantIcpConfigService.getConfigVersionById(req.user.tenant_id, cfg.currentVersionId)
+      : null;
     res.json({
       qualification_threshold: cfg.qualificationThreshold,
       config_revision: cfg.configRevision,
       current_version_id: cfg.currentVersionId,
-      current_version: cfg.currentVersionId
-        ? (await tenantIcpConfigService.getConfigVersionById(req.user.tenant_id, cfg.currentVersionId))?.version ?? null
-        : null,
+      current_version: activeVersion?.version ?? null,
+      current_version_published_at: activeVersion?.created_at ?? null,
+      current_version_author: activeVersion?.created_by_name ?? null,
       is_default: cfg.isDefault,
       signals: cfg.signals,
       signals_sum: validity.signalsSum,
