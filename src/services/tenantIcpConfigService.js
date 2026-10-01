@@ -820,9 +820,15 @@ async function getPublishedConfig(tenantId, queryable = db) {
   };
 }
 
+// created_by_name dołączane JOIN-em, żeby "kto ostatnio zmienił konfigurację"
+// dało się pokazać bez drugiego zapytania z warstwy route. LEFT JOIN, bo
+// created_by ma ON DELETE SET NULL — wersja przeżywa usunięcie swojego autora.
 async function getConfigVersionById(tenantId, versionId) {
   const { rows: [version] } = await db.query(
-    `SELECT * FROM tenant_icp_config_versions WHERE tenant_id = $1 AND id = $2`,
+    `SELECT v.*, u.display_name AS created_by_name
+       FROM tenant_icp_config_versions v
+       LEFT JOIN users u ON u.id = v.created_by
+      WHERE v.tenant_id = $1 AND v.id = $2`,
     [tenantId, versionId],
   );
   return version || null;

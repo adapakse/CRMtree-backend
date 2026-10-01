@@ -194,4 +194,11 @@ module.exports = {
     appSecret: optional("META_APP_SECRET"),
     redirectUri: optional("META_REDIRECT_URI", "http://localhost:3000/api/crm/seo/social/facebook/oauth/callback"),
   },
+
+  // Mobile app (ADR 001) — oldest app version still allowed to talk to this
+  // API. Raising it forces an update without shipping backend code.
+  mobile: {
+    minVersionAndroid: optional("MOBILE_MIN_VERSION_ANDROID", "0.0.0"),
+    minVersionIos: optional("MOBILE_MIN_VERSION_IOS", "0.0.0"),
+  },
 };

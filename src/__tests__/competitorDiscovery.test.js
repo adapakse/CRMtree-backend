@@ -53,7 +53,7 @@ beforeAll(async () => {
   // Batch enrichmentu robi realny crawl + AI — w teście tylko obserwujemy,
   // czy został wywołany i dla KTÓREGO tenanta.
   batchProgressSpy = jest.spyOn(enrichSvc, 'getBatchProgress').mockReturnValue({ running: false });
-  runBatchSpy      = jest.spyOn(enrichSvc, 'runBatch').mockResolvedValue({ ok: true });
+  runBatchSpy      = jest.spyOn(enrichSvc, 'runBatchForIds').mockResolvedValue({ ok: true });
 });
 
 afterAll(async () => {
@@ -133,7 +133,7 @@ describe('bulk-add — zapisuje do właściwego tenanta', () => {
     expect(res.body.source_database).toMatch(/^AA_\d{8}_\d+$/);
 
     const { rows } = await db.query(
-      `SELECT tenant_id, website_source, imported_by, enrichment_status, source_database
+      `SELECT id, tenant_id, website_source, imported_by, enrichment_status, source_database
          FROM prospect_companies WHERE nip = $1`, [BULK_NIP]);
     expect(rows).toHaveLength(1);
     expect(rows[0].tenant_id).toBe(tenantA);
@@ -144,8 +144,8 @@ describe('bulk-add — zapisuje do właściwego tenanta', () => {
     // batch enrichmentu jest per-tenant — sprawdzane w TYM SAMYM teście,
     // bo beforeEach czyści spy między testami
     expect(res.body.batchStarted).toBe(true);
-    expect(runBatchSpy).toHaveBeenCalledWith(tenantA);
-    expect(runBatchSpy).not.toHaveBeenCalledWith(tenantB);
+    expect(runBatchSpy).toHaveBeenCalledWith(tenantA, [rows[0].id]);
+    expect(runBatchSpy).not.toHaveBeenCalledWith(tenantB, expect.anything());
   });
 
   test('ten sam NIP może istnieć u drugiego tenanta (UNIQUE jest per-tenant)', async () => {

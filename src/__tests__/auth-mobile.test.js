@@ -157,3 +157,81 @@ describe("mobile refresh tokens", () => {
     expect((await tokenRow(otherDevice)).revoked).toBe(true);
   });
 });
+
+describe("suspended tenant", () => {
+  test("a mobile refresh is refused once the tenant is suspended", async () => {
+    const login = await mobileLogin({ email: `split@${DOMAIN}`, password: OTHER_PASSWORD });
+    const refreshToken = login.body.accounts[0].refresh_token;
+    await db.query(`UPDATE tenants SET is_active = FALSE WHERE id = $1`, [tenantB]);
+    try {
+      const res = await request(app).post("/api/auth/refresh").send({ refresh_token: refreshToken });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("TENANT_INACTIVE");
+    } finally {
+      await db.query(`UPDATE tenants SET is_active = TRUE WHERE id = $1`, [tenantB]);
+    }
+  });
+});
+
+describe("GET / DELETE /api/auth/devices", () => {
+  const auth = () => ({ Authorization: `Bearer ${signAccessToken(users.multiA)}` });
+
+  test("lists each signed-in phone once and signs one out", async () => {
+    await mobileLogin({ email: `multi@${DOMAIN}`, password: PASSWORD });
+    await mobileLogin({ email: `multi@${DOMAIN}`, password: PASSWORD });
+    const other = await request(app).post("/api/auth/mobile/login")
+      .send({ email: `multi@${DOMAIN}`, password: PASSWORD, device_id: "device-test-0003", device_name: "Other Phone" });
+    const otherTokenA = other.body.accounts.find((a) => a.tenant_slug === "zz-mobile-a").refresh_token;
+
+    const list = await request(app).get("/api/auth/devices").set(auth());
+    expect(list.status).toBe(200);
+    expect(list.body.map((d) => d.device_id).sort()).toEqual([DEVICE, "device-test-0003"]);
+    expect(list.body.find((d) => d.device_id === "device-test-0003").device_name).toBe("Other Phone");
+
+    const del = await request(app).delete("/api/auth/devices/device-test-0003").set(auth());
+    expect(del.status).toBe(204);
+    expect((await tokenRow(otherTokenA)).revoked).toBe(true);
+
+    const after = await request(app).get("/api/auth/devices").set(auth());
+    expect(after.body.map((d) => d.device_id)).toEqual([DEVICE]);
+  });
+
+  test("signing out a phone only affects this account, not the same email in another tenant", async () => {
+    const login = await request(app).post("/api/auth/mobile/login")
+      .send({ email: `multi@${DOMAIN}`, password: PASSWORD, device_id: "device-test-0004" });
+    const tokenB = login.body.accounts.find((a) => a.tenant_slug === "zz-mobile-b").refresh_token;
+    await request(app).delete("/api/auth/devices/device-test-0004").set(auth());
+    expect((await tokenRow(tokenB)).revoked).toBe(false);
+  });
+
+  test("404 for a device that isn't signed in", async () => {
+    const res = await request(app).delete("/api/auth/devices/not-a-device").set(auth());
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /api/public/app-config", () => {
+  test("returns the minimum supported app version without auth", async () => {
+    const res = await request(app).get("/api/public/app-config");
+    expect(res.status).toBe(200);
+    expect(res.body.min_supported_version).toEqual({ android: expect.any(String), ios: expect.any(String) });
+  });
+});
+
+describe("mobile access token lifetime", () => {
+  const ttlSeconds = (token) => {
+    const { exp, iat } = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString());
+    return exp - iat;
+  };
+
+  test("mobile access tokens live 15 minutes, also after a refresh", async () => {
+    const login = await mobileLogin({ email: `solo@${DOMAIN}`, password: PASSWORD });
+    expect(ttlSeconds(login.body.accounts[0].access_token)).toBe(15 * 60);
+    const refreshed = await request(app).post("/api/auth/refresh").send({ refresh_token: login.body.accounts[0].refresh_token });
+    expect(ttlSeconds(refreshed.body.access_token)).toBe(15 * 60);
+  });
+
+  test("web access tokens keep the configured lifetime", () => {
+    expect(ttlSeconds(signAccessToken(users.solo))).toBeGreaterThan(15 * 60);
+  });
+});

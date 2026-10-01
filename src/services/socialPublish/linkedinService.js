@@ -15,39 +15,23 @@
 // going live.
 // ─────────────────────────────────────────────────────────────────
 
-const crypto = require('crypto');
 const db = require('../../config/database');
 const config = require('../../config');
 const logger = require('../../utils/logger');
 const { encrypt, decrypt } = require('../../utils/encrypt');
+const { makeOAuthState, parseOAuthState } = require('../../utils/seoOAuthState');
 
 const AUTH_BASE = 'https://www.linkedin.com/oauth/v2';
 const API_BASE = 'https://api.linkedin.com';
 const LINKEDIN_API_VERSION = '202606'; // bumped 2026-09-28 (docs list li-lms-2026-06); LinkedIn sunsets versions after ~1 year
 const SCOPES = ['w_organization_social', 'r_organization_admin'];
 
-function makeOAuthState(tenantId, userId) {
-  const ts = Date.now();
-  const sig = crypto.createHmac('sha256', config.jwt.secret).update(`${tenantId}:${userId}:${ts}`).digest('hex').slice(0, 16);
-  return `${tenantId}.${userId}.${ts}.${sig}`;
-}
-
-function parseOAuthState(state) {
-  if (!state || typeof state !== 'string') return null;
-  const [tenantId, userId, tsStr, sig] = state.split('.');
-  const ts = parseInt(tsStr, 10);
-  if (!ts || Date.now() - ts > 30 * 60 * 1000) return null;
-  const expected = crypto.createHmac('sha256', config.jwt.secret).update(`${tenantId}:${userId}:${ts}`).digest('hex').slice(0, 16);
-  if (sig !== expected) return null;
-  return { tenantId, userId };
-}
-
-function getAuthUrl(tenantId, userId) {
+function getAuthUrl(tenantId, userId, returnHost) {
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: config.linkedin.clientId,
     redirect_uri: config.linkedin.redirectUri,
-    state: makeOAuthState(tenantId, userId),
+    state: makeOAuthState(tenantId, userId, returnHost),
     scope: SCOPES.join(' '),
   });
   return `${AUTH_BASE}/authorization?${params.toString()}`;

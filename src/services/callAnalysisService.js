@@ -696,18 +696,24 @@ async function analyzeOne(tenantId, nip) {
 // just a "wait your turn" UX limit — acceptable for now, not worth a bigger
 // per-tenant progress-tracking refactor yet.
 async function runBatch(tenantId) {
+  const { rows } = await db.query(
+    `SELECT nip FROM call_analysis_companies
+     WHERE tenant_id = $1 AND analysis_status IN ('pending', 'error')
+     ORDER BY imported_at ASC`,
+    [tenantId]
+  );
+  return runBatchForNips(tenantId, rows.map(r => r.nip));
+}
+
+// Analizuje dokładnie podaną listę NIP-ów (zaznaczenie w UI), korzystając z tej
+// samej maszynerii postępu co pełny batch. Bez tego akcja zbiorcza mogła tylko
+// oznaczyć rekordy jako 'pending' i czekać na „Analizuj wszystkie", które
+// ruszało również firmy spoza zaznaczenia.
+async function runBatchForNips(tenantId, nips) {
   if (batchRunning) return { alreadyRunning: true };
   batchRunning = true;
 
   try {
-    const { rows } = await db.query(
-      `SELECT nip FROM call_analysis_companies
-       WHERE tenant_id = $1 AND analysis_status IN ('pending', 'error')
-       ORDER BY imported_at ASC`,
-      [tenantId]
-    );
-
-    const nips = rows.map(r => r.nip);
     batchProgress = { total: nips.length, done: 0, errors: 0, running: true };
 
     if (!nips.length) return batchProgress;
@@ -743,4 +749,4 @@ function isBatchRunning() {
 
 function getSystemPrompt() { return SYSTEM_PROMPT; }
 
-module.exports = { runBatch, getBatchProgress, isBatchRunning, analyzeOne, getSystemPrompt, computeFollowUpDate };
+module.exports = { runBatch, runBatchForNips, getBatchProgress, isBatchRunning, analyzeOne, getSystemPrompt, computeFollowUpDate };

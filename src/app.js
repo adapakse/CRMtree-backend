@@ -27,6 +27,7 @@ const settingsRoutes      = require('./routes/settings');
 const adminDataRoutes 	  = require('./routes/admin-data');
 const adminTenantsRoutes  = require('./routes/admin-tenants');
 const adminBillingRoutes  = require('./routes/admin-billing');
+const onboardingSurveyRoutes = require('./routes/onboarding-survey');
 const adminProspectsRoutes        = require('./routes/admin-prospects');
 const crmProspectsDashboardRoutes = require('./routes/crm-prospects-dashboard');
 const profileRoutes       = require('./routes/profile');
@@ -41,7 +42,9 @@ const smsRoutes       = require('./routes/sms');
 const adminCallAnalysisRoutes = require('./routes/admin-call-analysis');
 const publicBlogRoutes    = require('./routes/public-blog');
 const publicTenantsRoutes = require('./routes/public-tenants');
+const publicAppConfigRoutes = require('./routes/public-app-config');
 
+const openapiRoutes = require('./routes/openapi');
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
 const crmPartnersRoutes     = require('./routes/crm-partners');
@@ -172,7 +175,9 @@ app.get('/health', async (req, res) => {
 // ─── API Routes ───────────────────────────────────────────
 app.use('/api/public/blog',     publicBlogRoutes);
 app.use('/api/public/tenants',  publicTenantsRoutes);
+app.use('/api/public/app-config', publicAppConfigRoutes);
 app.use('/api/auth',            authRoutes);
+app.use('/api/openapi.json', openapiRoutes);
 app.use('/api/documents',       documentRoutes);
 
 app.use('/api/documents/:documentId/tags',     tagRoutes);
@@ -186,6 +191,7 @@ app.use('/api/admin/settings',  settingsRoutes);
 app.use('/api/admin/data',     adminDataRoutes);
 app.use('/api/admin/tenants', adminTenantsRoutes);
 app.use('/api/admin/billing', adminBillingRoutes);
+app.use('/api/admin/onboarding-survey', onboardingSurveyRoutes);
 app.use('/api/admin/prospects', adminProspectsRoutes);
 app.use('/api/profile',         profileRoutes);
 app.use('/api/crm/gmail',   crmGmail);

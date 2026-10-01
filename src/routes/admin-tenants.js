@@ -14,6 +14,7 @@
 // PUT    /api/admin/tenants/:id/subscription/cancel — end subscription (rezygnacja)
 // DELETE /api/admin/tenants/:id/subscription/cancel — undo an accidental cancellation
 // POST   /api/admin/tenants/:id/impersonate — get JWT as tenant admin
+// GET    /api/admin/tenants/:id/onboarding-survey — onboarding survey incl. decrypted secrets
 //
 // Every :id-scoped endpoint below refuses to operate on a soft-deleted
 // tenant (findAliveTenant / an inline "deleted_at IS NULL" clause) — being
@@ -38,6 +39,7 @@ const { isSlugAllowed } = require('../config/tenantHost');
 const whatsappService = require('../services/whatsappService');
 const tenantIcpConfigService = require('../services/tenantIcpConfigService');
 const enrichSvc = require('../services/prospectEnrichmentService');
+const onboardingSurveyService = require('../services/onboardingSurveyService');
 
 // A secret field consisting only of mask characters (e.g. "********",
 // "••••••••", "●●●●●●", "······", optionally with surrounding whitespace) is
@@ -1096,6 +1098,28 @@ router.delete('/:id/whatsapp-config',
   }
 );
 
+// ── GET /:id/onboarding-survey — the tenant admin's onboarding survey ─────
+// The only place the survey's secret fields (tokens, client secrets, API
+// keys the client chose to hand over) come back decrypted — the tenant admin
+// who typed them only ever gets the list of which ones are set.
+router.get('/:id/onboarding-survey',
+  [param('id').isUUID()], validate,
+  async (req, res, next) => {
+    try {
+      if (!(await findAliveTenant(req.params.id))) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const survey = await onboardingSurveyService.getSurvey(req.params.id, { revealSecrets: true });
+
+      logger.info('Super admin read onboarding survey', {
+        tenantId: req.params.id, by: req.user.email,
+      });
+      res.json(survey);
+    } catch (err) { next(err); }
+  }
+);
+
 // ── ICP / Enrichment config (dynamiczne sygnały per tenant) ───────────────
 // Wzorzec identyczny jak WhatsApp config wyżej: super-admin only, findAliveTenant
 // guard, logger.info audit line, `if (err.status) res.status(err.status)...`
@@ -1124,14 +1148,17 @@ router.get('/:id/icp-config',
 
       const cfg = await tenantIcpConfigService.getActiveConfig(req.params.id);
       const validity = enrichSvc.evaluateIcpConfigValidity(cfg);
+      const activeVersion = cfg.currentVersionId
+        ? await tenantIcpConfigService.getConfigVersionById(req.params.id, cfg.currentVersionId)
+        : null;
 
       res.json({
         qualification_threshold: cfg.qualificationThreshold,
         config_revision: cfg.configRevision,
         current_version_id: cfg.currentVersionId,
-        current_version: cfg.currentVersionId
-          ? (await tenantIcpConfigService.getConfigVersionById(req.params.id, cfg.currentVersionId))?.version ?? null
-          : null,
+        current_version: activeVersion?.version ?? null,
+        current_version_published_at: activeVersion?.created_at ?? null,
+        current_version_author: activeVersion?.created_by_name ?? null,
         is_default: cfg.isDefault,
         signals: cfg.signals,
         signals_sum: validity.signalsSum,
