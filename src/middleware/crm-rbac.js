@@ -157,6 +157,64 @@ async function loadCrmScope(req, res, next) {
 }
 
 /**
+ * Middleware factory: dociąga granty widoczności CRM (crm_visibility_grants)
+ * dla danego modułu ('leads' | 'partners'). Musi być wywołany PO loadCrmScope.
+ *
+ * Rozszerza:
+ *   req.crmScopeUserIds      - scope ODCZYTU (granty 'read' i 'full')
+ *   req.crmWriteScopeUserIds - scope ZAPISU (tylko granty 'full'); ustawiane
+ *                              wyłącznie tutaj, więc route'y bez tego middleware
+ *                              zachowują dotychczasowe zachowanie
+ *
+ * Grupa docelowa grantu jest rozwijana do jej AKTUALNYCH członków (JOIN przez
+ * user_group_roles), nie do snapshotu z momentu nadania grantu.
+ *
+ * Odczyt nie wymagał żadnych zmian w zapytaniach SQL: listy, filtry i raporty
+ * czytają req.crmScopeUserIds, więc wystarczy rozszerzyć tę tablicę u źródła.
+ */
+function loadCrmModuleGrants(module) {
+  return async (req, res, next) => {
+    try {
+      // admin i crm_global_read mają scope === null (bez ograniczeń) — grant
+      // nie ma czego rozszerzać.
+      if (!req.user || req.crmScopeUserIds === null) return next();
+
+      const { rows } = await db.query(
+        `SELECT DISTINCT g.access_level, ugr.user_id
+           FROM crm_visibility_grants g
+           JOIN user_group_roles ugr ON ugr.group_id = g.target_group_id
+                                    AND ugr.tenant_id = g.tenant_id
+          WHERE g.grantee_user_id = $1
+            AND g.module = $2
+            AND g.tenant_id = $3`,
+        [req.user.id, module, req.user.tenant_id],
+      );
+
+      if (!rows.length) return next();
+
+      const readScope  = Array.isArray(req.crmScopeUserIds) ? req.crmScopeUserIds.slice() : [];
+      const writeScope = readScope.slice();
+
+      for (const row of rows) {
+        if (!readScope.includes(row.user_id)) readScope.push(row.user_id);
+        if (row.access_level === 'full' && !writeScope.includes(row.user_id)) {
+          writeScope.push(row.user_id);
+        }
+      }
+
+      req.crmScopeUserIds      = readScope;
+      req.crmWriteScopeUserIds = writeScope;
+      next();
+    } catch (err) {
+      // Tabela może jeszcze nie istnieć (środowisko bez migracji 0305) —
+      // brak grantów oznacza dotychczasowe zachowanie, nie błąd requestu.
+      if (err.code === '42P01') return next();
+      next(err);
+    }
+  };
+}
+
+/**
  * Middleware: dodaje req.scopeFilter() helper.
  * Wywołaj po loadCrmScope (który ustawia req.crmScopeUserIds).
  *
@@ -201,17 +259,23 @@ function requireCrmManager(req, res, next) {
  * Sprawdza czy bieżący user może EDYTOWAĆ dany rekord.
  *
  * - admin     → zawsze tak
- * - pozostali → właściciel rekordu musi mieścić się w req.crmScopeUserIds:
- *               własny rekord, rekord handlowca z grupy managera, albo rekord
- *               osoby, którą user aktywnie zastępuje (loadCrmScope rozszerza scope).
+ * - pozostali → właściciel rekordu musi mieścić się w scope ZAPISU:
+ *               własny rekord, rekord handlowca z grupy managera, rekord osoby,
+ *               którą user aktywnie zastępuje (loadCrmScope), albo rekord objęty
+ *               grantem 'full' (loadCrmModuleGrants). Grant 'read' rozszerza
+ *               wyłącznie odczyt, więc nie trafia do scope zapisu.
+ *
+ * Fallback na req.crmScopeUserIds zachowuje dotychczasowe zachowanie tam, gdzie
+ * loadCrmModuleGrants nie jest w łańcuchu middleware.
  *
  * Rzuca błąd 403 przy braku uprawnień.
  */
 function assertOwnership(record, req, ownerProp = 'assigned_to') {
   if (req.user.is_admin) return;
 
+  const writeScope = req.crmWriteScopeUserIds ?? req.crmScopeUserIds;
   const ownerId = record[ownerProp];
-  if (Array.isArray(req.crmScopeUserIds) && req.crmScopeUserIds.includes(ownerId)) {
+  if (Array.isArray(writeScope) && writeScope.includes(ownerId)) {
     return;
   }
 
@@ -226,12 +290,13 @@ function assertOwnership(record, req, ownerProp = 'assigned_to') {
 
 /**
  * Czy bieżący user może operować na rekordach należących do ownerId
- * (własne / grupa managera / aktywne zastępstwo). Admin — zawsze.
+ * (własne / grupa managera / aktywne zastępstwo / grant 'full'). Admin — zawsze.
  * Pomocnik do miejsc, które nie używają assertOwnership (np. aktywności).
  */
 function canOperateForOwner(req, ownerId) {
   if (req.user?.is_admin) return true;
-  return Array.isArray(req.crmScopeUserIds) && req.crmScopeUserIds.includes(ownerId);
+  const writeScope = req.crmWriteScopeUserIds ?? req.crmScopeUserIds;
+  return Array.isArray(writeScope) && writeScope.includes(ownerId);
 }
 
 /**
@@ -255,4 +320,4 @@ function requireFeature(feature) {
   };
 }
 
-module.exports = { crmAuth, loadCrmScope, requireCrmManager, crmScope, assertOwnership, canOperateForOwner, requireFeature };
+module.exports = { crmAuth, loadCrmScope, loadCrmModuleGrants, requireCrmManager, crmScope, assertOwnership, canOperateForOwner, requireFeature };

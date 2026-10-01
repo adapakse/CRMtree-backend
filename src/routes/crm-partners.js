@@ -6,7 +6,7 @@ const express  = require("express");
 const router   = express.Router();
 const { pool } = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
-const { crmAuth, loadCrmScope, canOperateForOwner } = require("../middleware/crm-rbac");
+const { crmAuth, loadCrmScope, loadCrmModuleGrants, canOperateForOwner } = require("../middleware/crm-rbac");
 const calendarService = require("../services/calendarService");
 const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
@@ -15,7 +15,7 @@ const email    = require("../utils/email");
 const logger   = require("../utils/logger");
 
 // Wspólne middleware dla wszystkich tras (requireAuth + crmAuth są też per-route dla jasności)
-router.use(requireAuth, crmAuth, loadCrmScope);
+router.use(requireAuth, crmAuth, loadCrmScope, loadCrmModuleGrants("partners"));
 
 // ── Pomocnicze ────────────────────────────────────────────────────────────────
 function assertManager(req, res) {
@@ -685,13 +685,15 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
     if (!crmId) return res.status(404).json({ error: 'Partner nie znaleziony' });
     const id = crmId;
 
-    // Scope check: manager może edytować tylko partnerów ze swojej grupy
-    if (!req.user.is_admin && req.user.crm_role === 'sales_manager' && req.crmScopeUserIds) {
+    // Scope check: manager może edytować tylko partnerów ze swojej grupy albo
+    // objętych grantem 'full' (crmWriteScopeUserIds — patrz loadCrmModuleGrants).
+    const writeScope = req.crmWriteScopeUserIds ?? req.crmScopeUserIds;
+    if (!req.user.is_admin && req.user.crm_role === 'sales_manager' && writeScope) {
       const { rows: partnerRows } = await pool.query(
         'SELECT manager_id FROM crm_partners WHERE id = $1 AND tenant_id = $2', [id, req.tenantId],
       );
       if (!partnerRows.length) return res.status(404).json({ error: 'Partner nie znaleziony' });
-      if (!req.crmScopeUserIds.includes(partnerRows[0].manager_id)) {
+      if (!writeScope.includes(partnerRows[0].manager_id)) {
         return res.status(403).json({
           error: 'Nie możesz edytować tego partnera — jego manager nie należy do Twojej grupy.',
         });
