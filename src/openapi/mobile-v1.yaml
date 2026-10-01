@@ -1,0 +1,905 @@
+openapi: 3.0.3
+info:
+  title: CRMtree API — mobile contract
+  version: 1.0.0
+  description: |
+    The endpoints the CRMtree mobile app (ADR 001) is allowed to depend on.
+    The Dart client in `crmtree-mobile` is generated from this file.
+
+    Rules:
+    - Old app builds stay installed for weeks. A change that removes or renames
+      a field, tightens a type, or adds a required request field is BREAKING
+      and needs a new endpoint or version (CI runs `oasdiff` against master).
+    - Response objects are open (`additionalProperties: true`): the web API
+      returns many more fields than listed. Only the fields documented here
+      are part of the contract; the app must ignore the rest.
+    - Money values (`value_pln`, `contract_value`) are decimal STRINGS, as
+      PostgreSQL NUMERIC serializes — never parse them as binary floats.
+    - Every session talks to its own tenant host (`{slug}.crmtree.pl/api`).
+      `POST /auth/mobile/login` and `GET /public/app-config` are the only
+      calls made on the tenant-less host.
+servers:
+  - url: https://{tenant}.crmtree.pl/api
+    description: Production, per-tenant host
+    variables:
+      tenant:
+        default: app
+        description: Tenant slug; `app` for the tenant-less host used before login
+  - url: https://int.crmtree.pl/api
+    description: Integration environment (tenant comes from the token)
+tags:
+  - name: app
+  - name: auth
+  - name: leads
+  - name: partners
+  - name: activities
+  - name: agenda
+security:
+  - bearerAuth: []
+
+paths:
+  /public/app-config:
+    get:
+      tags: [app]
+      operationId: getAppConfig
+      summary: Minimum supported app version (read on every start, before login)
+      security: []
+      responses:
+        '200':
+          description: App configuration
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppConfig' }
+
+  /auth/mobile/login:
+    post:
+      tags: [auth]
+      operationId: mobileLogin
+      summary: Log in with email and password; returns every tenant the password matches
+      description: |
+        Call on the tenant-less host. One account → enter it directly; several →
+        show "Wybierz firmę". Tenant names are only ever revealed after a correct
+        password. Rate limited per IP and per email (429).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MobileLoginRequest' }
+      responses:
+        '200':
+          description: One entry per matching account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MobileLoginResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401':
+          description: Wrong email or password (never says which, never names a tenant)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: |
+            `code: MOBILE_ROLE_NOT_ALLOWED` — the password matched, but only an
+            account without a sales role. Show "aplikacja jest dla handlowców" with a link to the web app.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshToken
+      summary: Rotate the refresh token and get a new 15-minute access token
+      description: |
+        The old refresh token is revoked on use. Serialize refreshes in the app
+        (one at a time): presenting an already-rotated mobile token returns 401
+        `REFRESH_TOKEN_REUSED` and signs this account out on this device.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        '200':
+          description: New token pair
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401':
+          description: |
+            Invalid, expired or revoked token → full login required. `code` may be
+            `REFRESH_TOKEN_REUSED` or `TENANT_INACTIVE`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Revoke this session's refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: { type: string }
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message]
+                properties:
+                  message: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: The signed-in user, role and enabled tenant modules
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403':
+          description: '`code: TENANT_HOST_MISMATCH` — the token belongs to another tenant than this host'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/change-password:
+    post:
+      tags: [auth]
+      operationId: changePassword
+      summary: Change the password (also the forced step when must_change_password is true)
+      description: Signs this account out on every other phone; send `device_id` to keep this one signed in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_password]
+              properties:
+                current_password:
+                  type: string
+                  description: Required unless the account is in must_change_password mode
+                new_password: { type: string, minLength: 8 }
+                device_id: { type: string }
+      responses:
+        '200':
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /auth/devices:
+    get:
+      tags: [auth]
+      operationId: listDevices
+      summary: Phones signed in to this account
+      responses:
+        '200':
+          description: One entry per device, most recently active first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Device' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /auth/devices/{deviceId}:
+    delete:
+      tags: [auth]
+      operationId: signOutDevice
+      summary: Sign one phone out of this account
+      parameters:
+        - { name: deviceId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Signed out }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /crm/leads:
+    get:
+      tags: [leads]
+      operationId: listLeads
+      summary: Leads visible to the user (own leads for a salesperson, the team for a manager)
+      parameters:
+        - { name: stage, in: query, schema: { $ref: '#/components/schemas/LeadStage' }, description: Without it archived leads are hidden }
+        - { name: mine, in: query, schema: { type: boolean } }
+        - { name: hot, in: query, schema: { type: boolean } }
+        - { name: search, in: query, schema: { type: string }, description: 'Matches company, contact, email, NIP, phone, notes and tags' }
+        - { name: assigned_to, in: query, schema: { type: string }, description: User id or comma-separated ids (managers only) }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 5000, default: 50 } }
+      responses:
+        '200':
+          description: A page of leads, most recently updated first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadListResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /crm/leads/users:
+    get:
+      tags: [leads]
+      operationId: listCrmUsers
+      summary: CRM users of the tenant (for "assigned to" pickers)
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CrmUser' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /crm/leads/tasks:
+    get:
+      tags: [agenda]
+      operationId: listTasks
+      summary: Open activities (calls, meetings, tasks, notes) on leads, for the "Dziś" and task screens
+      parameters:
+        - { name: type, in: query, schema: { $ref: '#/components/schemas/ActivityType' } }
+        - { name: assigned_to, in: query, schema: { type: string }, description: User id or comma-separated ids (managers only) }
+        - { name: include_closed, in: query, schema: { type: boolean, default: false } }
+        - { name: include_no_date, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: Activities
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AgendaItem' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /crm/leads/calendar:
+    get:
+      tags: [agenda]
+      operationId: listCalendar
+      summary: Dated meetings, calls and open tasks on leads AND partners in a date range
+      parameters:
+        - { name: date_from, in: query, schema: { type: string, format: date } }
+        - { name: date_to, in: query, schema: { type: string, format: date }, description: Inclusive }
+        - { name: assigned_to, in: query, schema: { type: string }, description: User id (managers only) }
+      responses:
+        '200':
+          description: Calendar entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AgendaItem' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /crm/leads/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [leads]
+      operationId: getLead
+      summary: Lead card with its activities and extra contacts
+      responses:
+        '200':
+          description: Lead
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadDetail' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [leads]
+      operationId: updateLead
+      summary: Edit a lead or move it to another stage
+      description: |
+        Stages must be passed in order; skipping one returns 422 with an
+        explanation, and a lead on hold returns 409. A salesperson cannot
+        reassign (`assigned_to` is ignored).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LeadUpdate' }
+      responses:
+        '200':
+          description: Updated lead
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lead' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /crm/leads/{id}/activities:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [activities]
+      operationId: listLeadActivities
+      summary: Activities of a lead, newest first
+      responses:
+        '200':
+          description: Activities
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Activity' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [activities]
+      operationId: createLeadActivity
+      summary: Add a call note, meeting, task or note to a lead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivityCreate' }
+      responses:
+        '201':
+          description: Created activity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Activity' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /crm/leads/{id}/activities/{actId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+      - { name: actId, in: path, required: true, schema: { type: integer } }
+    patch:
+      tags: [activities]
+      operationId: updateLeadActivity
+      summary: Edit an activity or close it (status closed + close_comment)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivityUpdate' }
+      responses:
+        '200':
+          description: Updated activity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Activity' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [activities]
+      operationId: deleteLeadActivity
+      summary: Delete an activity
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /crm/partners:
+    get:
+      tags: [partners]
+      operationId: listPartners
+      summary: Partners (customers)
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: manager_id, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, default: 50 } }
+        - { name: sort, in: query, schema: { type: string, enum: [company, status, contract_signed, contract_value, created_at, industry, group_name, manager_name, contract_expires], default: company } }
+        - { name: dir, in: query, schema: { type: string, enum: [asc, desc], default: asc } }
+      responses:
+        '200':
+          description: A page of partners
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PartnerListResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /crm/partners/tasks:
+    get:
+      tags: [agenda]
+      operationId: listPartnerTasks
+      summary: Open activities on partners (same shape as lead tasks)
+      parameters:
+        - { name: type, in: query, schema: { $ref: '#/components/schemas/ActivityType' } }
+        - { name: assigned_to, in: query, schema: { type: string } }
+        - { name: include_closed, in: query, schema: { type: boolean, default: false } }
+        - { name: include_no_date, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: Activities
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AgendaItem' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /crm/partners/{partnerId}:
+    parameters:
+      - $ref: '#/components/parameters/PartnerId'
+    get:
+      tags: [partners]
+      operationId: getPartner
+      summary: Partner card with its activities and extra contacts
+      responses:
+        '200':
+          description: Partner
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PartnerDetail' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /crm/partners/{partnerId}/activities:
+    parameters:
+      - $ref: '#/components/parameters/PartnerId'
+    get:
+      tags: [activities]
+      operationId: listPartnerActivities
+      summary: Activities of a partner, newest first
+      responses:
+        '200':
+          description: Activities
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Activity' }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [activities]
+      operationId: createPartnerActivity
+      summary: Add a call note, meeting, task or note to a partner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivityCreate' }
+      responses:
+        '201':
+          description: Created activity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Activity' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PartnerId:
+      name: partnerId
+      in: path
+      required: true
+      description: The partner's CRM id — `crm_uuid` from the list, `crm_id` from the card
+      schema: { type: string, format: uuid }
+
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      additionalProperties: true
+      properties:
+        error: { type: string, description: 'Human-readable message (Polish), safe to show' }
+        code: { type: string, description: 'Machine-readable code when the app must react, e.g. TOKEN_EXPIRED' }
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              message: { type: string }
+
+    AppConfig:
+      type: object
+      required: [min_supported_version]
+      additionalProperties: true
+      properties:
+        min_supported_version:
+          type: object
+          required: [android, ios]
+          properties:
+            android: { type: string, example: 1.2.0 }
+            ios: { type: string, example: 1.2.0 }
+
+    MobileLoginRequest:
+      type: object
+      required: [email, password, device_id]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+        device_id:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: Stable per-install id generated by the app; binds the refresh token to this phone
+        device_name: { type: string, maxLength: 100, example: Pixel 8 }
+
+    MobileLoginResponse:
+      type: object
+      required: [accounts]
+      properties:
+        accounts:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/MobileAccount' }
+
+    MobileAccount:
+      type: object
+      required: [tenant_slug, tenant_name, access_token, refresh_token, must_change_password, user]
+      additionalProperties: true
+      properties:
+        tenant_slug: { type: string, description: 'API host is https://{tenant_slug}.crmtree.pl/api' }
+        tenant_name: { type: string }
+        access_token: { type: string }
+        refresh_token: { type: string }
+        must_change_password: { type: boolean }
+        user:
+          type: object
+          required: [id, display_name, crm_role]
+          properties:
+            id: { type: string, format: uuid }
+            display_name: { type: string, nullable: true }
+            crm_role: { type: string, enum: [salesperson, sales_manager] }
+
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+
+    Me:
+      type: object
+      required: [id, email, is_admin, must_change_password]
+      additionalProperties: true
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        first_name: { type: string, nullable: true }
+        last_name: { type: string, nullable: true }
+        display_name: { type: string, nullable: true }
+        is_admin: { type: boolean }
+        tenant_id: { type: string, format: uuid, nullable: true }
+        crm_role: { type: string, nullable: true, enum: [salesperson, sales_manager, null] }
+        must_change_password: { type: boolean }
+        tenant_features:
+          type: object
+          description: Module name → enabled. A missing module counts as enabled.
+          additionalProperties: { type: boolean }
+
+    Device:
+      type: object
+      required: [device_id, first_seen_at, last_active_at]
+      properties:
+        device_id: { type: string }
+        device_name: { type: string, nullable: true }
+        first_seen_at: { type: string, format: date-time }
+        last_active_at: { type: string, format: date-time }
+
+    CrmUser:
+      type: object
+      required: [id, email]
+      additionalProperties: true
+      properties:
+        id: { type: string, format: uuid }
+        display_name: { type: string, nullable: true }
+        email: { type: string }
+        crm_role: { type: string, nullable: true }
+
+    LeadStage:
+      type: string
+      enum: [new, qualification, presentation, offer, negotiation, closed_won, closed_lost, archived]
+
+    Lead:
+      type: object
+      required: [id, company, stage, hot, created_at, updated_at]
+      additionalProperties: true
+      properties:
+        id: { type: integer }
+        company: { type: string }
+        contact_name: { type: string, nullable: true }
+        contact_title: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        website: { type: string, nullable: true }
+        nip: { type: string, nullable: true }
+        industry: { type: string, nullable: true }
+        source: { type: string, nullable: true }
+        stage: { $ref: '#/components/schemas/LeadStage' }
+        value_pln: { type: string, nullable: true, description: Decimal string }
+        probability: { type: integer, nullable: true, minimum: 0, maximum: 100 }
+        close_date: { type: string, nullable: true, description: ISO timestamp of the planned close date }
+        assigned_to: { type: string, format: uuid, nullable: true }
+        tags:
+          type: array
+          nullable: true
+          items: { type: string }
+        notes: { type: string, nullable: true }
+        hot: { type: boolean }
+        lost_reason: { type: string, nullable: true }
+        hold_active: { type: boolean }
+        hold_until: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    LeadSummary:
+      allOf:
+        - $ref: '#/components/schemas/Lead'
+        - type: object
+          additionalProperties: true
+          properties:
+            assigned_to_name: { type: string, nullable: true }
+            activity_count: { type: integer }
+            non_email_activity_count: { type: integer, description: Open non-email activities }
+            new_email_count: { type: integer }
+            unread_sms_count: { type: integer }
+            unread_whatsapp_count: { type: integer }
+            missed_call_count: { type: integer }
+
+    LeadListResponse:
+      type: object
+      required: [data, total, page, limit, pages]
+      additionalProperties: true
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/LeadSummary' }
+        total: { type: integer }
+        page: { type: integer }
+        limit: { type: integer }
+        pages: { type: integer }
+
+    LeadDetail:
+      allOf:
+        - $ref: '#/components/schemas/Lead'
+        - type: object
+          required: [activities, can_edit]
+          additionalProperties: true
+          properties:
+            assigned_to_name: { type: string, nullable: true }
+            activities:
+              type: array
+              items: { $ref: '#/components/schemas/Activity' }
+            extra_contacts:
+              type: array
+              items: { $ref: '#/components/schemas/ExtraContact' }
+            can_edit: { type: boolean }
+
+    LeadUpdate:
+      type: object
+      description: Send only the fields that change.
+      properties:
+        company: { type: string, minLength: 1 }
+        contact_name: { type: string, nullable: true }
+        contact_title: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        stage:
+          type: string
+          enum: [new, qualification, presentation, offer, negotiation, closed_won, closed_lost]
+        value_pln: { type: number, nullable: true, minimum: 0 }
+        probability: { type: integer, nullable: true, minimum: 0, maximum: 100 }
+        hot: { type: boolean }
+        notes: { type: string, nullable: true }
+        lost_reason: { type: string, nullable: true }
+        assigned_to: { type: string, format: uuid, nullable: true }
+
+    ExtraContact:
+      type: object
+      additionalProperties: true
+      properties:
+        id: { type: integer }
+        contact_name: { type: string, nullable: true }
+        contact_title: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+
+    ActivityType:
+      type: string
+      enum: [call, email, meeting, note, doc_sent, task]
+
+    ActivityStatus:
+      type: string
+      enum: [new, open, closed]
+
+    Activity:
+      type: object
+      required: [id, type, title, created_at]
+      additionalProperties: true
+      properties:
+        id: { type: integer }
+        type: { type: string, description: 'One of ActivityType; other values may appear (e.g. system entries) and must be tolerated' }
+        title: { type: string }
+        body: { type: string, nullable: true }
+        activity_at: { type: string, format: date-time, nullable: true }
+        duration_min: { type: integer, nullable: true }
+        participants: { type: string, nullable: true }
+        meeting_location: { type: string, nullable: true }
+        status: { type: string, nullable: true }
+        close_comment: { type: string, nullable: true }
+        assigned_to: { type: string, format: uuid, nullable: true }
+        assigned_to_name: { type: string, nullable: true }
+        created_by: { type: string, format: uuid, nullable: true }
+        created_by_name: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time, nullable: true }
+        is_read: { type: boolean, nullable: true }
+        reminder_type: { type: string, nullable: true }
+        reminder_at: { type: string, format: date-time, nullable: true }
+
+    ActivityCreate:
+      type: object
+      required: [type, title]
+      properties:
+        type: { $ref: '#/components/schemas/ActivityType' }
+        title: { type: string, minLength: 1 }
+        body: { type: string }
+        activity_at: { type: string, format: date-time, nullable: true }
+        duration_min: { type: integer, nullable: true, minimum: 0 }
+        participants: { type: string }
+        meeting_location: { type: string, nullable: true }
+        assigned_to: { type: string, format: uuid, nullable: true }
+        reminder_type:
+          type: string
+          nullable: true
+          enum: [at_due, 30m_before, 1h_before, 1d_before, 2d_before, 3d_before, custom, null]
+        reminder_at: { type: string, format: date-time, nullable: true, description: Only with reminder_type custom }
+
+    ActivityUpdate:
+      type: object
+      description: Send only the fields that change.
+      properties:
+        type: { type: string, enum: [call, email, meeting, note, doc_sent] }
+        title: { type: string, minLength: 1 }
+        body: { type: string, nullable: true }
+        activity_at: { type: string, format: date-time, nullable: true }
+        participants: { type: string, nullable: true }
+        meeting_location: { type: string, nullable: true }
+        assigned_to: { type: string, format: uuid, nullable: true }
+        status: { $ref: '#/components/schemas/ActivityStatus' }
+        close_comment: { type: string, nullable: true }
+        reminder_type:
+          type: string
+          nullable: true
+          enum: [at_due, 30m_before, 1h_before, 1d_before, 2d_before, 3d_before, custom, null]
+        reminder_at: { type: string, format: date-time, nullable: true }
+
+    AgendaItem:
+      type: object
+      required: [id, type, title, source_type, source_id]
+      additionalProperties: true
+      properties:
+        id: { type: integer, description: Activity id; unique only together with source_type }
+        type: { type: string }
+        title: { type: string }
+        body: { type: string, nullable: true }
+        activity_at: { type: string, format: date-time, nullable: true }
+        duration_min: { type: integer, nullable: true }
+        meeting_location: { type: string, nullable: true }
+        status: { type: string, nullable: true }
+        source_type: { type: string, enum: [lead, partner] }
+        source_id:
+          description: Lead id (integer, sometimes sent as a numeric string) or partner CRM id (uuid string). Treat as an opaque string.
+          oneOf:
+            - { type: integer }
+            - { type: string }
+        source_name: { type: string, nullable: true, description: Company name }
+        assigned_to_id: { type: string, nullable: true }
+        assigned_to_name: { type: string, nullable: true }
+
+    PartnerSummary:
+      type: object
+      required: [crm_uuid, company]
+      additionalProperties: true
+      properties:
+        crm_uuid: { type: string, format: uuid, description: Use this as partnerId in paths }
+        company: { type: string }
+        status: { type: string, nullable: true }
+        manager_id: { type: string, format: uuid, nullable: true }
+        manager_name: { type: string, nullable: true }
+        contract_value: { type: string, nullable: true, description: Decimal string }
+        tags:
+          type: array
+          nullable: true
+          items: { type: string }
+        non_email_activity_count: { type: integer }
+        new_email_count: { type: integer }
+        unread_sms_count: { type: integer }
+        unread_whatsapp_count: { type: integer }
+        missed_call_count: { type: integer }
+        churn_risk: { type: string, nullable: true }
+        churn_score: { type: number, nullable: true }
+
+    PartnerListResponse:
+      type: object
+      required: [data, total, page, limit]
+      additionalProperties: true
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/PartnerSummary' }
+        total: { type: integer }
+        page: { type: integer }
+        limit: { type: integer }
+
+    PartnerDetail:
+      type: object
+      required: [crm_id, company, activities]
+      additionalProperties: true
+      properties:
+        crm_id: { type: string, format: uuid, description: Use this as partnerId in paths }
+        company: { type: string }
+        nip: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+        contact_name: { type: string, nullable: true }
+        contact_title: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        website: { type: string, nullable: true }
+        industry: { type: string, nullable: true }
+        status: { type: string, nullable: true }
+        manager_id: { type: string, format: uuid, nullable: true }
+        manager_name: { type: string, nullable: true }
+        contract_value: { type: string, nullable: true, description: Decimal string }
+        contract_signed: { type: string, nullable: true }
+        contract_expires: { type: string, nullable: true }
+        notes: { type: string, nullable: true }
+        tags:
+          type: array
+          nullable: true
+          items: { type: string }
+        activities:
+          type: array
+          items: { $ref: '#/components/schemas/Activity' }
+        extra_contacts:
+          type: array
+          items: { $ref: '#/components/schemas/ExtraContact' }

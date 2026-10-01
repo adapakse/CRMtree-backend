@@ -43,6 +43,7 @@ const publicBlogRoutes    = require('./routes/public-blog');
 const publicTenantsRoutes = require('./routes/public-tenants');
 const publicAppConfigRoutes = require('./routes/public-app-config');
 
+const openapiRoutes = require('./routes/openapi');
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
 const crmPartnersRoutes     = require('./routes/crm-partners');
@@ -175,6 +176,7 @@ app.use('/api/public/blog',     publicBlogRoutes);
 app.use('/api/public/tenants',  publicTenantsRoutes);
 app.use('/api/public/app-config', publicAppConfigRoutes);
 app.use('/api/auth',            authRoutes);
+app.use('/api/openapi.json', openapiRoutes);
 app.use('/api/documents',       documentRoutes);
 
 app.use('/api/documents/:documentId/tags',     tagRoutes);

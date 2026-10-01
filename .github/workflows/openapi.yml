@@ -1,0 +1,45 @@
+name: OpenAPI contract
+
+# The mobile app's Dart client is generated from src/openapi/mobile-v1.yaml and
+# old app builds stay installed for weeks (ADR 001 §5). This blocks a change
+# that would break them: a removed/renamed field, a tightened type, a new
+# required request field.
+
+on:
+  pull_request:
+    paths: ['src/openapi/**', '.github/workflows/openapi.yml']
+  push:
+    branches: [develop]
+    paths: ['src/openapi/**', '.github/workflows/openapi.yml']
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Lint the spec
+        run: >
+          npx --yes @redocly/cli@latest lint src/openapi/mobile-v1.yaml
+          --skip-rule=operation-4xx-response --skip-rule=info-license
+          --skip-rule=security-defined --skip-rule=tag-description
+
+      # master is what production (and every released app build) runs against.
+      - name: Get the spec from master
+        id: base
+        run: |
+          git fetch origin master --depth=1
+          if git show origin/master:src/openapi/mobile-v1.yaml > base-spec.yaml 2>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No spec on master yet — nothing to compare against."
+          fi
+
+      - name: Check for breaking changes against master
+        if: steps.base.outputs.exists == 'true'
+        run: >
+          docker run --rm -v "$PWD:/specs" tufin/oasdiff breaking
+          /specs/base-spec.yaml /specs/src/openapi/mobile-v1.yaml --fail-on ERR
