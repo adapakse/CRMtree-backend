@@ -232,4 +232,18 @@ describe("agenda", () => {
     expect(calendar.body.map((e) => e.source_type).sort()).toEqual(expect.arrayContaining(["lead", "partner"]));
     expectDocumented(calendar, "get", "/crm/leads/calendar");
   });
+
+  test("GET /crm/mobile/today with today's lead and partner items, and its 400", async () => {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const res = await request(app).get("/api/crm/mobile/today").set(auth)
+      .query({ day_start: new Date(startOfDay.getTime() - 86400000).toISOString(), day_end: new Date(startOfDay.getTime() + 8 * 86400000).toISOString() });
+    expect(res.status).toBe(200);
+    expect(res.body.agenda.map((item) => item.source_type).sort()).toEqual(expect.arrayContaining(["lead", "partner"]));
+    expectDocumented(res, "get", "/crm/mobile/today");
+
+    const missing = await request(app).get("/api/crm/mobile/today").set(auth);
+    expect(missing.status).toBe(400);
+    expectDocumented(missing, "get", "/crm/mobile/today");
+  });
 });

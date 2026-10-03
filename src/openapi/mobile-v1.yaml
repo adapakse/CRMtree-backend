@@ -223,6 +223,29 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
 
+  /crm/mobile/today:
+    get:
+      tags: [agenda]
+      operationId: getToday
+      summary: Everything the "Dziś" screen shows, in one call
+      description: |
+        Only the signed-in person's own items (plus anyone they currently
+        substitute for) — a manager's team view belongs to the calendar. The
+        app sends the bounds of its local day, so the result is right in any
+        time zone.
+      parameters:
+        - { name: day_start, in: query, required: true, schema: { type: string, format: date-time }, description: Start of the phone's local day }
+        - { name: day_end, in: query, required: true, schema: { type: string, format: date-time }, description: Start of the next local day (exclusive) }
+      responses:
+        '200':
+          description: Today's agenda, overdue items and leads waiting for a reaction
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TodayResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
   /crm/leads:
     get:
       tags: [leads]
@@ -903,3 +926,47 @@ components:
         extra_contacts:
           type: array
           items: { $ref: '#/components/schemas/ExtraContact' }
+
+    TodayResponse:
+      type: object
+      required: [agenda, overdue, attention]
+      properties:
+        agenda:
+          description: Open meetings, calls and tasks dated within the day, earliest first
+          type: array
+          items: { $ref: '#/components/schemas/TodayItem' }
+        overdue:
+          description: Open meetings, calls and tasks dated before the day (at most the 50 most recent per source), oldest first
+          type: array
+          items: { $ref: '#/components/schemas/TodayItem' }
+        attention:
+          description: The person's leads with unread messages or missed calls, most recently updated first
+          type: array
+          items: { $ref: '#/components/schemas/AttentionLead' }
+
+    TodayItem:
+      type: object
+      required: [id, type, title, activity_at, status, source_type, source_id]
+      properties:
+        id: { type: integer, description: Activity id; unique only together with source_type }
+        type: { type: string, enum: [meeting, call, task] }
+        title: { type: string }
+        body: { type: string, nullable: true }
+        activity_at: { type: string, format: date-time }
+        duration_min: { type: integer, nullable: true }
+        meeting_location: { type: string, nullable: true }
+        status: { type: string, enum: [new, open] }
+        source_type: { type: string, enum: [lead, partner] }
+        source_id: { type: string, description: 'Lead id or partner CRM id, always a string' }
+        source_name: { type: string, nullable: true, description: Company name }
+
+    AttentionLead:
+      type: object
+      required: [lead_id, company, new_email_count, unread_sms_count, unread_whatsapp_count, missed_call_count]
+      properties:
+        lead_id: { type: string }
+        company: { type: string }
+        new_email_count: { type: integer }
+        unread_sms_count: { type: integer }
+        unread_whatsapp_count: { type: integer }
+        missed_call_count: { type: integer }

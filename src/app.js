@@ -47,6 +47,7 @@ const publicAppConfigRoutes = require('./routes/public-app-config');
 const openapiRoutes = require('./routes/openapi');
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
+const crmMobileRoutes = require('./routes/crm-mobile');
 const crmPartnersRoutes     = require('./routes/crm-partners');
 const crmGroupsRoutes       = require('./routes/crm-groups');
 const crmSubstitutionsRoutes = require('./routes/crm-substitutions');
@@ -209,6 +210,7 @@ app.use('/api/document-groups', documentGroupRoutes);
 app.use('/api/documents/:documentId/attachments', attachmentRoutes);
 
 // ── CRM API Routes ────────────────────────────────────────── ★ DODANE
+app.use('/api/crm/mobile',       crmMobileRoutes);
 app.use('/api/crm/leads',        crmLeadsRoutes);
 app.use('/api/crm/partners',     crmPartnersRoutes);
 app.use('/api/crm/groups',       crmGroupsRoutes);
