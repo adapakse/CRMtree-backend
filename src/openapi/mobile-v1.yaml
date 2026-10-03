@@ -979,6 +979,6 @@ components:
       required: [active_leads, pipeline_value_pln, month_won_value_pln, month_budget_pln]
       properties:
         active_leads: { type: integer, description: 'Own leads past "new", not closed and not on hold' }
-        pipeline_value_pln: { type: number, description: Value of those leads in PLN, rounded to whole PLN }
-        month_won_value_pln: { type: number, description: Value of own leads won in the month, in whole PLN }
+        pipeline_value_pln: { type: number, description: 'Value of those leads in PLN, rounded to whole PLN' }
+        month_won_value_pln: { type: number, description: 'Value of own leads won in the month, in whole PLN' }
         month_budget_pln: { type: number, description: 'Planned budget for the month in whole PLN; 0 when no budget is set' }
