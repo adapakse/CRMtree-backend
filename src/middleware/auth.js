@@ -178,6 +178,16 @@ async function saveRefreshToken(userId, tenantId, hash, { client = "web", device
   );
 }
 
+// An external account (users.is_external) takes part in projects only. Besides
+// the Projects API it may reach its own session, its own profile, and the
+// tenant settings the web app reads at start-up (writes there are admin-only).
+const EXTERNAL_USER_API_PREFIXES = ["/api/projects", "/api/auth", "/api/profile", "/api/admin/settings"];
+
+function isAllowedForExternalUser(originalUrl) {
+  const path = originalUrl.split("?")[0];
+  return EXTERNAL_USER_API_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+}
+
 // ─── requireAuth middleware ──────────────────────────────────────────────────
 async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -189,7 +199,8 @@ async function requireAuth(req, res, next) {
     const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ["HS256"] });
     const { rows } = await db.query(
       `SELECT id, email, first_name, last_name, display_name,
-              is_admin, is_active, crm_role, tenant_id, is_super_admin
+              is_admin, is_active, crm_role, tenant_id, is_super_admin,
+              is_external, can_create_projects
        FROM users WHERE id = $1`,
       [decoded.sub]
     );
@@ -198,6 +209,9 @@ async function requireAuth(req, res, next) {
     }
     req.user     = rows[0];
     req.tenantId = rows[0].tenant_id ?? null;
+    if (rows[0].is_external && !isAllowedForExternalUser(req.originalUrl)) {
+      return res.status(403).json({ error: "Konto zewnętrzne ma dostęp tylko do modułu Projekty." });
+    }
     if (req.tenantId) {
       const { rows: tRows } = await db.query(
         `SELECT dwh_schema_prefix, deleted_at FROM tenants WHERE id = $1`,

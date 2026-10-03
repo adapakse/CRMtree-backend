@@ -19,6 +19,22 @@ function requireAdminOrSalesManager(req, res, next) {
   return res.status(403).json({ error: 'Admin access required' });
 }
 
+const contactFieldRules = [
+  body('phone').optional({ nullable: true }).isString().trim().isLength({ max: 40 }),
+  body('company').optional({ nullable: true }).isString().trim().isLength({ max: 200 }),
+  body('department').optional({ nullable: true }).isString().trim().isLength({ max: 200 }),
+];
+
+// An external account may only take part in projects: no admin rights, no
+// CRM role, no creating projects. Returns the error message or null.
+function externalAccountConflict({ is_external, is_admin, crm_role, can_create_projects }) {
+  if (!is_external) return null;
+  if (is_admin || crm_role || can_create_projects) {
+    return 'Konto zewnętrzne nie może być adminem, mieć roli CRM ani zakładać projektów';
+  }
+  return null;
+}
+
 // Middleware: tylko admin (dla operacji tworzenia/usuwania userów i zmiany is_admin)
 function requireAdminOnly(req, res, next) {
   if (req.user?.is_admin) return next();
@@ -39,23 +55,35 @@ router.post(
     body('is_admin').optional({ nullable: true }).isBoolean(),
     // ★ CRM role
     body('crm_role').optional({ nullable: true }).isIn(['salesperson', 'sales_manager']),
+    ...contactFieldRules,
+    body('is_external').optional({ nullable: true }).isBoolean(),
+    body('can_create_projects').optional({ nullable: true }).isBoolean(),
   ],
   validate,
   async (req, res, next) => {
     try {
       const { email, first_name, last_name, is_active = true, is_admin = false, crm_role = null } = req.body;
+      const { phone = null, company = null, department = null } = req.body;
+      const is_external = req.body.is_external === true;
+      const can_create_projects = req.body.can_create_projects === true;
+
+      const externalConflict = externalAccountConflict({ is_external, is_admin, crm_role, can_create_projects });
+      if (externalConflict) return res.status(400).json({ error: externalConflict });
 
       const { rows } = await db.query(
-        `INSERT INTO users (email, first_name, last_name, is_active, is_admin, crm_role, tenant_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, email, first_name, last_name, display_name, is_active, is_admin, crm_role, created_at`,
-        [email, first_name, last_name, is_active, is_admin, crm_role, req.tenantId]
+        `INSERT INTO users (email, first_name, last_name, is_active, is_admin, crm_role, tenant_id,
+                            phone, company, department, is_external, can_create_projects)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id, email, first_name, last_name, display_name, is_active, is_admin, crm_role, created_at,
+                   phone, company, department, is_external, can_create_projects`,
+        [email, first_name, last_name, is_active, is_admin, crm_role, req.tenantId,
+         phone, company, department, is_external, can_create_projects]
       );
 
       await audit.log({
         user:       req.user,
         action:     'user_created',
-        afterState: { email, first_name, last_name, is_admin, crm_role },
+        afterState: { email, first_name, last_name, is_admin, crm_role, is_external, can_create_projects },
         ipAddress:  req.auditContext?.ipAddress,
       });
 
@@ -229,6 +257,9 @@ router.patch(
     body('is_admin').optional().isBoolean(),
     // ★ CRM role (null = usuń rolę CRM)
     body('crm_role').optional({ nullable: true }).isIn(['salesperson', 'sales_manager', null]),
+    ...contactFieldRules,
+    body('is_external').optional().isBoolean(),
+    body('can_create_projects').optional().isBoolean(),
   ],
   validate,
   async (req, res, next) => {
@@ -246,11 +277,19 @@ router.patch(
           return res.status(403).json({ error: 'Cannot modify admin accounts' });
         }
         delete req.body.is_admin;
+        delete req.body.is_external;
+        delete req.body.can_create_projects;
         if (req.body.crm_role === 'sales_manager' && before[0].crm_role !== 'sales_manager') {
           return res.status(403).json({ error: 'Only admin can assign sales_manager role' });
         }
       }
-      const allowed = ['email', 'first_name', 'last_name', 'is_active', 'is_admin', 'crm_role']; // ★ crm_role
+      const externalConflict = externalAccountConflict({ ...before[0], ...req.body });
+      if (externalConflict) return res.status(400).json({ error: externalConflict });
+
+      const allowed = [
+        'email', 'first_name', 'last_name', 'is_active', 'is_admin', 'crm_role', // ★ crm_role
+        'phone', 'company', 'department', 'is_external', 'can_create_projects',
+      ];
       const setClauses = [];
       const params = [];
       let p = 1;

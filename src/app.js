@@ -30,6 +30,9 @@ const adminBillingRoutes  = require('./routes/admin-billing');
 const onboardingSurveyRoutes = require('./routes/onboarding-survey');
 const adminProspectsRoutes        = require('./routes/admin-prospects');
 const crmProspectsDashboardRoutes = require('./routes/crm-prospects-dashboard');
+const projectRoutes            = require('./routes/projects');
+const projectTaskRoutes        = require('./routes/project-tasks');
+const adminProjectConfigRoutes = require('./routes/admin-project-config');
 const profileRoutes       = require('./routes/profile');
 const crmGmail 		  = require('./routes/crm-gmail');
 const crmOutlook      = require('./routes/crm-outlook');
@@ -225,6 +228,10 @@ app.use('/api/crm/documents',    crmDocumentsRoutes);
 app.use('/api/crm/consents',     crmConsentsRoutes);
 app.use('/api/crm/seo',          crmSeoRoutes);
 app.use('/api/crm/prospects-dashboard', crmProspectsDashboardRoutes);
+
+app.use('/api/projects/:id/tasks',   projectTaskRoutes);
+app.use('/api/projects',             projectRoutes);
+app.use('/api/admin/project-config', adminProjectConfigRoutes);
 
 // ─── Workflow global endpoints ─────────────────────────────
 const { requireAuth } = require('./middleware/auth');

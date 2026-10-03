@@ -712,7 +712,47 @@ async function sendSubstitutionAssigned({
   });
 }
 
+async function sendProjectTaskAssigned({
+  to,
+  assigneeName,
+  assignerName,
+  projectId,
+  projectName,
+  taskId,
+  taskLabel,   // e.g. "WSC-12"
+  taskName,
+  endDate,
+}) {
+  const url = `${BASE_URL}/projects/${projectId}?task=${taskId}`;
+
+  await sendMail({
+    to,
+    subject: `[CRMtree] Nowe zadanie w projekcie: ${taskLabel} ${taskName}`,
+    html: template(`
+      <h2>Przypisano Ci zadanie w projekcie</h2>
+      <p>Cześć ${escapeHtml(assigneeName)},</p>
+      <p>Użytkownik <strong>${escapeHtml(assignerName)}</strong> przypisał Ci zadanie:</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">Projekt</span>
+          <span class="info-val">${escapeHtml(projectName)}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Zadanie</span>
+          <span class="info-val">${escapeHtml(taskLabel)} ${escapeHtml(taskName)}</span>
+        </div>
+        ${endDate ? `<div class="info-row">
+          <span class="info-label">Termin</span>
+          <span class="info-val">${escapeHtml(endDate)}</span>
+        </div>` : ''}
+      </div>
+      <a href="${url}" class="btn">Otwórz zadanie →</a>
+    `),
+  });
+}
+
 module.exports = {
+  sendProjectTaskAssigned,
   sendMail,
   sendTaskAssigned,
   sendDocumentStatusChanged,
