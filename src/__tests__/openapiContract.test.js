@@ -136,6 +136,7 @@ describe("leads", () => {
     const lead = await request(app).post("/api/crm/leads").set(auth)
       .send({ company: "Spec Sp. z o.o.", contact_name: "Jan Spec", email: "jan@spec.example", phone: "+48 600 100 200", value_pln: 25200, hot: true, tags: ["spec"] });
     expect(lead.status).toBe(201);
+    expectDocumented(lead, "post", "/crm/leads");
     leadId = lead.body.id;
 
     const activity = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
@@ -181,6 +182,12 @@ describe("leads", () => {
 
     const deleted = await request(app).delete(`/api/crm/leads/${leadId}/activities/${leadActivityId}`).set(auth);
     expectDocumented(deleted, "delete", "/crm/leads/{id}/activities/{actId}");
+  });
+
+  test("GET /admin/settings", async () => {
+    const res = await request(app).get("/api/admin/settings").set(auth);
+    expect(res.status).toBe(200);
+    expectDocumented(res, "get", "/admin/settings");
   });
 
   test("GET /crm/leads/users", async () => {

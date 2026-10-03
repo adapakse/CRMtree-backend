@@ -269,6 +269,44 @@ paths:
               schema: { $ref: '#/components/schemas/LeadListResponse' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [leads]
+      operationId: createLead
+      summary: Add a lead
+      description: |
+        A salesperson always becomes the owner (`assigned_to` is ignored).
+        A NIP already used by another lead or partner returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LeadCreate' }
+      responses:
+        '201':
+          description: Created lead
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lead' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /admin/settings:
+    get:
+      tags: [app]
+      operationId: getSettings
+      summary: The company's settings as a flat key-value map
+      description: |
+        The app reads `crm_lost_reasons` from it: a JSON-encoded array of the
+        reasons offered when a lead is marked as lost.
+      responses:
+        '200':
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SettingsResponse' }
+        '401': { $ref: '#/components/responses/Error' }
 
   /crm/leads/users:
     get:
@@ -738,6 +776,31 @@ components:
               type: array
               items: { $ref: '#/components/schemas/ExtraContact' }
             can_edit: { type: boolean }
+
+    LeadCreate:
+      type: object
+      required: [company]
+      properties:
+        company: { type: string, minLength: 1 }
+        contact_name: { type: string }
+        contact_title: { type: string }
+        email: { type: string, nullable: true }
+        phone: { type: string }
+        nip: { type: string, nullable: true }
+        value_pln: { type: number, nullable: true, minimum: 0 }
+        notes: { type: string }
+        hot: { type: boolean }
+
+    SettingsResponse:
+      type: object
+      required: [settings]
+      additionalProperties: true
+      properties:
+        settings:
+          type: object
+          additionalProperties: true
+          properties:
+            crm_lost_reasons: { type: string, description: JSON-encoded array of strings }
 
     LeadUpdate:
       type: object
