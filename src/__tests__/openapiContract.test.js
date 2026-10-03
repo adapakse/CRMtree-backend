@@ -237,7 +237,12 @@ describe("agenda", () => {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     const res = await request(app).get("/api/crm/mobile/today").set(auth)
-      .query({ day_start: new Date(startOfDay.getTime() - 86400000).toISOString(), day_end: new Date(startOfDay.getTime() + 8 * 86400000).toISOString() });
+      .query({
+        day_start: new Date(startOfDay.getTime() - 86400000).toISOString(),
+        day_end: new Date(startOfDay.getTime() + 8 * 86400000).toISOString(),
+        month_start: new Date(startOfDay.getFullYear(), startOfDay.getMonth(), 1).toISOString(),
+        month_end: new Date(startOfDay.getFullYear(), startOfDay.getMonth() + 1, 1).toISOString(),
+      });
     expect(res.status).toBe(200);
     expect(res.body.agenda.map((item) => item.source_type).sort()).toEqual(expect.arrayContaining(["lead", "partner"]));
     expectDocumented(res, "get", "/crm/mobile/today");

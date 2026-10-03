@@ -236,6 +236,8 @@ paths:
       parameters:
         - { name: day_start, in: query, required: true, schema: { type: string, format: date-time }, description: Start of the phone's local day }
         - { name: day_end, in: query, required: true, schema: { type: string, format: date-time }, description: Start of the next local day (exclusive) }
+        - { name: month_start, in: query, required: true, schema: { type: string, format: date-time }, description: 'Start of the phone''s local calendar month, for kpis' }
+        - { name: month_end, in: query, required: true, schema: { type: string, format: date-time }, description: Start of the next local month (exclusive) }
       responses:
         '200':
           description: Today's agenda, overdue items and leads waiting for a reaction
@@ -929,8 +931,9 @@ components:
 
     TodayResponse:
       type: object
-      required: [agenda, overdue, attention]
+      required: [agenda, overdue, attention, kpis]
       properties:
+        kpis: { $ref: '#/components/schemas/TodayKpis' }
         agenda:
           description: Open meetings, calls and tasks dated within the day, earliest first
           type: array
@@ -970,3 +973,12 @@ components:
         unread_sms_count: { type: integer }
         unread_whatsapp_count: { type: integer }
         missed_call_count: { type: integer }
+
+    TodayKpis:
+      type: object
+      required: [active_leads, pipeline_value_pln, month_won_value_pln, month_budget_pln]
+      properties:
+        active_leads: { type: integer, description: 'Own leads past "new", not closed and not on hold' }
+        pipeline_value_pln: { type: number, description: Value of those leads in PLN, rounded to whole PLN }
+        month_won_value_pln: { type: number, description: Value of own leads won in the month, in whole PLN }
+        month_budget_pln: { type: number, description: 'Planned budget for the month in whole PLN; 0 when no budget is set' }

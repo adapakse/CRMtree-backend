@@ -11,6 +11,7 @@ const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, requireCrmManager } = require('../middleware/crm-rbac');
+const { plannedBudgetTotal } = require('../services/crmSalesMetricsService');
 
 router.use(requireAuth, injectAuditContext, crmAuth);
 
@@ -40,32 +41,7 @@ router.get('/total',
         ? new Date(req.query.date_to)
         : new Date(year, 11, 31);
 
-      const params = [year, req.tenantId];
-      let where = 'WHERE b.year = $1 AND b.tenant_id = $2';
-      if (userId) { params.push(userId); where += ` AND b.user_id = $${params.length}`; }
-
-      const { rows } = await db.query(`
-        SELECT b.period_type, b.period_number, b.amount::float AS amount
-        FROM crm_sales_budgets b
-        ${where}
-      `, params);
-
-      // Filtruj okresy które nakładają się z wybranym zakresem dat
-      let total = 0;
-      for (const row of rows) {
-        let pStart, pEnd;
-        if (row.period_type === 'month') {
-          pStart = new Date(year, row.period_number - 1, 1);
-          pEnd   = new Date(year, row.period_number, 0);
-        } else {
-          const qBase = (row.period_number - 1) * 3;
-          pStart = new Date(year, qBase, 1);
-          pEnd   = new Date(year, qBase + 3, 0);
-        }
-        if (pStart <= dateTo && pEnd >= dateFrom) {
-          total += Number(row.amount);
-        }
-      }
+      const total = await plannedBudgetTotal({ tenantId: req.tenantId, userId, year, dateFrom, dateTo });
 
       res.json({ total, year, currency: 'PLN' });
     } catch (err) { next(err); }

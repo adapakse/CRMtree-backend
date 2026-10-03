@@ -10,6 +10,9 @@ const { signAccessToken } = require("../middleware/auth");
 const DOMAIN = "mobile-today-test.crmtree.local";
 const DAY_START = "2026-10-05T00:00:00+02:00";
 const DAY_END = "2026-10-06T00:00:00+02:00";
+const MONTH_START = "2026-10-01T00:00:00+02:00";
+const MONTH_END = "2026-11-01T00:00:00+01:00";
+const PERIOD = { day_start: DAY_START, day_end: DAY_END, month_start: MONTH_START, month_end: MONTH_END };
 
 let tenantId;
 const users = {};
@@ -38,7 +41,7 @@ async function addLeadActivity(owner, leadId, activity) {
 
 const getToday = (user) => request(app)
   .get("/api/crm/mobile/today")
-  .query({ day_start: DAY_START, day_end: DAY_END })
+  .query(PERIOD)
   .set(auth(user));
 
 const titles = (items) => items.map((item) => item.title);
@@ -90,6 +93,7 @@ beforeAll(async () => {
 async function cleanUp() {
   await db.query(`DELETE FROM crm_lead_activities WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM crm_leads WHERE tenant_id = $1`, [tenantId]);
+  await db.query(`DELETE FROM crm_sales_budgets WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM crm_partner_activities WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM crm_partners WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM audit_logs WHERE tenant_id = $1`, [tenantId]);
@@ -141,13 +145,76 @@ describe("GET /api/crm/mobile/today", () => {
 
   test("an admin sees only their own day, not the whole company's", async () => {
     const res = await getToday(users.admin);
-    expect(res.body).toEqual({ agenda: [], overdue: [], attention: [] });
+    expect(res.body).toMatchObject({ agenda: [], overdue: [], attention: [] });
   });
 
-  test("400 without the day bounds, 401 without a token", async () => {
+  test("400 without the day and month bounds, 401 without a token", async () => {
     const missing = await request(app).get("/api/crm/mobile/today").set(auth(users.rep));
     expect(missing.status).toBe(400);
-    const anonymous = await request(app).get("/api/crm/mobile/today").query({ day_start: DAY_START, day_end: DAY_END });
+    const noMonth = await request(app).get("/api/crm/mobile/today").query({ day_start: DAY_START, day_end: DAY_END }).set(auth(users.rep));
+    expect(noMonth.status).toBe(400);
+    const anonymous = await request(app).get("/api/crm/mobile/today").query(PERIOD);
     expect(anonymous.status).toBe(401);
+  });
+});
+
+describe("GET /api/crm/mobile/today — kpis", () => {
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
+  const getKpis = async (user) => {
+    const res = await request(app).get("/api/crm/mobile/today").set(auth(user))
+      .query({ ...PERIOD, month_start: monthStart, month_end: monthEnd });
+    expect(res.status).toBe(200);
+    return res.body.kpis;
+  };
+
+  beforeAll(async () => {
+    const setLead = (id, stage, value, extra = "") => db.query(
+      `UPDATE crm_leads SET stage = $2, value_pln = $3 ${extra} WHERE id = $1`, [id, stage, value],
+    );
+    // In the pipeline: one active lead in PLN and one in EUR.
+    await setLead(users.myLead, "offer", 25200);
+    const eurLead = await createLead(users.rep, "Euro GmbH");
+    await setLead(eurLead, "negotiation", 1000, ", annual_turnover_currency = 'EUR'");
+    // Not in the pipeline: still new, on hold, lost.
+    await createLead(users.rep, "Jeszcze nowy");
+    const held = await createLead(users.rep, "Wstrzymany");
+    await setLead(held, "offer", 9999, ", hold_active = TRUE");
+    const lost = await createLead(users.rep, "Przegrany");
+    await setLead(lost, "closed_lost", 5000);
+    // Won this month (updated_at is set to now by the table trigger).
+    const won = await createLead(users.rep, "Wygrany");
+    await setLead(won, "closed_won", 40000);
+
+    await db.query(
+      `INSERT INTO crm_sales_budgets (user_id, year, period_type, period_number, amount, tenant_id)
+       VALUES ($1, $2, 'month', $3, 100000, $4)`,
+      [users.rep.id, now.getFullYear(), now.getMonth() + 1, tenantId],
+    );
+  }, 60000);
+
+  test("my pipeline, my wins this month and my budget, in whole PLN", async () => {
+    const { rows: [rate] } = await db.query(
+      `SELECT value::numeric AS eur FROM app_settings WHERE key = 'exchange_rate_eur'
+        ORDER BY (tenant_id IS NOT NULL) DESC LIMIT 1`,
+    );
+    const eurRate = rate ? Number(rate.eur) : 4.25;
+
+    expect(await getKpis(users.rep)).toEqual({
+      active_leads: 2,
+      pipeline_value_pln: 25200 + Math.round(1000 * eurRate),
+      month_won_value_pln: 40000,
+      month_budget_pln: 100000,
+    });
+  });
+
+  test("a colleague's numbers are their own, and no budget means 0", async () => {
+    expect(await getKpis(users.colleague)).toEqual({
+      active_leads: 0,
+      pipeline_value_pln: 0,
+      month_won_value_pln: 0,
+      month_budget_pln: 0,
+    });
   });
 });
