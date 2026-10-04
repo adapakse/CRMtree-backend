@@ -56,7 +56,7 @@ router.use(requireAuth, requireSuperAdmin, injectAuditContext);
 
 const ALL_FEATURES = [
   'documents', 'leads', 'sales_reports', 'onboarding',
-  'partner_registry', 'dwh_integration', 'performance', 'whatsapp', 'seo_bot', 'prospects', 'pbx', 'call_analysis',
+  'partner_registry', 'dwh_integration', 'performance', 'whatsapp', 'seo_bot', 'prospects', 'pbx', 'call_analysis', 'projects',
 ];
 
 // Returns the tenant row (id + any extraColumns) only if it exists and has

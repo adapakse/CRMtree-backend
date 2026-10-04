@@ -99,8 +99,52 @@ async function sendDueReminders() {
     }
   }
 
-  logger.info(`[CrmReminder] Wysłano ${totalSent} przypomnień (lead: ${leadActs.length}, partner: ${partnerActs.length})`);
-  return { totalSent, leadCount: leadActs.length, partnerCount: partnerActs.length };
+  // ── Project tasks ─────────────────────────────────────────────────────────
+  // One email per assignee. Finished tasks and tasks of closed projects are
+  // left alone, so their reminder fires if they are reopened later.
+  const { rows: projectTasks } = await db.query(`
+    SELECT
+      t.id, t.task_number, t.name, t.end_date, t.reminder_type,
+      p.id AS project_id, p.key AS project_key, p.name AS project_name,
+      COALESCE((
+        SELECT json_agg(json_build_object('email', u.email, 'name', u.display_name))
+        FROM project_task_assignees a
+        JOIN users u ON u.id = a.user_id AND u.is_active
+        WHERE a.task_id = t.id
+      ), '[]'::json) AS recipients
+    FROM project_tasks t
+    JOIN projects p ON p.id = t.project_id
+    JOIN project_task_statuses s ON s.id = t.status_id
+    WHERE t.reminder_at <= $1
+      AND t.reminder_sent = false
+      AND s.category <> 'done'
+      AND p.status = 'open'
+  `, [now]);
+
+  for (const task of projectTasks) {
+    try {
+      for (const recipient of task.recipients) {
+        await email.sendProjectTaskReminder({
+          to:            recipient.email,
+          recipientName: recipient.name,
+          projectId:     task.project_id,
+          projectName:   task.project_name,
+          taskId:        task.id,
+          taskLabel:     `${task.project_key}-${task.task_number}`,
+          taskName:      task.name,
+          endDate:       task.end_date,
+          reminderType:  task.reminder_type,
+        });
+        totalSent++;
+      }
+      await db.query('UPDATE project_tasks SET reminder_sent = true WHERE id = $1', [task.id]);
+    } catch (err) {
+      logger.error(`[CrmReminder] Błąd project task ${task.id}`, { error: err.message });
+    }
+  }
+
+  logger.info(`[CrmReminder] Wysłano ${totalSent} przypomnień (lead: ${leadActs.length}, partner: ${partnerActs.length}, projekty: ${projectTasks.length})`);
+  return { totalSent, leadCount: leadActs.length, partnerCount: partnerActs.length, projectTaskCount: projectTasks.length };
 }
 
 module.exports = { sendDueReminders };

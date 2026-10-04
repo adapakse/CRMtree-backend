@@ -136,6 +136,7 @@ describe("leads", () => {
     const lead = await request(app).post("/api/crm/leads").set(auth)
       .send({ company: "Spec Sp. z o.o.", contact_name: "Jan Spec", email: "jan@spec.example", phone: "+48 600 100 200", value_pln: 25200, hot: true, tags: ["spec"] });
     expect(lead.status).toBe(201);
+    expectDocumented(lead, "post", "/crm/leads");
     leadId = lead.body.id;
 
     const activity = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
@@ -143,6 +144,27 @@ describe("leads", () => {
     expect(activity.status).toBe(201);
     expectDocumented(activity, "post", "/crm/leads/{id}/activities");
     leadActivityId = activity.body.id;
+
+    const task = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
+      .send({ type: "task", title: "Wysłać ofertę", assigned_to: user.id, priority: "asap" });
+    expectDocumented(task, "post", "/crm/leads/{id}/activities");
+    expect(task.body.priority).toBe("asap");
+    expect(task.body.assigned_to).toBe(user.id);
+
+    const note = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
+      .send({ type: "note", title: "Notatka", priority: "asap" });
+    expect(note.body.priority).toBeNull();
+
+    const edited = await request(app).patch(`/api/crm/leads/${leadId}/activities/${task.body.id}`).set(auth)
+      .send({ title: "Wysłać ofertę dziś", priority: "low", reminder_type: null, assigned_to: null });
+    expectDocumented(edited, "patch", "/crm/leads/{id}/activities/{actId}");
+    expect(edited.body.priority).toBe("low");
+    expect(edited.body.title).toBe("Wysłać ofertę dziś");
+    expect(edited.body.assigned_to).toBeNull();
+
+    const wrong = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
+      .send({ type: "task", title: "Zadanie", priority: "urgent" });
+    expect(wrong.status).toBe(400);
   });
 
   test("GET /crm/leads", async () => {
@@ -150,6 +172,16 @@ describe("leads", () => {
     expect(res.status).toBe(200);
     expect(res.body.data.length).toBeGreaterThan(0);
     expectDocumented(res, "get", "/crm/leads");
+    const created = res.body.data.find((lead) => lead.id === leadId);
+    expect(created.next_activity_type).toBe("meeting");
+    expect(created.next_activity_title).toBe("Prezentacja");
+    expect(new Date(created.next_activity_at).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  test("GET /crm/leads/{id}/logo-img — a lead without a logo", async () => {
+    const res = await request(app).get(`/api/crm/leads/${leadId}/logo-img`).set(auth);
+    expect(res.status).toBe(404);
+    expectDocumented(res, "get", "/crm/leads/{id}/logo-img");
   });
 
   test("GET /crm/leads/{id} and its 404", async () => {
@@ -183,10 +215,24 @@ describe("leads", () => {
     expectDocumented(deleted, "delete", "/crm/leads/{id}/activities/{actId}");
   });
 
+  test("GET /admin/settings", async () => {
+    const res = await request(app).get("/api/admin/settings").set(auth);
+    expect(res.status).toBe(200);
+    expectDocumented(res, "get", "/admin/settings");
+  });
+
+  test("GET /crm/leads/sources", async () => {
+    const res = await request(app).get("/api/crm/leads/sources").set(auth);
+    expect(res.status).toBe(200);
+    expectDocumented(res, "get", "/crm/leads/sources");
+  });
+
   test("GET /crm/leads/users", async () => {
     expectDocumented(await request(app).get("/api/crm/leads/users").set(auth), "get", "/crm/leads/users");
   });
 });
+
+const listed0ActiveSince = (res) => !Number.isNaN(new Date(res.body.data[0].active_since).getTime());
 
 describe("partners", () => {
   test("create a partner and an activity (setup through the API)", async () => {
@@ -203,6 +249,39 @@ describe("partners", () => {
       .send({ type: "call", title: "Telefon kontrolny", activity_at: new Date(Date.now() + 2 * 86400000).toISOString() });
     expect(activity.status).toBe(201);
     expectDocumented(activity, "post", "/crm/partners/{partnerId}/activities");
+
+    const task = await request(app).post(`/api/crm/partners/${partnerId}/activities`).set(auth)
+      .send({ type: "task", title: "Odnowić umowę", priority: "important" });
+    expect(task.body.priority).toBe("important");
+
+    const closed = await request(app).patch(`/api/crm/partners/${partnerId}/activities/${task.body.id}`).set(auth)
+      .send({ status: "closed", close_comment: "Zrobione" });
+    expect(closed.status).toBe(200);
+    expectDocumented(closed, "patch", "/crm/partners/{partnerId}/activities/{actId}");
+    expect(closed.body.status).toBe("closed");
+
+    const reprioritised = await request(app).patch(`/api/crm/partners/${partnerId}/activities/${task.body.id}`).set(auth)
+      .send({ priority: "low" });
+    expect(reprioritised.body.priority).toBe("low");
+    expect(listed0ActiveSince(await request(app).get("/api/crm/partners?search=Spec%20Partner").set(auth))).toBe(true);
+
+    const report = await request(app).get("/api/crm/sales-data/report?period_from=2026-01&period_to=2026-12").set(auth);
+    expect(report.status).toBe(200);
+    expectDocumented(report, "get", "/crm/sales-data/report");
+
+    const listed = await request(app).get("/api/crm/partners?search=Spec%20Partner").set(auth);
+    expectDocumented(listed, "get", "/crm/partners");
+    expect(listed.body.data[0].next_activity_title).toBe("Telefon kontrolny");
+
+    const active = await request(app).get("/api/crm/partners?search=Spec%20Partner&status=active").set(auth);
+    expect(active.body.data.map((p) => p.crm_uuid)).toContain(partnerId);
+    const churned = await request(app).get("/api/crm/partners?search=Spec%20Partner&status=churned").set(auth);
+    expect(churned.body.data).toEqual([]);
+    expectDocumented(await request(app).get("/api/crm/partners/group-names").set(auth), "get", "/crm/partners/group-names");
+
+    const logo = await request(app).get(`/api/crm/partners/${partnerId}/logo-img`).set(auth);
+    expect(logo.status).toBe(404);
+    expectDocumented(logo, "get", "/crm/partners/{partnerId}/logo-img");
   });
 
   test("GET /crm/partners/{partnerId} and its activities", async () => {
@@ -231,5 +310,24 @@ describe("agenda", () => {
     const calendar = await request(app).get(`/api/crm/leads/calendar?date_from=${day(-1)}&date_to=${day(7)}`).set(auth);
     expect(calendar.body.map((e) => e.source_type).sort()).toEqual(expect.arrayContaining(["lead", "partner"]));
     expectDocumented(calendar, "get", "/crm/leads/calendar");
+  });
+
+  test("GET /crm/mobile/today with today's lead and partner items, and its 400", async () => {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const res = await request(app).get("/api/crm/mobile/today").set(auth)
+      .query({
+        day_start: new Date(startOfDay.getTime() - 86400000).toISOString(),
+        day_end: new Date(startOfDay.getTime() + 8 * 86400000).toISOString(),
+        month_start: new Date(startOfDay.getFullYear(), startOfDay.getMonth(), 1).toISOString(),
+        month_end: new Date(startOfDay.getFullYear(), startOfDay.getMonth() + 1, 1).toISOString(),
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.agenda.map((item) => item.source_type).sort()).toEqual(expect.arrayContaining(["lead", "partner"]));
+    expectDocumented(res, "get", "/crm/mobile/today");
+
+    const missing = await request(app).get("/api/crm/mobile/today").set(auth);
+    expect(missing.status).toBe(400);
+    expectDocumented(missing, "get", "/crm/mobile/today");
   });
 });

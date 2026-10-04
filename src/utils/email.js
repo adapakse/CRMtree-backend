@@ -712,7 +712,101 @@ async function sendSubstitutionAssigned({
   });
 }
 
+async function sendProjectTaskAssigned({
+  to,
+  assigneeName,
+  assignerName,
+  projectId,
+  projectName,
+  taskId,
+  taskLabel,   // e.g. "WSC-12"
+  taskName,
+  endDate,
+}) {
+  const url = `${BASE_URL}/projects/${projectId}?task=${taskId}`;
+
+  await sendMail({
+    to,
+    subject: `[CRMtree] Nowe zadanie w projekcie: ${taskLabel} ${taskName}`,
+    html: template(`
+      <h2>Przypisano Ci zadanie w projekcie</h2>
+      <p>Cześć ${escapeHtml(assigneeName)},</p>
+      <p>Użytkownik <strong>${escapeHtml(assignerName)}</strong> przypisał Ci zadanie:</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">Projekt</span>
+          <span class="info-val">${escapeHtml(projectName)}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Zadanie</span>
+          <span class="info-val">${escapeHtml(taskLabel)} ${escapeHtml(taskName)}</span>
+        </div>
+        ${endDate ? `<div class="info-row">
+          <span class="info-label">Termin</span>
+          <span class="info-val">${escapeHtml(endDate)}</span>
+        </div>` : ''}
+      </div>
+      <a href="${url}" class="btn">Otwórz zadanie →</a>
+    `),
+  });
+}
+
+const PROJECT_REMINDER_LABELS = {
+  at_due:      'W dniu terminu',
+  '1d_before': '1 dzień przed terminem',
+  '2d_before': '2 dni przed terminem',
+  '3d_before': '3 dni przed terminem',
+  custom:      'Własna data przypomnienia',
+};
+
+async function sendProjectTaskReminder({
+  to,
+  recipientName,
+  projectId,
+  projectName,
+  taskId,
+  taskLabel,   // e.g. "WSC-12"
+  taskName,
+  endDate,
+  reminderType,
+}) {
+  if (!to) return;
+  const url = `${BASE_URL}/projects/${projectId}?task=${taskId}`;
+  const reminderLabel = PROJECT_REMINDER_LABELS[reminderType] || '';
+
+  await sendMail({
+    to,
+    subject: `[CRMtree] ⏰ Przypomnienie: ${taskLabel} ${taskName}`,
+    html: template(`
+      <h2>⏰ Przypomnienie o zadaniu w projekcie</h2>
+      <p>Cześć ${escapeHtml(recipientName || '')},</p>
+      <p>Masz zadanie wymagające uwagi:</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">Projekt</span>
+          <span class="info-val">${escapeHtml(projectName)}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Zadanie</span>
+          <span class="info-val"><strong>${escapeHtml(taskLabel)} ${escapeHtml(taskName)}</strong></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Termin</span>
+          <span class="info-val">${escapeHtml(endDate || '—')}</span>
+        </div>
+        ${reminderLabel ? `<div class="info-row">
+          <span class="info-label">Przypomnienie</span>
+          <span class="info-val">${reminderLabel}</span>
+        </div>` : ''}
+      </div>
+      <a href="${url}" target="_blank" class="btn">Otwórz zadanie →</a>
+    `),
+  });
+}
+
 module.exports = {
+  sendProjectTaskReminder,
+  sendProjectTaskAssigned,
   sendMail,
   sendTaskAssigned,
   sendDocumentStatusChanged,

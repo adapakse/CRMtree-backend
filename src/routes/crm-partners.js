@@ -6,7 +6,8 @@ const express  = require("express");
 const router   = express.Router();
 const { pool } = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
-const { crmAuth, loadCrmScope, canOperateForOwner } = require("../middleware/crm-rbac");
+const { crmAuth, loadCrmScope, loadCrmModuleGrants, canOperateForOwner, requireFeature } = require("../middleware/crm-rbac");
+const projectCrmLinkService = require("../services/projectCrmLinkService");
 const calendarService = require("../services/calendarService");
 const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
@@ -15,7 +16,7 @@ const email    = require("../utils/email");
 const logger   = require("../utils/logger");
 
 // Wspólne middleware dla wszystkich tras (requireAuth + crmAuth są też per-route dla jasności)
-router.use(requireAuth, crmAuth, loadCrmScope);
+router.use(requireAuth, crmAuth, loadCrmScope, loadCrmModuleGrants("partners"));
 
 // ── Pomocnicze ────────────────────────────────────────────────────────────────
 function assertManager(req, res) {
@@ -207,7 +208,9 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     }
     if (status) {
       params.push(status);
-      where.push(`p.status = $${params.length}`);
+      // A partner known only from the data warehouse has no CRM status and
+      // is listed as active, so it has to match the "active" filter too.
+      where.push(`COALESCE(p.status, 'active') = $${params.length}`);
     }
     if (group_name) {
       params.push(group_name);
@@ -291,12 +294,30 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
                    ))::int AS missed_call_count,
               (SELECT COUNT(*) FROM crm_partner_documents WHERE partner_id = p.id AND tenant_id = p.tenant_id)::int AS doc_count,
               p.churn_exempt,
+              COALESCE(dm.created_at, p.created_at) AS active_since,
+              p.website,
+              p.logo_url,
+              next_act.type        AS next_activity_type,
+              next_act.title       AS next_activity_title,
+              next_act.activity_at AS next_activity_at,
               (SELECT churn_level FROM crm_partner_scores WHERE partner_id = p.id AND tenant_id = p.tenant_id LIMIT 1) AS churn_risk,
               (SELECT churn_score FROM crm_partner_scores WHERE partner_id = p.id AND tenant_id = p.tenant_id LIMIT 1) AS churn_score
        FROM dwh.${req.dwhPrefix}_partner dm
        FULL OUTER JOIN crm_partners p ON p.dwh_partner_id = dm.partner_id
        LEFT JOIN users u ON u.id = p.manager_id AND u.tenant_id = $1
        LEFT JOIN crm_partner_groups g ON g.id = p.group_id
+       -- The earliest open dated meeting, call or task (an overdue one comes
+       -- first); the mobile partner list shows it on the tile.
+       LEFT JOIN LATERAL (
+         SELECT a.type, a.title, a.activity_at
+           FROM crm_partner_activities a
+          WHERE a.partner_id = p.id AND a.tenant_id = p.tenant_id
+            AND a.type IN ('meeting','call','task')
+            AND a.activity_at IS NOT NULL
+            AND COALESCE(a.status, 'new') <> 'closed'
+          ORDER BY a.activity_at ASC
+          LIMIT 1
+       ) next_act ON TRUE
        ${whereSql}
        ORDER BY ${orderExpr}
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -519,6 +540,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               dm.is_contract_signed   AS dwh_is_contract_signed,
               dm.custom_contact_email AS dwh_custom_contact_email,
               dm.created_at           AS dwh_created_at,
+              COALESCE(dm.created_at, p.created_at) AS active_since,
               dm.updated_at           AS dwh_updated_at,
               -- Relacje
               u.display_name AS manager_name,
@@ -685,13 +707,15 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
     if (!crmId) return res.status(404).json({ error: 'Partner nie znaleziony' });
     const id = crmId;
 
-    // Scope check: manager może edytować tylko partnerów ze swojej grupy
-    if (!req.user.is_admin && req.user.crm_role === 'sales_manager' && req.crmScopeUserIds) {
+    // Scope check: manager może edytować tylko partnerów ze swojej grupy albo
+    // objętych grantem 'full' (crmWriteScopeUserIds — patrz loadCrmModuleGrants).
+    const writeScope = req.crmWriteScopeUserIds ?? req.crmScopeUserIds;
+    if (!req.user.is_admin && req.user.crm_role === 'sales_manager' && writeScope) {
       const { rows: partnerRows } = await pool.query(
         'SELECT manager_id FROM crm_partners WHERE id = $1 AND tenant_id = $2', [id, req.tenantId],
       );
       if (!partnerRows.length) return res.status(404).json({ error: 'Partner nie znaleziony' });
-      if (!req.crmScopeUserIds.includes(partnerRows[0].manager_id)) {
+      if (!writeScope.includes(partnerRows[0].manager_id)) {
         return res.status(403).json({
           error: 'Nie możesz edytować tego partnera — jego manager nie należy do Twojej grupy.',
         });
@@ -875,6 +899,19 @@ router.delete("/:id", requireAuth, crmAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // AKTYWNOŚCI
 // ═══════════════════════════════════════════════════════════════════════════════
+// Projects linked to the partner, with their tasks — visible to everyone who
+// can open the partner card, project member or not.
+router.get("/:id/projects", requireAuth, crmAuth, requireFeature("projects"), async (req, res) => {
+  try {
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
+    if (!crmId) return res.status(404).json({ error: "Nie znaleziono" });
+    res.json(await projectCrmLinkService.listLinkedProjects({ tenantId: req.tenantId, viewer: req.user, partnerId: crmId }));
+  } catch (err) {
+    logger.error("GET /partners/:id/projects error", { error: err.message });
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
 router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
   try {
     const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
@@ -918,6 +955,28 @@ function computeReminderAt(activity_at, reminder_type, reminder_at_custom) {
 
 // ── POST /crm/partners/:id/activities ─────────────────────────────────────────
 // Przy typie 'meeting' automatycznie tworzy event w Google Calendar.
+// ── GET /api/crm/partners/:id/logo-img ── the logo as image bytes ──
+// Same as the lead route: streamed from blob storage, so the client needs no
+// SAS URL.
+router.get("/:id/logo-img", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const partnerId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
+    const { rows } = partnerId
+      ? await pool.query("SELECT logo_url FROM crm_partners WHERE id = $1 AND tenant_id = $2", [partnerId, req.tenantId])
+      : { rows: [] };
+    if (!rows.length || !rows[0].logo_url) return res.status(404).end();
+    const { buffer, contentType } = await require("../services/storageService").downloadDocument(rows[0].logo_url);
+    res.setHeader("Content-Type", contentType || "image/png");
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.send(buffer);
+  } catch (err) {
+    logger.warn("GET /crm/partners/:id/logo-img error", { error: err.message });
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+const TASK_PRIORITIES = ["asap", "important", "medium", "low"];
+
 router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
   try {
     const partnerId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
@@ -934,6 +993,11 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
     } = req.body;
 
     if (!title) return res.status(400).json({ error: "Pole title jest wymagane" });
+    if (req.body.priority && !TASK_PRIORITIES.includes(req.body.priority)) {
+      return res.status(400).json({ error: "Nieznany priorytet" });
+    }
+    // Only a task has a priority.
+    const priority = type === "task" ? (req.body.priority || null) : null;
 
     const reminderTypeSafe = ['at_due','30m_before','1h_before','1d_before','2d_before','3d_before','custom'].includes(reminder_type) ? reminder_type : null;
     const reminderAt = computeReminderAt(activity_at, reminderTypeSafe, reminder_at_custom);
@@ -954,8 +1018,8 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
         opp_value, opp_currency, opp_status, opp_due_date,
         gmail_thread_id, gmail_message_id,
         created_by, status, tenant_id,
-        reminder_type, reminder_at, reminder_sent
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'new',$17,$18,$19,false)
+        reminder_type, reminder_at, reminder_sent, priority
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'new',$17,$18,$19,false,$20)
       RETURNING *,
         (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $17) AS created_by_name,
         (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $17) AS assigned_to_name`,
@@ -972,6 +1036,7 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
         req.user.id,
         req.tenantId,
         reminderTypeSafe, reminderAt || null,
+        priority,
       ]
     );
     const newAct = r.rows[0];
@@ -1098,6 +1163,10 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
     const meeting_location = req.body.meeting_location !== undefined ? req.body.meeting_location : act.meeting_location;
     const assigned_to      = req.body.assigned_to      !== undefined ? req.body.assigned_to      : act.assigned_to;
     const close_comment    = req.body.close_comment    !== undefined ? req.body.close_comment    : act.close_comment;
+    if (req.body.priority && !TASK_PRIORITIES.includes(req.body.priority)) {
+      return res.status(400).json({ error: "Nieznany priorytet" });
+    }
+    const priority         = req.body.priority         !== undefined ? (req.body.priority || null) : act.priority;
     const opp_value        = req.body.opp_value        !== undefined ? req.body.opp_value        : act.opp_value;
     const opp_currency     = req.body.opp_currency     !== undefined ? req.body.opp_currency     : act.opp_currency;
     const opp_status       = req.body.opp_status       !== undefined ? req.body.opp_status       : act.opp_status;
@@ -1115,7 +1184,7 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
       SET type=$1, title=$2, body=$3, activity_at=$4, participants=$5, meeting_location=$6,
           assigned_to=$7, status=$8, close_comment=$9,
           opp_value=$10, opp_currency=$11, opp_status=$12, opp_due_date=$13,
-          reminder_type=$14, reminder_at=$15, reminder_sent=$16,
+          reminder_type=$14, reminder_at=$15, reminder_sent=$16, priority=$19,
           updated_at=NOW()
       WHERE id=$17 AND tenant_id=$18
       RETURNING *,
@@ -1125,7 +1194,7 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
         assigned_to||null, newStatus, close_comment||null,
         opp_value??null, opp_currency||'PLN', opp_status||null, opp_due_date||null,
         reminderTypeSafe, reminder_at||null, reminder_sent,
-        actId, req.tenantId]);
+        actId, req.tenantId, priority]);
 
     const auditAction = newStatus === 'closed' && act.status !== 'closed'
       ? 'crm_activity_close'

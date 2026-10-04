@@ -1030,10 +1030,34 @@ router.get('/discover-competitors-stream',
       send({ type: 'done' });
     } catch (err) {
       logger.error('[Discovery] Stream error', { tenantId: req.user.tenant_id, message: err.message });
-      send({ type: 'error', message: 'Błąd wyszukiwania konkurencji.' });
+      send({
+        type:    'error',
+        billing: !!err.isBillingError,
+        message: err.isBillingError ? err.message : 'Błąd wyszukiwania konkurencji.',
+      });
     }
 
     res.end();
+  },
+);
+
+// ── GET /discover-competitors/resolve-nip ──────────────────────────
+// Płatny web search po NIP jednej firmy, wołany TYLKO z przycisku w wierszu
+// wyników. Świadomie poza pipeline'em discovery — automatyczne wywołanie dla
+// każdego kandydata było dominującą pozycją kosztową tej funkcji.
+router.get('/discover-competitors/resolve-nip',
+  [query('company_name').isString().trim().notEmpty().isLength({ max: 255 })],
+  validate,
+  async (req, res, next) => {
+    try {
+      const result = await discoverySvc.resolveNipOnDemand(req.query.company_name);
+      res.json(result);
+    } catch (err) {
+      if (err.isBillingError) {
+        return res.status(402).json({ error: err.message, billing: true });
+      }
+      next(err);
+    }
   },
 );
 
@@ -1054,7 +1078,12 @@ router.post('/discover-competitors',
         req.user.tenant_id, req.user.id, company_name, seed_nip, offset,
       );
       res.json(result);
-    } catch (err) { next(err); }
+    } catch (err) {
+      if (err.isBillingError) {
+        return res.status(402).json({ error: err.message, billing: true });
+      }
+      next(err);
+    }
   },
 );
 

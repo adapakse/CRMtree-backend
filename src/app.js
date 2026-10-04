@@ -30,6 +30,9 @@ const adminBillingRoutes  = require('./routes/admin-billing');
 const onboardingSurveyRoutes = require('./routes/onboarding-survey');
 const adminProspectsRoutes        = require('./routes/admin-prospects');
 const crmProspectsDashboardRoutes = require('./routes/crm-prospects-dashboard');
+const projectRoutes            = require('./routes/projects');
+const projectTaskRoutes        = require('./routes/project-tasks');
+const adminProjectConfigRoutes = require('./routes/admin-project-config');
 const profileRoutes       = require('./routes/profile');
 const crmGmail 		  = require('./routes/crm-gmail');
 const crmOutlook      = require('./routes/crm-outlook');
@@ -47,6 +50,7 @@ const publicAppConfigRoutes = require('./routes/public-app-config');
 const openapiRoutes = require('./routes/openapi');
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
+const crmMobileRoutes = require('./routes/crm-mobile');
 const crmPartnersRoutes     = require('./routes/crm-partners');
 const crmGroupsRoutes       = require('./routes/crm-groups');
 const crmSubstitutionsRoutes = require('./routes/crm-substitutions');
@@ -209,6 +213,7 @@ app.use('/api/document-groups', documentGroupRoutes);
 app.use('/api/documents/:documentId/attachments', attachmentRoutes);
 
 // ── CRM API Routes ────────────────────────────────────────── ★ DODANE
+app.use('/api/crm/mobile',       crmMobileRoutes);
 app.use('/api/crm/leads',        crmLeadsRoutes);
 app.use('/api/crm/partners',     crmPartnersRoutes);
 app.use('/api/crm/groups',       crmGroupsRoutes);
@@ -223,6 +228,10 @@ app.use('/api/crm/documents',    crmDocumentsRoutes);
 app.use('/api/crm/consents',     crmConsentsRoutes);
 app.use('/api/crm/seo',          crmSeoRoutes);
 app.use('/api/crm/prospects-dashboard', crmProspectsDashboardRoutes);
+
+app.use('/api/projects/:id/tasks',   projectTaskRoutes);
+app.use('/api/projects',             projectRoutes);
+app.use('/api/admin/project-config', adminProjectConfigRoutes);
 
 // ─── Workflow global endpoints ─────────────────────────────
 const { requireAuth } = require('./middleware/auth');

@@ -275,6 +275,83 @@ nie po surowym stringu — inaczej ten sam numer tworzy dwie osobne karty. Szcze
 
 ---
 
+## Moduł Projekty
+
+Projekty z zespołem, zadaniami, osią czasu i czatem. Osobny moduł poza CRM — dostępny dla
+każdego usera tenanta, niezależnie od roli handlowej. Zobacz też `CRMtree-frontend/CLAUDE.md`.
+
+### Decyzje biznesowe (Adam, 2026-10-03/04) — nie cofaj bez pytania
+
+- **Flaga modułu `projects`** w `tenant_features`, włączana ręcznie przez superadmina, bez
+  związku z planem billingowym. Migracja 0309 wstawia wiersz „wyłączone” każdemu tenantowi.
+- **Role w projekcie:** `pm`, `internal_participant`, `external_participant`, `controller`
+  + poziom `full` / `read`. PM zawsze `full`, kontroler zawsze `read` (nie edytuje treści,
+  ale zmienia status na dowolnym zadaniu wg macierzy przejść). Uczestnik z `full` edytuje
+  tylko zadania, do których jest przypisany. Osoby i zadanie nadrzędne ustawia tylko PM.
+  Admin tenanta zarządza każdym projektem jak PM.
+- **Zakładanie projektów:** `users.can_create_projects` (nadaje admin) albo admin; twórca
+  zostaje PM-em. Projekt musi mieć co najmniej jednego PM-a.
+- **Konto zewnętrzne (`users.is_external`):** zwykłe, płatne konto, które ma dostęp wyłącznie
+  do Projektów. `requireAuth` odrzuca jego żądania poza `/api/projects`, `/api/auth`,
+  `/api/profile`, `/api/admin/settings` (lista `EXTERNAL_USER_API_PREFIXES` w
+  `middleware/auth.js`). W projekcie widzi tylko zadania przypisane do siebie.
+- **Projektów i zadań się nie usuwa.** Projekt można zamknąć (tylko do odczytu, znika z
+  domyślnej listy) i otworzyć ponownie. Pozycje słowników się dezaktywuje.
+- **Słowniki per tenant** (statusy z kategorią `todo`/`in_progress`/`done`, typy, priorytety),
+  macierz przejść statusów per rola, definicje pól dodatkowych. Domyślne wartości powstają
+  leniwie przy pierwszym użyciu (`projectConfigService.ensureDefaults`), nie w migracji.
+- **Pola dodatkowe** definiuje admin tenanta, PM dołącza je do projektu (nie do pojedynczego
+  zadania) z flagą wymagalności. Wartości leżą w `project_tasks.custom_values` (JSONB,
+  klucz = id definicji). Typy: `text`, `number`, `list`, `date`, `money` (kwota + waluta).
+- **Zadania projektowe NIE są w tabelach aktywności CRM.** Mają własną tabelę i są podpięte
+  jako kolejne źródło do tych samych list i joba przypomnień. Nie przenoś ich do
+  `crm_lead_activities` / `crm_partner_activities` — te tabele wymagają leada/partnera i
+  zasilają raporty.
+- **Powiązanie z CRM:** projekt ma najwyżej jedno powiązanie — `lead_id` albo `partner_id`
+  (CHECK w bazie). Jeden lead/partner może mieć wiele projektów. Wiąże tylko osoba z dostępem
+  do CRM i tylko z rekordem w swoim zakresie. Przy konwersji leada projekty przechodzą na
+  partnera (`moveLeadProjectsToPartner` w trasie migracji leada).
+- **Widoczność na karcie leada/partnera:** projekty i ich zadania widzi każdy, kto widzi
+  kartę, także bez członkostwa w projekcie (`can_open` mówi, czy może wejść do projektu).
+- **Godzina 09:00:** zadanie ma datę zakończenia bez godziny. Przypomnienia wychodzą o 09:00
+  `Europe/Warsaw` (`REMINDER_LOCAL_TIME` w `projectTaskService.js`), frontend stawia zadanie
+  w kalendarzu o tej samej godzinie.
+
+### Baza danych (migracje 0307–0311)
+
+`project_task_statuses`, `project_task_types`, `project_task_priorities`,
+`project_status_transitions`, `project_field_definitions`, `projects`, `project_members`,
+`project_fields`, `project_tasks`, `project_task_assignees`, `project_messages`. Kolumny na
+`users`: `phone`, `company`, `department`, `is_external`, `can_create_projects`.
+Numer zadania = `projects.key` (prefiks generowany z nazwy przy zakładaniu, niezmienny) +
+licznik `projects.next_task_number`.
+
+### Kluczowe pliki
+
+- `src/routes/projects.js` — projekty, członkowie, pola, powiązanie z CRM, czat projektu,
+  `GET /assigned-tasks` (musi być zarejestrowane przed `/:id`).
+- `src/routes/project-tasks.js` — zadania, historia, czat zadania (`/api/projects/:id/tasks`).
+- `src/routes/admin-project-config.js` — konfiguracja admina tenanta.
+- `src/middleware/project-access.js` — `loadProject` (404 także dla nie-członka, żeby nie
+  ujawniać id), `requireProjectManager`, `requireOpenProject`.
+- `src/services/projectService.js`, `projectTaskService.js` (reguły uprawnień do zadań są
+  opisane w nagłówku pliku), `projectConfigService.js`, `projectCrmLinkService.js`,
+  `projectMessageService.js`.
+- `GET /api/crm/leads/:id/projects` i `/api/crm/partners/:id/projects` — w trasach CRM.
+- Przypomnienia: trzeci blok w `src/services/crmReminderService.js`; maile
+  `sendProjectTaskAssigned` (od razu przy przypisaniu) i `sendProjectTaskReminder`.
+- Historia zadania: `audit_logs` z `metadata.task_id` (akcje `project_task_created` /
+  `project_task_updated`).
+- Testy: `src/__tests__/projects.test.js`, `project-tasks.test.js`,
+  `projects-crm-integration.test.js`.
+
+### Poza zakresem pierwszej wersji
+
+Załączniki, aplikacja mobilna (kontrakt `mobile-v1.yaml` nie zawiera Projektów), zależności
+między zadaniami, licznik nieprzeczytanych wiadomości, edycja i usuwanie wiadomości czatu.
+
+---
+
 ## Code quality standards
 
 ### Language

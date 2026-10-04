@@ -223,6 +223,31 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
 
+  /crm/mobile/today:
+    get:
+      tags: [agenda]
+      operationId: getToday
+      summary: Everything the "Dziś" screen shows, in one call
+      description: |
+        Only the signed-in person's own items (plus anyone they currently
+        substitute for) — a manager's team view belongs to the calendar. The
+        app sends the bounds of its local day, so the result is right in any
+        time zone.
+      parameters:
+        - { name: day_start, in: query, required: true, schema: { type: string, format: date-time }, description: Start of the phone's local day }
+        - { name: day_end, in: query, required: true, schema: { type: string, format: date-time }, description: Start of the next local day (exclusive) }
+        - { name: month_start, in: query, required: true, schema: { type: string, format: date-time }, description: 'Start of the phone''s local calendar month, for kpis' }
+        - { name: month_end, in: query, required: true, schema: { type: string, format: date-time }, description: Start of the next local month (exclusive) }
+      responses:
+        '200':
+          description: Today's agenda, overdue items and leads waiting for a reaction
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TodayResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
   /crm/leads:
     get:
       tags: [leads]
@@ -232,6 +257,8 @@ paths:
         - { name: stage, in: query, schema: { $ref: '#/components/schemas/LeadStage' }, description: Without it archived leads are hidden }
         - { name: mine, in: query, schema: { type: boolean } }
         - { name: hot, in: query, schema: { type: boolean } }
+        - { name: hold_only, in: query, schema: { type: boolean } }
+        - { name: source, in: query, schema: { type: string }, description: 'A source value, or several separated by commas' }
         - { name: search, in: query, schema: { type: string }, description: 'Matches company, contact, email, NIP, phone, notes and tags' }
         - { name: assigned_to, in: query, schema: { type: string }, description: User id or comma-separated ids (managers only) }
         - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
@@ -244,6 +271,65 @@ paths:
               schema: { $ref: '#/components/schemas/LeadListResponse' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [leads]
+      operationId: createLead
+      summary: Add a lead
+      description: |
+        A salesperson always becomes the owner (`assigned_to` is ignored).
+        A NIP already used by another lead or partner returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LeadCreate' }
+      responses:
+        '201':
+          description: Created lead
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lead' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /admin/settings:
+    get:
+      tags: [app]
+      operationId: getSettings
+      summary: The company's settings as a flat key-value map
+      description: |
+        The app reads `crm_lost_reasons` from it: a JSON-encoded array of the
+        reasons offered when a lead is marked as lost.
+      responses:
+        '200':
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SettingsResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /crm/leads/sources:
+    get:
+      tags: [leads]
+      operationId: listLeadSources
+      summary: The company's lead sources, for the source filter
+      responses:
+        '200':
+          description: Sources
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [value, label]
+                  additionalProperties: true
+                  properties:
+                    value: { type: string }
+                    label: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
 
   /crm/leads/users:
     get:
@@ -340,6 +426,23 @@ paths:
         '409': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
 
+  /crm/leads/{id}/logo-img:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [leads]
+      operationId: getLeadLogo
+      summary: The company logo of a lead, as image bytes
+      description: Only leads whose `logo_url` is set have one.
+      responses:
+        '200':
+          description: The image
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { description: The lead has no logo }
+
   /crm/leads/{id}/activities:
     parameters:
       - { name: id, in: path, required: true, schema: { type: integer } }
@@ -415,8 +518,10 @@ paths:
       summary: Partners (customers)
       parameters:
         - { name: search, in: query, schema: { type: string } }
-        - { name: status, in: query, schema: { type: string } }
-        - { name: manager_id, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string }, description: 'active, inactive or churned; a partner without a CRM status counts as active' }
+        - { name: manager_id, in: query, schema: { type: string }, description: Managers only }
+        - { name: group_name, in: query, schema: { type: string } }
+        - { name: industry, in: query, schema: { type: string } }
         - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, default: 50 } }
         - { name: sort, in: query, schema: { type: string, enum: [company, status, contract_signed, contract_value, created_at, industry, group_name, manager_name, contract_expires], default: company } }
@@ -427,6 +532,21 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PartnerListResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /crm/partners/group-names:
+    get:
+      tags: [partners]
+      operationId: listPartnerGroupNames
+      summary: Names of the partner groups, for the group filter
+      responses:
+        '200':
+          description: Group names
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
         '401': { $ref: '#/components/responses/Error' }
 
   /crm/partners/tasks:
@@ -463,6 +583,62 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PartnerDetail' }
         '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /crm/sales-data/report:
+    get:
+      tags: [partners]
+      operationId: getSalesReport
+      summary: Sales from the data warehouse, per partner, for a range of months
+      parameters:
+        - { name: period_from, in: query, schema: { type: string }, description: 'First month, YYYY-MM' }
+        - { name: period_to, in: query, schema: { type: string }, description: 'Last month, YYYY-MM' }
+      responses:
+        '200':
+          description: The report; the app reads by_partner
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SalesReport' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /crm/partners/{partnerId}/logo-img:
+    parameters:
+      - $ref: '#/components/parameters/PartnerId'
+    get:
+      tags: [partners]
+      operationId: getPartnerLogo
+      summary: The company logo of a partner, as image bytes
+      responses:
+        '200':
+          description: The image
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { description: The partner has no logo }
+
+  /crm/partners/{partnerId}/activities/{actId}:
+    parameters:
+      - $ref: '#/components/parameters/PartnerId'
+      - { name: actId, in: path, required: true, schema: { type: integer } }
+    patch:
+      tags: [activities]
+      operationId: updatePartnerActivity
+      summary: Edit a partner activity or close it (status closed + close_comment)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivityUpdate' }
+      responses:
+        '200':
+          description: Updated activity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Activity' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
 
   /crm/partners/{partnerId}/activities:
@@ -651,6 +827,7 @@ components:
         email: { type: string, nullable: true }
         phone: { type: string, nullable: true }
         website: { type: string, nullable: true }
+        logo_url: { type: string, nullable: true, description: 'Set when the lead has a logo; fetch it from /crm/leads/{id}/logo-img' }
         nip: { type: string, nullable: true }
         industry: { type: string, nullable: true }
         source: { type: string, nullable: true }
@@ -680,6 +857,9 @@ components:
             assigned_to_name: { type: string, nullable: true }
             activity_count: { type: integer }
             non_email_activity_count: { type: integer, description: Open non-email activities }
+            next_activity_type: { type: string, nullable: true, description: 'meeting, call or task: the earliest open dated one, overdue first' }
+            next_activity_title: { type: string, nullable: true }
+            next_activity_at: { type: string, format: date-time, nullable: true }
             new_email_count: { type: integer }
             unread_sms_count: { type: integer }
             unread_whatsapp_count: { type: integer }
@@ -713,6 +893,31 @@ components:
               type: array
               items: { $ref: '#/components/schemas/ExtraContact' }
             can_edit: { type: boolean }
+
+    LeadCreate:
+      type: object
+      required: [company]
+      properties:
+        company: { type: string, minLength: 1 }
+        contact_name: { type: string }
+        contact_title: { type: string }
+        email: { type: string, nullable: true }
+        phone: { type: string }
+        nip: { type: string, nullable: true }
+        value_pln: { type: number, nullable: true, minimum: 0 }
+        notes: { type: string }
+        hot: { type: boolean }
+
+    SettingsResponse:
+      type: object
+      required: [settings]
+      additionalProperties: true
+      properties:
+        settings:
+          type: object
+          additionalProperties: true
+          properties:
+            crm_lost_reasons: { type: string, description: JSON-encoded array of strings }
 
     LeadUpdate:
       type: object
@@ -775,6 +980,7 @@ components:
         is_read: { type: boolean, nullable: true }
         reminder_type: { type: string, nullable: true }
         reminder_at: { type: string, format: date-time, nullable: true }
+        priority: { type: string, nullable: true, description: 'Tasks only: asap, important, medium or low' }
 
     ActivityCreate:
       type: object
@@ -793,6 +999,11 @@ components:
           nullable: true
           enum: [at_due, 30m_before, 1h_before, 1d_before, 2d_before, 3d_before, custom, null]
         reminder_at: { type: string, format: date-time, nullable: true, description: Only with reminder_type custom }
+        priority:
+          type: string
+          nullable: true
+          enum: [asap, important, medium, low, null]
+          description: Kept for tasks only
 
     ActivityUpdate:
       type: object
@@ -812,6 +1023,10 @@ components:
           nullable: true
           enum: [at_due, 30m_before, 1h_before, 1d_before, 2d_before, 3d_before, custom, null]
         reminder_at: { type: string, format: date-time, nullable: true }
+        priority:
+          type: string
+          nullable: true
+          enum: [asap, important, medium, low, null]
 
     AgendaItem:
       type: object
@@ -858,6 +1073,29 @@ components:
         missed_call_count: { type: integer }
         churn_risk: { type: string, nullable: true }
         churn_score: { type: number, nullable: true }
+        dwh_partner_id: { type: integer, nullable: true, description: Key of the partner in the sales report }
+        active_since: { type: string, format: date-time, nullable: true, description: 'When the customer started: from the data warehouse, otherwise when the partner was created in the CRM' }
+        website: { type: string, nullable: true }
+        logo_url: { type: string, nullable: true, description: 'Set when the partner has a logo; fetch it from /crm/partners/{partnerId}/logo-img' }
+        next_activity_type: { type: string, nullable: true, description: 'meeting, call or task: the earliest open dated one, overdue first' }
+        next_activity_title: { type: string, nullable: true }
+        next_activity_at: { type: string, format: date-time, nullable: true }
+
+    SalesReport:
+      type: object
+      required: [by_partner]
+      additionalProperties: true
+      properties:
+        by_partner:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              partner_id: { type: string, format: uuid, nullable: true, description: CRM partner id }
+              dwh_partner_id: { type: integer, nullable: true }
+              gross_turnover_pln: { type: string, nullable: true, description: Decimal string }
+              revenue_pln: { type: string, nullable: true, description: 'Margin, decimal string' }
 
     PartnerListResponse:
       type: object
@@ -892,6 +1130,7 @@ components:
         contract_value: { type: string, nullable: true, description: Decimal string }
         contract_signed: { type: string, nullable: true }
         contract_expires: { type: string, nullable: true }
+        active_since: { type: string, format: date-time, nullable: true }
         notes: { type: string, nullable: true }
         tags:
           type: array
@@ -903,3 +1142,59 @@ components:
         extra_contacts:
           type: array
           items: { $ref: '#/components/schemas/ExtraContact' }
+
+    TodayResponse:
+      type: object
+      required: [agenda, overdue, attention, kpis]
+      properties:
+        kpis: { $ref: '#/components/schemas/TodayKpis' }
+        agenda:
+          description: Open meetings, calls and tasks dated within the day, earliest first
+          type: array
+          items: { $ref: '#/components/schemas/TodayItem' }
+        overdue:
+          description: Open meetings, calls and tasks dated before the day (at most the 50 most recent per source), oldest first
+          type: array
+          items: { $ref: '#/components/schemas/TodayItem' }
+        attention:
+          description: The person's leads with unread messages or missed calls, most recently updated first
+          type: array
+          items: { $ref: '#/components/schemas/AttentionLead' }
+
+    TodayItem:
+      type: object
+      required: [id, type, title, activity_at, status, source_type, source_id]
+      properties:
+        id: { type: integer, description: Activity id; unique only together with source_type }
+        type: { type: string, enum: [meeting, call, task] }
+        title: { type: string }
+        body: { type: string, nullable: true }
+        activity_at: { type: string, format: date-time }
+        duration_min: { type: integer, nullable: true }
+        meeting_location: { type: string, nullable: true }
+        status: { type: string, enum: [new, open] }
+        source_type: { type: string, enum: [lead, partner] }
+        source_id: { type: string, description: 'Lead id or partner CRM id, always a string' }
+        source_name: { type: string, nullable: true, description: Company name }
+
+    AttentionLead:
+      type: object
+      required: [lead_id, company, new_email_count, unread_sms_count, unread_whatsapp_count, missed_call_count]
+      properties:
+        lead_id: { type: string }
+        company: { type: string }
+        logo_url: { type: string, nullable: true, description: 'Set when the lead has a logo; fetch it from /crm/leads/{id}/logo-img' }
+        website: { type: string, nullable: true }
+        new_email_count: { type: integer }
+        unread_sms_count: { type: integer }
+        unread_whatsapp_count: { type: integer }
+        missed_call_count: { type: integer }
+
+    TodayKpis:
+      type: object
+      required: [active_leads, pipeline_value_pln, month_won_value_pln, month_budget_pln]
+      properties:
+        active_leads: { type: integer, description: 'Own leads past "new", not closed and not on hold' }
+        pipeline_value_pln: { type: number, description: 'Value of those leads in PLN, rounded to whole PLN' }
+        month_won_value_pln: { type: number, description: 'Value of own leads won in the month, in whole PLN' }
+        month_budget_pln: { type: number, description: 'Planned budget for the month in whole PLN; 0 when no budget is set' }

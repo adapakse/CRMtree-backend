@@ -10,13 +10,14 @@ const audit  = require('../services/auditService');
 const logger = require('../utils/logger');
 const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
-const { crmAuth, loadCrmScope, crmScope, requireCrmManager, assertOwnership, canOperateForOwner } = require('../middleware/crm-rbac');
+const { crmAuth, loadCrmScope, loadCrmModuleGrants, crmScope, requireCrmManager, assertOwnership, canOperateForOwner, requireFeature } = require('../middleware/crm-rbac');
+const projectCrmLinkService = require('../services/projectCrmLinkService');
 const testAccountSvc = require('../services/testAccountService');
 const crmLeadHoldSvc = require('../services/crmLeadHoldService');
 const email          = require('../utils/email');
 const { autoSaveLeadContacts } = require('../services/gmailProcessor');
 
-router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope);
+router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope, loadCrmModuleGrants('leads'));
 
 // ── GET /api/crm/leads ────────────────────────────────────────────
 router.get('/',
@@ -129,6 +130,9 @@ router.get('/',
             u.email        AS assigned_to_email,
             cp.id          AS converted_partner_id,
             cp.company     AS converted_partner_company,
+            next_act.type        AS next_activity_type,
+            next_act.title       AS next_activity_title,
+            next_act.activity_at AS next_activity_at,
             (SELECT COUNT(*) FROM crm_lead_activities a WHERE a.lead_id = l.id AND a.tenant_id = l.tenant_id)::int AS activity_count,
             (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
             (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id AND d.tenant_id = l.tenant_id)::int AS document_count,
@@ -148,6 +152,19 @@ router.get('/',
           FROM crm_leads l
           LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
           LEFT JOIN crm_partners cp ON cp.lead_id = l.id
+          -- The earliest open dated meeting, call or task: an overdue one
+          -- comes first, otherwise the next one planned. The mobile lead
+          -- list shows it instead of the stage.
+          LEFT JOIN LATERAL (
+            SELECT a.type, a.title, a.activity_at
+              FROM crm_lead_activities a
+             WHERE a.lead_id = l.id AND a.tenant_id = l.tenant_id
+               AND a.type IN ('meeting','call','task')
+               AND a.activity_at IS NOT NULL
+               AND COALESCE(a.status, 'new') <> 'closed'
+             ORDER BY a.activity_at ASC
+             LIMIT 1
+          ) next_act ON TRUE
           ${where}
           ORDER BY l.updated_at DESC
           LIMIT $${params.length - 1} OFFSET $${params.length}
@@ -1524,6 +1541,8 @@ function computeReminderAt(activity_at, reminder_type, reminder_at_custom) {
   return d.toISOString();
 }
 
+const TASK_PRIORITIES = ['asap', 'important', 'medium', 'low'];
+
 router.post('/:id/activities',
   [
     param('id').isInt(),
@@ -1537,6 +1556,7 @@ router.post('/:id/activities',
     body('assigned_to').optional({ nullable: true, checkFalsy: true }).matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
     body('reminder_type').optional({ nullable: true, checkFalsy: true }).isIn(['at_due','30m_before','1h_before','1d_before','2d_before','3d_before','custom']),
     body('reminder_at').optional({ nullable: true }).isISO8601(),
+    body('priority').optional({ nullable: true, checkFalsy: true }).isIn(TASK_PRIORITIES),
   ],
   validate,
   async (req, res, next) => {
@@ -1544,13 +1564,15 @@ router.post('/:id/activities',
       const id = parseInt(req.params.id);
       const { type, title, body: bodyText, activity_at, duration_min, participants, meeting_location, assigned_to,
               reminder_type, reminder_at: reminder_at_custom } = req.body;
+      // Only a task has a priority; the form sends it for tasks only.
+      const priority = type === 'task' ? (req.body.priority || null) : null;
 
       const reminder_at = computeReminderAt(activity_at, reminder_type, reminder_at_custom);
 
       const { rows } = await db.query(`
         INSERT INTO crm_lead_activities
-          (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, assigned_to, created_by, status, tenant_id, reminder_type, reminder_at, reminder_sent)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new',$11,$12,$13,false)
+          (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, assigned_to, created_by, status, tenant_id, reminder_type, reminder_at, reminder_sent, priority)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new',$11,$12,$13,false,$14)
         RETURNING *,
           (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $11) AS created_by_name,
           (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $11) AS assigned_to_name
@@ -1558,7 +1580,7 @@ router.post('/:id/activities',
           activity_at||null,
           duration_min||null, participants||null, meeting_location||null,
           assigned_to||null, req.user.id, req.tenantId,
-          reminder_type||null, reminder_at||null]);
+          reminder_type||null, reminder_at||null, priority]);
 
       await db.query('UPDATE crm_leads SET updated_at=now() WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]);
       await audit.log({
@@ -1631,6 +1653,7 @@ router.patch('/:id/activities/:actId',
     body('close_comment').optional({ nullable: true }).trim(),
     body('reminder_type').optional({ nullable: true, checkFalsy: true }).isIn(['at_due','30m_before','1h_before','1d_before','2d_before','3d_before','custom']),
     body('reminder_at').optional({ nullable: true }).isISO8601(),
+    body('priority').optional({ nullable: true, checkFalsy: true }).isIn(TASK_PRIORITIES),
   ],
   validate,
   async (req, res, next) => {
@@ -1666,6 +1689,7 @@ router.patch('/:id/activities/:actId',
       const meeting_location = req.body.meeting_location !== undefined ? req.body.meeting_location : act.meeting_location;
       const assigned_to      = req.body.assigned_to      !== undefined ? req.body.assigned_to      : act.assigned_to;
       const close_comment    = req.body.close_comment    !== undefined ? req.body.close_comment    : act.close_comment;
+      const priority         = req.body.priority         !== undefined ? (req.body.priority || null) : act.priority;
       const reminder_type      = req.body.reminder_type !== undefined ? req.body.reminder_type : act.reminder_type;
       const reminder_at_custom = req.body.reminder_at   !== undefined ? req.body.reminder_at   : null;
 
@@ -1678,14 +1702,14 @@ router.patch('/:id/activities/:actId',
         UPDATE crm_lead_activities
         SET type=$1, title=$2, body=$3, activity_at=$4, participants=$5, meeting_location=$6,
             assigned_to=$7, status=$8, close_comment=$9,
-            reminder_type=$10, reminder_at=$11, reminder_sent=$12, updated_at=now()
+            reminder_type=$10, reminder_at=$11, reminder_sent=$12, priority=$15, updated_at=now()
         WHERE id=$13 AND tenant_id=$14
         RETURNING *,
           (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $14) AS created_by_name,
           (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $14) AS assigned_to_name
       `, [type, title, body||null, activity_at||null, participants||null, meeting_location||null,
           assigned_to||null, newStatus, close_comment||null,
-          reminder_type||null, reminder_at||null, reminder_sent, actId, req.tenantId]);
+          reminder_type||null, reminder_at||null, reminder_sent, actId, req.tenantId, priority]);
 
       const auditAction = newStatus === 'closed' && act.status !== 'closed'
         ? 'crm_activity_close'
@@ -1805,6 +1829,26 @@ router.delete('/:id/documents/:docId',
       await db.query('DELETE FROM crm_lead_documents WHERE lead_id=$1 AND document_id=$2 AND tenant_id=$3',
         [parseInt(req.params.id), req.params.docId, req.tenantId]);
       res.status(204).end();
+    } catch (err) { next(err); }
+  }
+);
+
+// ── Projects linked to the lead, with their tasks ────────────────
+// Visible to everyone who can see the lead, project member or not.
+router.get('/:id/projects',
+  requireFeature('projects'), crmScope,
+  [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      const scopeParams = [id];
+      const scope = req.scopeFilter('l', 'assigned_to', scopeParams);
+      scopeParams.push(req.tenantId);
+      const { rows: lead } = await db.query(
+        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope} AND l.tenant_id = $${scopeParams.length}`, scopeParams
+      );
+      if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
+      res.json(await projectCrmLinkService.listLinkedProjects({ tenantId: req.tenantId, viewer: req.user, leadId: id }));
     } catch (err) { next(err); }
   }
 );
@@ -2287,6 +2331,15 @@ router.post('/:id/migrate',
       } catch (e) {
         const logger = require('../utils/logger');
         logger.error('Błąd kopiowania aktywności leada do partnera', { error: e.message });
+      }
+
+      // ── Projects linked to the lead follow it to the partner ──────────────────
+      try {
+        await projectCrmLinkService.moveLeadProjectsToPartner({
+          tenantId: req.tenantId, leadId: id, partnerId: partner.id,
+        });
+      } catch (e) {
+        logger.error('Błąd przenoszenia projektów leada do partnera', { error: e.message });
       }
 
       // ── Kontakt admina z konta testowego ──────────────────────────────────────
