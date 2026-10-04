@@ -273,6 +273,12 @@ describe("partners", () => {
     expectDocumented(listed, "get", "/crm/partners");
     expect(listed.body.data[0].next_activity_title).toBe("Telefon kontrolny");
 
+    const renamed = await request(app).patch(`/api/crm/partners/${partnerId}`).set(auth)
+      .send({ phone: "+48 600 100 300", contact_title: null, address: "ul. Testowa 1" });
+    expect(renamed.status).toBe(200);
+    expectDocumented(renamed, "patch", "/crm/partners/{partnerId}");
+    expect(renamed.body.phone).toBe("+48 600 100 300");
+
     const active = await request(app).get("/api/crm/partners?search=Spec%20Partner&status=active").set(auth);
     expect(active.body.data.map((p) => p.crm_uuid)).toContain(partnerId);
     const churned = await request(app).get("/api/crm/partners?search=Spec%20Partner&status=churned").set(auth);
