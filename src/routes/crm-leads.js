@@ -129,6 +129,9 @@ router.get('/',
             u.email        AS assigned_to_email,
             cp.id          AS converted_partner_id,
             cp.company     AS converted_partner_company,
+            next_act.type        AS next_activity_type,
+            next_act.title       AS next_activity_title,
+            next_act.activity_at AS next_activity_at,
             (SELECT COUNT(*) FROM crm_lead_activities a WHERE a.lead_id = l.id AND a.tenant_id = l.tenant_id)::int AS activity_count,
             (SELECT COUNT(*) FROM crm_lead_activities WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type != 'email' AND status IS NOT NULL AND status != 'closed')::int AS non_email_activity_count,
             (SELECT COUNT(*) FROM crm_lead_documents  d WHERE d.lead_id = l.id AND d.tenant_id = l.tenant_id)::int AS document_count,
@@ -148,6 +151,19 @@ router.get('/',
           FROM crm_leads l
           LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
           LEFT JOIN crm_partners cp ON cp.lead_id = l.id
+          -- The earliest open dated meeting, call or task: an overdue one
+          -- comes first, otherwise the next one planned. The mobile lead
+          -- list shows it instead of the stage.
+          LEFT JOIN LATERAL (
+            SELECT a.type, a.title, a.activity_at
+              FROM crm_lead_activities a
+             WHERE a.lead_id = l.id AND a.tenant_id = l.tenant_id
+               AND a.type IN ('meeting','call','task')
+               AND a.activity_at IS NOT NULL
+               AND COALESCE(a.status, 'new') <> 'closed'
+             ORDER BY a.activity_at ASC
+             LIMIT 1
+          ) next_act ON TRUE
           ${where}
           ORDER BY l.updated_at DESC
           LIMIT $${params.length - 1} OFFSET $${params.length}

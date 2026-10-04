@@ -743,6 +743,9 @@ components:
             assigned_to_name: { type: string, nullable: true }
             activity_count: { type: integer }
             non_email_activity_count: { type: integer, description: Open non-email activities }
+            next_activity_type: { type: string, nullable: true, description: 'meeting, call or task: the earliest open dated one, overdue first' }
+            next_activity_title: { type: string, nullable: true }
+            next_activity_at: { type: string, format: date-time, nullable: true }
             new_email_count: { type: integer }
             unread_sms_count: { type: integer }
             unread_whatsapp_count: { type: integer }

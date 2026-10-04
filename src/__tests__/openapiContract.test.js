@@ -151,6 +151,10 @@ describe("leads", () => {
     expect(res.status).toBe(200);
     expect(res.body.data.length).toBeGreaterThan(0);
     expectDocumented(res, "get", "/crm/leads");
+    const created = res.body.data.find((lead) => lead.id === leadId);
+    expect(created.next_activity_type).toBe("meeting");
+    expect(created.next_activity_title).toBe("Prezentacja");
+    expect(new Date(created.next_activity_at).getTime()).toBeGreaterThan(Date.now());
   });
 
   test("GET /crm/leads/{id} and its 404", async () => {
