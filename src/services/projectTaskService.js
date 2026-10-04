@@ -19,6 +19,7 @@
 const db = require('../config/database');
 const logger = require('../utils/logger');
 const emailUtil = require('../utils/email');
+const { resolveLocale } = require('../config/locales');
 const projectService = require('./projectService');
 const projectConfigService = require('./projectConfigService');
 
@@ -442,10 +443,14 @@ async function notifyNewAssignees({ project, task, assigner, assigneeIds }) {
   if (!recipientIds.length) return;
   try {
     const { rows: recipients } = await db.query(
-      'SELECT email, display_name FROM users WHERE id = ANY($1::uuid[]) AND is_active', [recipientIds],
+      `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+       FROM users u
+       LEFT JOIN tenants t ON t.id = u.tenant_id
+       WHERE u.id = ANY($1::uuid[]) AND u.is_active`, [recipientIds],
     );
     await Promise.all(recipients.map((recipient) => emailUtil.sendProjectTaskAssigned({
       to: recipient.email,
+      locale: resolveLocale({ userLocale: recipient.user_locale, tenantDefaultLocale: recipient.tenant_default_locale }),
       assigneeName: recipient.display_name,
       assignerName: assigner.display_name,
       projectId: project.id,

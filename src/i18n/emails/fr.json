@@ -1,0 +1,150 @@
+{
+  "absenceReasons": {
+    "other": "Autre absence",
+    "sickLeave": "Arrêt maladie",
+    "vacation": "Congés"
+  },
+  "activityReminder": {
+    "heading": "⏰ Rappel de tâche",
+    "intro": "Une tâche à venir requiert votre attention :",
+    "linkHint": "Le lien s’ouvrira dans une nouvelle fenêtre du navigateur. Si votre session est déjà ouverte, aucune nouvelle connexion ne sera nécessaire.",
+    "subject": "[CRMtree] ⏰ Rappel : {activityType} — {activityTitle}"
+  },
+  "activityTypes": {
+    "call": "Appel",
+    "docSent": "Document",
+    "email": "E-mail",
+    "meeting": "Réunion",
+    "note": "Note",
+    "opportunity": "Opportunité",
+    "qbr": "QBR",
+    "task": "Tâche",
+    "training": "Formation"
+  },
+  "common": {
+    "automaticAssigner": "CRMtree (automatique)",
+    "greeting": "Bonjour {name},",
+    "openDocument": "Ouvrir le document →",
+    "openLead": "Ouvrir le lead →",
+    "openPartner": "Ouvrir le partenaire →",
+    "openTask": "Ouvrir la tâche →"
+  },
+  "crmActivityAssigned": {
+    "calendarHint": "Vous pouvez consulter vos tâches dans la vue <strong>Calendrier des activités → Tâches</strong>.",
+    "heading": "Une nouvelle tâche CRM vous a été assignée",
+    "intro": "<strong>{assignerName}</strong> vous a assigné une activité :",
+    "subject": "[CRMtree] Nouvelle tâche CRM : {activityTitle}"
+  },
+  "documentSigned": {
+    "heading": "Le document a été signé",
+    "intro": "Le document <strong>{documentName}</strong> a été signé électroniquement avec succès.",
+    "signedBy": "Signé par",
+    "signedStatus": "Signé ✓",
+    "subject": "[CRMtree] Document signé : {documentName}"
+  },
+  "documentStatusChanged": {
+    "changedBy": "Modifié par",
+    "heading": "Le statut du document a été modifié",
+    "intro": "Un document auquel vous avez accès a changé de statut :",
+    "newStatus": "Nouveau statut",
+    "previousStatus": "Statut précédent",
+    "subject": "[CRMtree] Statut du document modifié : {documentName}"
+  },
+  "documentStatuses": {
+    "beingApproved": "En validation",
+    "beingEdited": "En rédaction",
+    "beingSigned": "En signature",
+    "completed": "Terminé",
+    "hold": "Suspendu",
+    "new": "Nouveau",
+    "rejected": "Rejeté",
+    "signed": "Signé"
+  },
+  "documentTaskTypes": {
+    "approve": "À valider",
+    "edit": "À modifier",
+    "read": "À lire",
+    "sign": "À signer"
+  },
+  "labels": {
+    "activityDate": "Date et heure",
+    "assigner": "Assignée par",
+    "comment": "Commentaire",
+    "document": "Document",
+    "dueDate": "Échéance",
+    "lead": "Lead",
+    "number": "Numéro",
+    "partner": "Partenaire",
+    "project": "Projet",
+    "reminder": "Rappel",
+    "status": "Statut",
+    "task": "Tâche",
+    "taskType": "Type de tâche",
+    "title": "Titre",
+    "type": "Type"
+  },
+  "layout": {
+    "footerAutomatic": "Ce message a été généré automatiquement par CRMtree.",
+    "footerNoReply": "Ne répondez pas à cet e-mail — cette boîte de réception n’est pas surveillée."
+  },
+  "projectTaskAssigned": {
+    "heading": "Une tâche de projet vous a été assignée",
+    "intro": "<strong>{assignerName}</strong> vous a assigné une tâche :",
+    "subject": "[CRMtree] Nouvelle tâche de projet : {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "heading": "⏰ Rappel de tâche de projet",
+    "intro": "Une tâche requiert votre attention :",
+    "subject": "[CRMtree] ⏰ Rappel : {taskLabel} {taskName}"
+  },
+  "reminderTypes": {
+    "activityAtDue": "À l’heure prévue",
+    "custom": "Date de rappel personnalisée",
+    "daysBefore": "{count, plural, one {# jour avant l’échéance} other {# jours avant l’échéance}}",
+    "projectAtDue": "Le jour de l’échéance"
+  },
+  "substitutionAssigned": {
+    "absentPerson": "Personne absente",
+    "from": "Du",
+    "heading": "Un remplacement vous a été confié",
+    "infoOnly": "Cette notification est purement informative — aucune confirmation n’est requise.",
+    "intro": "<strong>{assignerName}</strong> vous a confié le remplacement de <strong>{absentName}</strong> pendant son absence. Pendant cette période, vous disposez du même accès aux leads et aux partenaires de cette personne que le commercial qui leur est assigné.",
+    "note": "Note",
+    "openCrm": "Ouvrir le CRM →",
+    "reason": "Motif",
+    "subject": "[CRMtree] Remplacement de {absentName} ({startsOn}–{endsOn})",
+    "toInclusive": "Au (inclus)"
+  },
+  "taskAssigned": {
+    "heading": "Vous avez une nouvelle tâche à effectuer",
+    "intro": "<strong>{assignerName}</strong> vous a assigné une tâche concernant le document :",
+    "subject": "[CRMtree] Nouvelle tâche : {documentName}"
+  },
+  "taskCompleted": {
+    "completedBy": "Effectuée par",
+    "heading": "La tâche a été terminée",
+    "intro": {
+      "approve": "<strong>{completedByName}</strong> a validé le document <strong>{documentName}</strong>.",
+      "edit": "<strong>{completedByName}</strong> a modifié le document <strong>{documentName}</strong>.",
+      "other": "<strong>{completedByName}</strong> a effectué une tâche concernant le document <strong>{documentName}</strong>.",
+      "read": "<strong>{completedByName}</strong> a lu le document <strong>{documentName}</strong>.",
+      "sign": "<strong>{completedByName}</strong> a signé le document <strong>{documentName}</strong>."
+    },
+    "subject": "[CRMtree] Tâche terminée : {documentName}"
+  },
+  "taskRejected": {
+    "heading": "La tâche a été rejetée",
+    "intro": "<strong>{rejectedByName}</strong> a rejeté la tâche concernant le document <strong>{documentName}</strong>.",
+    "reason": "Motif",
+    "rejectedBy": "Rejetée par",
+    "subject": "[CRMtree] Tâche rejetée : {documentName}"
+  },
+  "userInvitation": {
+    "heading": "Bienvenue dans CRMtree !",
+    "ignoreHint": "Si vous n’attendiez pas ce message, vous pouvez l’ignorer.",
+    "intro": "<strong>{invitedByName}</strong> vous a donné accès à <strong>CRMtree</strong>.",
+    "loginHint": "Vous pouvez vous connecter avec votre compte Google Workspace (<strong>{email}</strong>) via le lien ci-dessous :",
+    "signIn": "Se connecter →",
+    "subject": "[CRMtree] Invitation à rejoindre CRMtree"
+  }
+}

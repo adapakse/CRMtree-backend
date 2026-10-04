@@ -10,6 +10,7 @@ const db     = require('../config/database');
 const { requireAuth }                            = require('../middleware/auth');
 const { crmAuth, requireCrmManager, loadCrmScope, requireFeature } = require('../middleware/crm-rbac');
 const { sendCrmActivityAssigned }                = require('../utils/email');
+const { resolveLocale }                          = require('../config/locales');
 
 router.use(requireAuth, crmAuth, requireFeature('dwh_integration'));
 
@@ -391,7 +392,10 @@ router.post('/generate', requireCrmManager, async (req, res, next) => {
 
     const cte = buildChurnCte(pfx, s);
     const { rows: allAtRisk } = await db.query(
-      `SELECT * FROM (${cte}) churn
+      `SELECT churn.*, u.locale AS salesperson_locale, t.default_locale AS tenant_default_locale
+       FROM (${cte}) churn
+       JOIN tenants t ON t.id = $1
+       LEFT JOIN users u ON u.id = churn.salesperson_id
        WHERE risk_level IN ('critical', 'high', 'medium')
        ORDER BY total_score DESC`,
       [req.tenantId]
@@ -437,6 +441,7 @@ router.post('/generate', requireCrmManager, async (req, res, next) => {
         if (p.salesperson_email && ['critical', 'high'].includes(p.risk_level)) {
           await sendCrmActivityAssigned({
             to:            p.salesperson_email,
+            locale:        resolveLocale({ userLocale: p.salesperson_locale, tenantDefaultLocale: p.tenant_default_locale }),
             assigneeName:  p.salesperson_name,
             assignerName:  req.user.display_name,
             activityType:  'task',

@@ -362,9 +362,52 @@ Aplikacja jest tłumaczona na 10 języków (`pl, en, de, it, es, fr, ro, ru, sl,
   `PUT /api/profile/locale`. Domyślny język tenanta: `tenants.default_locale`, ustawiany przez
   admina tenanta (`PUT /api/admin/settings/default-locale`). `/api/auth/me` zwraca oba.
 - `resolveLocale()` wybiera język, w którym zwracamy się do danej osoby. Maile i przypomnienia
-  mają iść w języku **odbiorcy**, faktura PDF w języku tenanta.
-- **Stan na 2026-10-04:** jest tylko przechowywanie i API języka. Komunikaty błędów, szablony
-  maili i PDF są nadal po polsku — ich tłumaczenie idzie etapami razem z modułami frontendu.
+  idą w języku **odbiorcy**, faktura PDF w języku tenanta.
+
+### Teksty backendu
+
+- Pliki: `src/i18n/<zakres>/<język>.json`, zakres to pierwszy człon klucza. Na razie jest jeden
+  zakres: `emails`. Konwencje jak we frontendzie: zagnieżdżony JSON, klucze angielskie camelCase,
+  parametry `{name}`, liczba mnoga w składni ICU.
+- Helper: `src/utils/i18n.js` — `translate(locale, 'emails.taskAssigned.subject', { documentName })`,
+  `formatDate(locale, value)`, `formatDateTime(locale, value)`. Składnię ICU obsługuje
+  `@messageformat/core`, skompilowane teksty są cache'owane.
+- `translate` nigdy nie rzuca: nieobsługiwany lub pusty język → polski; brak klucza w danym języku
+  (albo zepsute ICU) → tekst polski; brak klucza wszędzie → sam klucz.
+- Daty w mailach wychodzą w strefie czasowej procesu serwera (bez wymuszonej strefy), tak jak przed
+  tłumaczeniem. Angielski używa formatu `en-GB` (dzień przed miesiącem, zegar 24-godzinny).
+
+### Jak dodać tekst
+
+1. Dopisz klucz do `src/i18n/<zakres>/pl.json` i od razu do pozostałych 9 plików zakresu.
+2. W kodzie: `translate(locale, '<zakres>.<klucz>', { parametr })`. W `src/utils/email.js` każda
+   funkcja `send*` ma lokalne `const t = emailTexts(locale)` i woła `t('taskAssigned.subject', …)`.
+3. Wartość z bazy (status, typ, powód) tłumacz dopiero przy wypisywaniu — mapy „wartość → klucz” są
+   w `email.js` (`DOCUMENT_STATUSES`, `ACTIVITY_TYPE_KEYS`, …). Nieznana wartość wychodzi bez zmian.
+4. `npm run i18n:check` (`scripts/i18n-check.js`) — komplet 10 plików, te same klucze i parametry co
+   w polskim, poprawne ICU, format kanoniczny (`-- --fix` porządkuje format). To samo sprawdza test
+   `src/__tests__/i18n-completeness.test.js`, więc niepełne tłumaczenie wywala zwykłe `npm test`.
+
+### Język odbiorcy w kodzie
+
+- Każda funkcja `send*` z `email.js` przyjmuje `locale`. Bez niego (albo z nieobsługiwanym) mail
+  jest polski.
+- Wywołujący podaje `resolveLocale({ userLocale, tenantDefaultLocale })` **odbiorcy**, nigdy osoby,
+  która wywołała akcję. Zapytanie, które pobiera adres e-mail odbiorcy, pobiera przy okazji
+  `u.locale AS user_locale` i `t.default_locale AS tenant_default_locale` (`JOIN tenants t`) —
+  bez osobnego zapytania o język.
+- Przypomnienie o aktywności bez przypisanej osoby idzie do twórcy, w języku twórcy
+  (`crmReminderService.js`).
+- Odbiorca spoza CRMtree (sam adres e-mail): język domyślny tenanta, gdy tenant jest znany, inaczej
+  polski. Dziś każdy mail trafia do użytkownika CRMtree.
+
+### Co jest nadal po polsku
+
+- Komunikaty błędów API (`res.status(...).json({ error })`) i wpisy logów.
+- Faktura PDF.
+- Treści zapisywane w bazie przez backend, np. tytuł i opis automatycznego zadania churn
+  (`Churn: <partner> [Krytyczne]` w `crm-churn.js` i `jobs/daily-scores.js`) — trafiają do maila
+  jako dane, w brzmieniu z bazy.
 
 ---
 

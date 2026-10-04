@@ -8,6 +8,8 @@
 const db     = require('../config/database');
 const logger = require('../utils/logger');
 const { sendCrmActivityAssigned } = require('../utils/email');
+const { resolveLocale } = require('../config/locales');
+const { translate } = require('../utils/i18n');
 
 // Śledzenie ostatniego uruchomienia per tenant (nie duplikuj w ramach jednego dnia)
 const lastRun = new Map(); // tenantId → 'YYYY-MM-DD'
@@ -217,9 +219,12 @@ async function generateAlerts(tenantId, pfx, s) {
       p.manager_id,
       u.display_name  AS salesperson_name,
       u.email         AS salesperson_email,
+      u.locale        AS salesperson_locale,
+      t.default_locale AS tenant_default_locale,
       COALESCE(dm.company_name, dm.name, p.company, 'Partner') AS display_name
     FROM crm_partner_scores sc
     JOIN crm_partners p   ON p.id = sc.partner_id AND p.tenant_id = $1
+    JOIN tenants t        ON t.id = sc.tenant_id
     LEFT JOIN dwh.${pfx}_partner dm ON dm.partner_id = p.dwh_partner_id
     LEFT JOIN users u     ON u.id = p.manager_id AND u.tenant_id = $1
     WHERE sc.tenant_id = $1
@@ -258,10 +263,12 @@ async function generateAlerts(tenantId, pfx, s) {
       created++;
 
       if (p.salesperson_email && ['critical', 'high'].includes(p.churn_level)) {
+        const locale = resolveLocale({ userLocale: p.salesperson_locale, tenantDefaultLocale: p.tenant_default_locale });
         await sendCrmActivityAssigned({
           to:            p.salesperson_email,
+          locale,
           assigneeName:  p.salesperson_name,
-          assignerName:  'CRMtree (automatyczny)',
+          assignerName:  translate(locale, 'emails.common.automaticAssigner'),
           activityType:  'task',
           activityTitle: title,
           activityAt,

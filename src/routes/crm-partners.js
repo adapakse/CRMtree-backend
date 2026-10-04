@@ -13,6 +13,7 @@ const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
 const config   = require("../config");
 const email    = require("../utils/email");
+const { resolveLocale } = require("../config/locales");
 const logger   = require("../utils/logger");
 
 // Wspólne middleware dla wszystkich tras (requireAuth + crmAuth są też per-route dla jasności)
@@ -1118,11 +1119,17 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
       setImmediate(async () => {
         try {
           const { rows: assigneeRows } = await pool.query(
-            'SELECT email, display_name FROM users WHERE id=$1 AND tenant_id=$2', [assigned_to, req.tenantId]
+            `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+             FROM users u JOIN tenants t ON t.id = u.tenant_id
+             WHERE u.id=$1 AND u.tenant_id=$2`, [assigned_to, req.tenantId]
           );
           if (assigneeRows.length && assigneeRows[0].email) {
             await email.sendCrmActivityAssigned({
               to:            assigneeRows[0].email,
+              locale:        resolveLocale({
+                userLocale:          assigneeRows[0].user_locale,
+                tenantDefaultLocale: assigneeRows[0].tenant_default_locale,
+              }),
               assigneeName:  assigneeRows[0].display_name || assigneeRows[0].email,
               assignerName:  req.user.display_name || req.user.email,
               activityType:  type,

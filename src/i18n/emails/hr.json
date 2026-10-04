@@ -1,0 +1,150 @@
+{
+  "absenceReasons": {
+    "other": "Druga odsutnost",
+    "sickLeave": "Bolovanje",
+    "vacation": "Godišnji odmor"
+  },
+  "activityReminder": {
+    "heading": "⏰ Podsjetnik na zadatak",
+    "intro": "Imate nadolazeći zadatak koji zahtijeva vašu pozornost:",
+    "linkHint": "Poveznica će se otvoriti u novom prozoru preglednika. Ako ste prijavljeni, nećete se morati ponovno prijavljivati.",
+    "subject": "[CRMtree] ⏰ Podsjetnik: {activityType} — {activityTitle}"
+  },
+  "activityTypes": {
+    "call": "Poziv",
+    "docSent": "Dokument",
+    "email": "E-pošta",
+    "meeting": "Sastanak",
+    "note": "Bilješka",
+    "opportunity": "Prilika",
+    "qbr": "QBR",
+    "task": "Zadatak",
+    "training": "Obuka"
+  },
+  "common": {
+    "automaticAssigner": "CRMtree (automatski)",
+    "greeting": "Pozdrav {name},",
+    "openDocument": "Otvori dokument →",
+    "openLead": "Otvori lead →",
+    "openPartner": "Otvori partnera →",
+    "openTask": "Otvori zadatak →"
+  },
+  "crmActivityAssigned": {
+    "calendarHint": "Svoje zadatke možete vidjeti u prikazu <strong>Kalendar → Zadaci</strong>.",
+    "heading": "Dodijeljen vam je novi CRM zadatak",
+    "intro": "<strong>{assignerName}</strong> dodjeljuje vam aktivnost:",
+    "subject": "[CRMtree] Novi CRM zadatak: {activityTitle}"
+  },
+  "documentSigned": {
+    "heading": "Dokument je potpisan",
+    "intro": "Dokument <strong>{documentName}</strong> uspješno je elektronički potpisan.",
+    "signedBy": "Potpisao/la",
+    "signedStatus": "Potpisan ✓",
+    "subject": "[CRMtree] Dokument potpisan: {documentName}"
+  },
+  "documentStatusChanged": {
+    "changedBy": "Promijenio/la",
+    "heading": "Status dokumenta je promijenjen",
+    "intro": "Dokumentu kojem imate pristup promijenjen je status:",
+    "newStatus": "Novi status",
+    "previousStatus": "Prethodni status",
+    "subject": "[CRMtree] Status dokumenta promijenjen: {documentName}"
+  },
+  "documentStatuses": {
+    "beingApproved": "Na odobrenju",
+    "beingEdited": "U uređivanju",
+    "beingSigned": "U potpisivanju",
+    "completed": "Završen",
+    "hold": "Na čekanju",
+    "new": "Novi",
+    "rejected": "Odbijen",
+    "signed": "Potpisan"
+  },
+  "documentTaskTypes": {
+    "approve": "Za odobrenje",
+    "edit": "Za uređivanje",
+    "read": "Za čitanje",
+    "sign": "Za potpis"
+  },
+  "labels": {
+    "activityDate": "Termin",
+    "assigner": "Dodijelio/la",
+    "comment": "Komentar",
+    "document": "Dokument",
+    "dueDate": "Rok",
+    "lead": "Lead",
+    "number": "Broj",
+    "partner": "Partner",
+    "project": "Projekt",
+    "reminder": "Podsjetnik",
+    "status": "Status",
+    "task": "Zadatak",
+    "taskType": "Vrsta zadatka",
+    "title": "Naslov",
+    "type": "Vrsta"
+  },
+  "layout": {
+    "footerAutomatic": "Ovu je poruku automatski generirao sustav CRMtree.",
+    "footerNoReply": "Ne odgovarajte na ovu poruku — ovaj se sandučić ne nadzire."
+  },
+  "projectTaskAssigned": {
+    "heading": "Dodijeljen vam je zadatak u projektu",
+    "intro": "<strong>{assignerName}</strong> dodjeljuje vam zadatak:",
+    "subject": "[CRMtree] Novi zadatak u projektu: {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "heading": "⏰ Podsjetnik na zadatak u projektu",
+    "intro": "Imate zadatak koji zahtijeva vašu pozornost:",
+    "subject": "[CRMtree] ⏰ Podsjetnik: {taskLabel} {taskName}"
+  },
+  "reminderTypes": {
+    "activityAtDue": "U vrijeme aktivnosti",
+    "custom": "Vlastiti datum podsjetnika",
+    "daysBefore": "{count, plural, one {# dan prije roka} few {# dana prije roka} other {# dana prije roka}}",
+    "projectAtDue": "Na dan roka"
+  },
+  "substitutionAssigned": {
+    "absentPerson": "Odsutna osoba",
+    "from": "Od",
+    "heading": "Određeni ste za zamjenu",
+    "infoOnly": "Ova je obavijest samo informativna — nije potrebna potvrda.",
+    "intro": "<strong>{assignerName}</strong> određuje vas kao zamjenu za osobu <strong>{absentName}</strong> tijekom njezine odsutnosti. Za to vrijeme imate isti pristup leadovima i partnerima te osobe kakav ima prodavač kojem su dodijeljeni.",
+    "note": "Bilješka",
+    "openCrm": "Otvori CRM →",
+    "reason": "Razlog",
+    "subject": "[CRMtree] Zamjena: {absentName} ({startsOn}–{endsOn})",
+    "toInclusive": "Do (uključivo)"
+  },
+  "taskAssigned": {
+    "heading": "Imate novi zadatak",
+    "intro": "<strong>{assignerName}</strong> dodjeljuje vam zadatak vezan uz dokument:",
+    "subject": "[CRMtree] Novi zadatak: {documentName}"
+  },
+  "taskCompleted": {
+    "completedBy": "Izvršio/la",
+    "heading": "Zadatak je dovršen",
+    "intro": {
+      "approve": "Dokument <strong>{documentName}</strong> odobren je od strane korisnika <strong>{completedByName}</strong>.",
+      "edit": "Dokument <strong>{documentName}</strong> uređen je od strane korisnika <strong>{completedByName}</strong>.",
+      "other": "Zadatak za dokument <strong>{documentName}</strong> izvršen je od strane korisnika <strong>{completedByName}</strong>.",
+      "read": "Dokument <strong>{documentName}</strong> pročitan je od strane korisnika <strong>{completedByName}</strong>.",
+      "sign": "Dokument <strong>{documentName}</strong> potpisan je od strane korisnika <strong>{completedByName}</strong>."
+    },
+    "subject": "[CRMtree] Zadatak dovršen: {documentName}"
+  },
+  "taskRejected": {
+    "heading": "Zadatak je odbijen",
+    "intro": "Zadatak za dokument <strong>{documentName}</strong> odbijen je od strane korisnika <strong>{rejectedByName}</strong>.",
+    "reason": "Razlog odbijanja",
+    "rejectedBy": "Odbio/la",
+    "subject": "[CRMtree] Zadatak odbijen: {documentName}"
+  },
+  "userInvitation": {
+    "heading": "Dobro došli u CRMtree!",
+    "ignoreHint": "Ako niste očekivali ovu poruku, možete je zanemariti.",
+    "intro": "Dodani ste u sustav <strong>CRMtree</strong> na poziv korisnika <strong>{invitedByName}</strong>.",
+    "loginHint": "Možete se prijaviti svojim računom Google Workspace (<strong>{email}</strong>) putem poveznice u nastavku:",
+    "signIn": "Prijavite se →",
+    "subject": "[CRMtree] Poziv u sustav"
+  }
+}

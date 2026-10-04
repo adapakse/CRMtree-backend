@@ -15,6 +15,7 @@ const projectCrmLinkService = require('../services/projectCrmLinkService');
 const testAccountSvc = require('../services/testAccountService');
 const crmLeadHoldSvc = require('../services/crmLeadHoldService');
 const email          = require('../utils/email');
+const { resolveLocale } = require('../config/locales');
 const { autoSaveLeadContacts } = require('../services/gmailProcessor');
 
 router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope, loadCrmModuleGrants('leads'));
@@ -1608,7 +1609,9 @@ router.post('/:id/activities',
       if (assigned_to && assigned_to !== req.user.id) {
         try {
           const { rows: assigneeRows } = await db.query(
-            'SELECT email, display_name FROM users WHERE id=$1 AND tenant_id=$2', [assigned_to, req.tenantId]
+            `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+             FROM users u JOIN tenants t ON t.id = u.tenant_id
+             WHERE u.id=$1 AND u.tenant_id=$2`, [assigned_to, req.tenantId]
           );
           const { rows: leadRows } = await db.query(
             'SELECT company FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]
@@ -1616,6 +1619,10 @@ router.post('/:id/activities',
           if (assigneeRows.length && assigneeRows[0].email) {
             await email.sendCrmActivityAssigned({
               to:            assigneeRows[0].email,
+              locale:        resolveLocale({
+                userLocale:          assigneeRows[0].user_locale,
+                tenantDefaultLocale: assigneeRows[0].tenant_default_locale,
+              }),
               assigneeName:  assigneeRows[0].display_name || assigneeRows[0].email,
               assignerName:  req.user.display_name || req.user.email,
               activityType:  type,

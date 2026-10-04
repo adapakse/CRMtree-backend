@@ -1,0 +1,150 @@
+{
+  "absenceReasons": {
+    "other": "Druga odsotnost",
+    "sickLeave": "Bolniška odsotnost",
+    "vacation": "Dopust"
+  },
+  "activityReminder": {
+    "heading": "⏰ Opomnik za nalogo",
+    "intro": "Bliža se naloga, ki zahteva vašo pozornost:",
+    "linkHint": "Povezava se odpre v novem oknu brskalnika. Če je vaša prijava še aktivna, ponovna prijava ne bo potrebna.",
+    "subject": "[CRMtree] ⏰ Opomnik: {activityType} — {activityTitle}"
+  },
+  "activityTypes": {
+    "call": "Klic",
+    "docSent": "Dokument",
+    "email": "E-pošta",
+    "meeting": "Sestanek",
+    "note": "Zapisek",
+    "opportunity": "Priložnost",
+    "qbr": "QBR",
+    "task": "Naloga",
+    "training": "Usposabljanje"
+  },
+  "common": {
+    "automaticAssigner": "CRMtree (samodejno)",
+    "greeting": "Pozdravljeni {name},",
+    "openDocument": "Odpri dokument →",
+    "openLead": "Odpri lead →",
+    "openPartner": "Odpri partnerja →",
+    "openTask": "Odpri nalogo →"
+  },
+  "crmActivityAssigned": {
+    "calendarHint": "Svoje naloge si lahko ogledate v pogledu <strong>Koledar aktivnosti → Naloge</strong>.",
+    "heading": "Dodeljena vam je nova naloga CRM",
+    "intro": "<strong>{assignerName}</strong> vam dodeljuje aktivnost:",
+    "subject": "[CRMtree] Nova naloga CRM: {activityTitle}"
+  },
+  "documentSigned": {
+    "heading": "Dokument je podpisan",
+    "intro": "Dokument <strong>{documentName}</strong> je bil uspešno elektronsko podpisan.",
+    "signedBy": "Podpisal(-a)",
+    "signedStatus": "Podpisan ✓",
+    "subject": "[CRMtree] Dokument podpisan: {documentName}"
+  },
+  "documentStatusChanged": {
+    "changedBy": "Spremenil(-a)",
+    "heading": "Status dokumenta je spremenjen",
+    "intro": "Dokumentu, do katerega imate dostop, se je spremenil status:",
+    "newStatus": "Novi status",
+    "previousStatus": "Prejšnji status",
+    "subject": "[CRMtree] Status dokumenta spremenjen: {documentName}"
+  },
+  "documentStatuses": {
+    "beingApproved": "V odobritvi",
+    "beingEdited": "V urejanju",
+    "beingSigned": "V podpisovanju",
+    "completed": "Zaključen",
+    "hold": "Zadržan",
+    "new": "Nov",
+    "rejected": "Zavrnjen",
+    "signed": "Podpisan"
+  },
+  "documentTaskTypes": {
+    "approve": "Za odobritev",
+    "edit": "Za urejanje",
+    "read": "Za branje",
+    "sign": "Za podpis"
+  },
+  "labels": {
+    "activityDate": "Termin",
+    "assigner": "Dodelil(-a)",
+    "comment": "Komentar",
+    "document": "Dokument",
+    "dueDate": "Rok",
+    "lead": "Lead",
+    "number": "Številka",
+    "partner": "Partner",
+    "project": "Projekt",
+    "reminder": "Opomnik",
+    "status": "Status",
+    "task": "Naloga",
+    "taskType": "Vrsta naloge",
+    "title": "Naslov",
+    "type": "Vrsta"
+  },
+  "layout": {
+    "footerAutomatic": "To sporočilo je samodejno ustvaril sistem CRMtree.",
+    "footerNoReply": "Ne odgovarjajte na to e-poštno sporočilo — tega poštnega predala nihče ne spremlja."
+  },
+  "projectTaskAssigned": {
+    "heading": "Dodeljena vam je naloga v projektu",
+    "intro": "<strong>{assignerName}</strong> vam dodeljuje nalogo:",
+    "subject": "[CRMtree] Nova naloga v projektu: {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "heading": "⏰ Opomnik za nalogo v projektu",
+    "intro": "Imate nalogo, ki zahteva vašo pozornost:",
+    "subject": "[CRMtree] ⏰ Opomnik: {taskLabel} {taskName}"
+  },
+  "reminderTypes": {
+    "activityAtDue": "Ob času aktivnosti",
+    "custom": "Lasten datum opomnika",
+    "daysBefore": "{count, plural, one {# dan pred rokom} two {# dni pred rokom} few {# dni pred rokom} other {# dni pred rokom}}",
+    "projectAtDue": "Na dan roka"
+  },
+  "substitutionAssigned": {
+    "absentPerson": "Odsotna oseba",
+    "from": "Od",
+    "heading": "Dodeljeno vam je nadomeščanje",
+    "infoOnly": "To obvestilo je zgolj informativno — potrditev ni potrebna.",
+    "intro": "<strong>{assignerName}</strong> vas določa za namestnika odsotne osebe <strong>{absentName}</strong>. Med odsotnostjo imate do leadov in partnerjev te osebe enak dostop, kot ga ima dodeljeni prodajalec.",
+    "note": "Zapisek",
+    "openCrm": "Odpri CRM →",
+    "reason": "Razlog",
+    "subject": "[CRMtree] Nadomeščanje: {absentName} ({startsOn}–{endsOn})",
+    "toInclusive": "Do (vključno)"
+  },
+  "taskAssigned": {
+    "heading": "Imate novo nalogo",
+    "intro": "<strong>{assignerName}</strong> vam dodeljuje nalogo za dokument:",
+    "subject": "[CRMtree] Nova naloga: {documentName}"
+  },
+  "taskCompleted": {
+    "completedBy": "Opravil(-a)",
+    "heading": "Naloga je opravljena",
+    "intro": {
+      "approve": "Oseba <strong>{completedByName}</strong> je odobrila dokument <strong>{documentName}</strong>.",
+      "edit": "Oseba <strong>{completedByName}</strong> je uredila dokument <strong>{documentName}</strong>.",
+      "other": "Oseba <strong>{completedByName}</strong> je opravila nalogo za dokument <strong>{documentName}</strong>.",
+      "read": "Oseba <strong>{completedByName}</strong> je prebrala dokument <strong>{documentName}</strong>.",
+      "sign": "Oseba <strong>{completedByName}</strong> je podpisala dokument <strong>{documentName}</strong>."
+    },
+    "subject": "[CRMtree] Naloga opravljena: {documentName}"
+  },
+  "taskRejected": {
+    "heading": "Naloga je zavrnjena",
+    "intro": "Oseba <strong>{rejectedByName}</strong> je zavrnila nalogo za dokument <strong>{documentName}</strong>.",
+    "reason": "Razlog",
+    "rejectedBy": "Zavrnil(-a)",
+    "subject": "[CRMtree] Naloga zavrnjena: {documentName}"
+  },
+  "userInvitation": {
+    "heading": "Dobrodošli v CRMtree!",
+    "ignoreHint": "Če je to sporočilo za vas nepričakovano, ga lahko prezrete.",
+    "intro": "<strong>{invitedByName}</strong> vas dodaja v sistem <strong>CRMtree</strong>.",
+    "loginHint": "Prijavite se lahko s svojim računom Google Workspace (<strong>{email}</strong>) prek spodnje povezave:",
+    "signIn": "Prijava →",
+    "subject": "[CRMtree] Vabilo v sistem"
+  }
+}

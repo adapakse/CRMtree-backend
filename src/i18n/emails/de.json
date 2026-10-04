@@ -1,0 +1,150 @@
+{
+  "absenceReasons": {
+    "other": "Sonstige Abwesenheit",
+    "sickLeave": "Krankschreibung",
+    "vacation": "Urlaub"
+  },
+  "activityReminder": {
+    "heading": "⏰ Aufgabenerinnerung",
+    "intro": "Eine anstehende Aufgabe erfordert Ihre Aufmerksamkeit:",
+    "linkHint": "Der Link wird in einem neuen Browserfenster geöffnet. Wenn Sie angemeldet sind, ist keine erneute Anmeldung erforderlich.",
+    "subject": "[CRMtree] ⏰ Erinnerung: {activityType} — {activityTitle}"
+  },
+  "activityTypes": {
+    "call": "Anruf",
+    "docSent": "Dokument",
+    "email": "E-Mail",
+    "meeting": "Meeting",
+    "note": "Notiz",
+    "opportunity": "Verkaufschance",
+    "qbr": "QBR",
+    "task": "Aufgabe",
+    "training": "Schulung"
+  },
+  "common": {
+    "automaticAssigner": "CRMtree (automatisch)",
+    "greeting": "Guten Tag {name},",
+    "openDocument": "Dokument öffnen →",
+    "openLead": "Lead öffnen →",
+    "openPartner": "Partner öffnen →",
+    "openTask": "Aufgabe öffnen →"
+  },
+  "crmActivityAssigned": {
+    "calendarHint": "Ihre Aufgaben finden Sie in der Ansicht <strong>Kalender → Aufgaben</strong>.",
+    "heading": "Ihnen wurde eine neue CRM-Aufgabe zugewiesen",
+    "intro": "<strong>{assignerName}</strong> hat Ihnen eine Aktivität zugewiesen:",
+    "subject": "[CRMtree] Neue CRM-Aufgabe: {activityTitle}"
+  },
+  "documentSigned": {
+    "heading": "Das Dokument wurde unterzeichnet",
+    "intro": "Das Dokument <strong>{documentName}</strong> wurde erfolgreich elektronisch unterzeichnet.",
+    "signedBy": "Unterzeichnet von",
+    "signedStatus": "Unterzeichnet ✓",
+    "subject": "[CRMtree] Dokument unterzeichnet: {documentName}"
+  },
+  "documentStatusChanged": {
+    "changedBy": "Geändert von",
+    "heading": "Der Dokumentstatus wurde geändert",
+    "intro": "Der Status eines Dokuments, auf das Sie Zugriff haben, wurde geändert:",
+    "newStatus": "Neuer Status",
+    "previousStatus": "Vorheriger Status",
+    "subject": "[CRMtree] Dokumentstatus geändert: {documentName}"
+  },
+  "documentStatuses": {
+    "beingApproved": "In Genehmigung",
+    "beingEdited": "In Bearbeitung",
+    "beingSigned": "In Unterzeichnung",
+    "completed": "Abgeschlossen",
+    "hold": "Zurückgestellt",
+    "new": "Neu",
+    "rejected": "Abgelehnt",
+    "signed": "Unterzeichnet"
+  },
+  "documentTaskTypes": {
+    "approve": "Zur Genehmigung",
+    "edit": "Zur Bearbeitung",
+    "read": "Zur Kenntnisnahme",
+    "sign": "Zur Unterschrift"
+  },
+  "labels": {
+    "activityDate": "Termin",
+    "assigner": "Zugewiesen von",
+    "comment": "Kommentar",
+    "document": "Dokument",
+    "dueDate": "Fälligkeitsdatum",
+    "lead": "Lead",
+    "number": "Nummer",
+    "partner": "Partner",
+    "project": "Projekt",
+    "reminder": "Erinnerung",
+    "status": "Status",
+    "task": "Aufgabe",
+    "taskType": "Aufgabentyp",
+    "title": "Titel",
+    "type": "Typ"
+  },
+  "layout": {
+    "footerAutomatic": "Diese Nachricht wurde automatisch von CRMtree erstellt.",
+    "footerNoReply": "Bitte antworten Sie nicht auf diese E-Mail — dieses Postfach wird nicht überwacht."
+  },
+  "projectTaskAssigned": {
+    "heading": "Ihnen wurde eine Projektaufgabe zugewiesen",
+    "intro": "<strong>{assignerName}</strong> hat Ihnen eine Aufgabe zugewiesen:",
+    "subject": "[CRMtree] Neue Projektaufgabe: {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "heading": "⏰ Erinnerung an eine Projektaufgabe",
+    "intro": "Eine Aufgabe erfordert Ihre Aufmerksamkeit:",
+    "subject": "[CRMtree] ⏰ Erinnerung: {taskLabel} {taskName}"
+  },
+  "reminderTypes": {
+    "activityAtDue": "Zum Termin der Aktivität",
+    "custom": "Eigenes Erinnerungsdatum",
+    "daysBefore": "{count, plural, one {# Tag vorher} other {# Tage vorher}}",
+    "projectAtDue": "Am Fälligkeitsdatum"
+  },
+  "substitutionAssigned": {
+    "absentPerson": "Abwesende Person",
+    "from": "Von",
+    "heading": "Sie wurden als Vertretung benannt",
+    "infoOnly": "Diese Benachrichtigung dient nur zur Information — eine Bestätigung ist nicht erforderlich.",
+    "intro": "<strong>{assignerName}</strong> hat Sie für die Dauer der Abwesenheit als Vertretung für <strong>{absentName}</strong> benannt. In diesem Zeitraum erhalten Sie denselben Zugriff auf die Leads und Partner dieser Person wie der ihr zugewiesene Vertriebsmitarbeiter.",
+    "note": "Notiz",
+    "openCrm": "CRM öffnen →",
+    "reason": "Grund",
+    "subject": "[CRMtree] Vertretung für {absentName} ({startsOn}–{endsOn})",
+    "toInclusive": "Bis (einschließlich)"
+  },
+  "taskAssigned": {
+    "heading": "Sie haben eine neue Aufgabe",
+    "intro": "<strong>{assignerName}</strong> hat Ihnen eine Aufgabe zu folgendem Dokument zugewiesen:",
+    "subject": "[CRMtree] Neue Aufgabe: {documentName}"
+  },
+  "taskCompleted": {
+    "completedBy": "Erledigt von",
+    "heading": "Die Aufgabe wurde erledigt",
+    "intro": {
+      "approve": "<strong>{completedByName}</strong> hat das Dokument <strong>{documentName}</strong> genehmigt.",
+      "edit": "<strong>{completedByName}</strong> hat das Dokument <strong>{documentName}</strong> bearbeitet.",
+      "other": "<strong>{completedByName}</strong> hat eine Aufgabe zum Dokument <strong>{documentName}</strong> erledigt.",
+      "read": "<strong>{completedByName}</strong> hat das Dokument <strong>{documentName}</strong> gelesen.",
+      "sign": "<strong>{completedByName}</strong> hat das Dokument <strong>{documentName}</strong> unterzeichnet."
+    },
+    "subject": "[CRMtree] Aufgabe erledigt: {documentName}"
+  },
+  "taskRejected": {
+    "heading": "Die Aufgabe wurde abgelehnt",
+    "intro": "<strong>{rejectedByName}</strong> hat die Aufgabe zum Dokument <strong>{documentName}</strong> abgelehnt.",
+    "reason": "Ablehnungsgrund",
+    "rejectedBy": "Abgelehnt von",
+    "subject": "[CRMtree] Aufgabe abgelehnt: {documentName}"
+  },
+  "userInvitation": {
+    "heading": "Willkommen bei CRMtree!",
+    "ignoreHint": "Falls Sie diese Nachricht nicht erwartet haben, können Sie sie ignorieren.",
+    "intro": "<strong>{invitedByName}</strong> hat Sie zu <strong>CRMtree</strong> hinzugefügt.",
+    "loginHint": "Sie können sich mit Ihrem Google Workspace-Konto (<strong>{email}</strong>) über den folgenden Link anmelden:",
+    "signIn": "Anmelden →",
+    "subject": "[CRMtree] Einladung zu CRMtree"
+  }
+}

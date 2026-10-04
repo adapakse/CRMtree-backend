@@ -23,18 +23,30 @@
  *
  * UŻYCIE w routes/admin/users.js — po dodaniu użytkownika:
  *
- *   emailHooks.onUserInvited({ newUser, invitedByUser: req.user }).catch(() => {});
+ *   emailHooks.onUserInvited({ db, newUser, invitedByUser: req.user }).catch(() => {});
  */
 
 const email = require("./email");
 const logger = require("./logger");
+const { resolveLocale } = require("../config/locales");
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+// Every recipient query below also selects user_locale and tenant_default_locale.
+function recipientLocale(recipient) {
+  return resolveLocale({
+    userLocale: recipient.user_locale,
+    tenantDefaultLocale: recipient.tenant_default_locale,
+  });
+}
 
 async function getUserEmail(db, userId) {
   if (!userId) return null;
   const { rows } = await db.query(
-    "SELECT email, display_name FROM users WHERE id = $1",
+    `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+     FROM users u
+     LEFT JOIN tenants t ON t.id = u.tenant_id
+     WHERE u.id = $1`,
     [userId],
   );
   return rows[0] || null;
@@ -42,9 +54,11 @@ async function getUserEmail(db, userId) {
 
 async function getDocumentOwner(db, documentId) {
   const { rows } = await db.query(
-    `SELECT u.email, u.display_name, d.name AS doc_name, d.doc_number
+    `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale,
+            d.name AS doc_name, d.doc_number
      FROM documents d
      JOIN users u ON u.id = d.owner_id
+     LEFT JOIN tenants t ON t.id = u.tenant_id
      WHERE d.id = $1`,
     [documentId],
   );
@@ -73,6 +87,7 @@ async function onTaskAssigned({ db, task, assignerUser }) {
 
     await email.sendTaskAssigned({
       to: assignee.email,
+      locale: recipientLocale(assignee),
       assigneeName: assignee.display_name,
       taskType: task.task_type,
       documentName: doc.name,
@@ -100,13 +115,15 @@ async function onStatusChanged({ db, document, oldStatus, changerUser }) {
 
     // Zbiór adresatów: właściciel + osoby z aktywnymi taskami
     const { rows: recipients } = await db.query(
-      `SELECT DISTINCT u.email, u.display_name
+      `SELECT DISTINCT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
        FROM users u
+       LEFT JOIN tenants t ON t.id = u.tenant_id
        WHERE u.id = $1
        UNION
-       SELECT DISTINCT u.email, u.display_name
+       SELECT DISTINCT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
        FROM workflow_tasks wt
        JOIN users u ON u.id = wt.assigned_to
+       LEFT JOIN tenants t ON t.id = u.tenant_id
        WHERE wt.document_id = $2
          AND wt.task_status IN ('pending','in_progress')
          AND u.id != $1`,
@@ -120,6 +137,7 @@ async function onStatusChanged({ db, document, oldStatus, changerUser }) {
 
       await email.sendDocumentStatusChanged({
         to: recipient.email,
+        locale: recipientLocale(recipient),
         recipientName: recipient.display_name,
         documentName: document.name,
         docNumber: document.doc_number,
@@ -145,6 +163,7 @@ async function onTaskCompleted({ db, task, completedByUser, comment }) {
 
     await email.sendTaskCompleted({
       to: owner.email,
+      locale: recipientLocale(owner),
       ownerName: owner.display_name,
       taskType: task.task_type,
       documentName: owner.doc_name,
@@ -166,6 +185,7 @@ async function onTaskRejected({ db, task, rejectedByUser, comment }) {
 
     await email.sendTaskRejected({
       to: owner.email,
+      locale: recipientLocale(owner),
       ownerName: owner.display_name,
       documentName: owner.doc_name,
       docNumber: owner.doc_number,
@@ -179,11 +199,19 @@ async function onTaskRejected({ db, task, rejectedByUser, comment }) {
 
 // ─── Hook: nowy użytkownik ───────────────────────────────────────────────────
 
-async function onUserInvited({ newUser, invitedByUser }) {
+async function onUserInvited({ db, newUser, invitedByUser }) {
   try {
     if (!newUser.email) return;
+    const { rows } = await db.query(
+      "SELECT default_locale FROM tenants WHERE id = $1",
+      [newUser.tenant_id],
+    );
     await email.sendUserInvitation({
       to: newUser.email,
+      locale: resolveLocale({
+        userLocale: newUser.locale,
+        tenantDefaultLocale: rows[0]?.default_locale,
+      }),
       displayName: newUser.display_name || newUser.email,
       invitedByName: invitedByUser.display_name || invitedByUser.email,
     });
@@ -201,6 +229,7 @@ async function onDocumentSigned({ db, document, signedByName }) {
 
     await email.sendDocumentSigned({
       to: owner.email,
+      locale: recipientLocale(owner),
       recipientName: owner.display_name,
       documentName: document.name || owner.doc_name,
       docNumber: document.doc_number || owner.doc_number,
