@@ -403,6 +403,23 @@ paths:
         '409': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
 
+  /crm/leads/{id}/logo-img:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [leads]
+      operationId: getLeadLogo
+      summary: The company logo of a lead, as image bytes
+      description: Only leads whose `logo_url` is set have one.
+      responses:
+        '200':
+          description: The image
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { description: The lead has no logo }
+
   /crm/leads/{id}/activities:
     parameters:
       - { name: id, in: path, required: true, schema: { type: integer } }
@@ -714,6 +731,7 @@ components:
         email: { type: string, nullable: true }
         phone: { type: string, nullable: true }
         website: { type: string, nullable: true }
+        logo_url: { type: string, nullable: true, description: 'Set when the lead has a logo; fetch it from /crm/leads/{id}/logo-img' }
         nip: { type: string, nullable: true }
         industry: { type: string, nullable: true }
         source: { type: string, nullable: true }

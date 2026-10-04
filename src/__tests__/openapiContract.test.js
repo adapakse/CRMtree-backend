@@ -157,6 +157,12 @@ describe("leads", () => {
     expect(new Date(created.next_activity_at).getTime()).toBeGreaterThan(Date.now());
   });
 
+  test("GET /crm/leads/{id}/logo-img — a lead without a logo", async () => {
+    const res = await request(app).get(`/api/crm/leads/${leadId}/logo-img`).set(auth);
+    expect(res.status).toBe(404);
+    expectDocumented(res, "get", "/crm/leads/{id}/logo-img");
+  });
+
   test("GET /crm/leads/{id} and its 404", async () => {
     const res = await request(app).get(`/api/crm/leads/${leadId}`).set(auth);
     expect(res.status).toBe(200);
