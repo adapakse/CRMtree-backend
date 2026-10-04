@@ -640,6 +640,7 @@ paths:
       parameters:
         - { name: period_from, in: query, schema: { type: string }, description: 'First month, YYYY-MM' }
         - { name: period_to, in: query, schema: { type: string }, description: 'Last month, YYYY-MM' }
+        - { name: partner_id, in: query, schema: { type: integer }, description: Data-warehouse id of one partner (dwh_partner_id) }
       responses:
         '200':
           description: The report; the app reads by_partner
@@ -1191,6 +1192,24 @@ components:
       required: [by_partner]
       additionalProperties: true
       properties:
+        kpi:
+          type: object
+          additionalProperties: true
+          description: Totals for the period and filters
+          properties:
+            gross_turnover_pln: { type: string, nullable: true, description: Decimal string }
+            net_turnover_pln: { type: string, nullable: true, description: Decimal string }
+            revenue_pln: { type: string, nullable: true, description: 'Margin, decimal string' }
+            transactions_count: { type: integer, nullable: true }
+        by_product:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              product_type: { type: string, nullable: true, description: The warehouse's own service category }
+              gross_turnover_pln: { type: string, nullable: true }
+              revenue_pln: { type: string, nullable: true }
         by_partner:
           type: array
           items:
