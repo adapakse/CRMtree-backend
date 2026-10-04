@@ -144,6 +144,20 @@ describe("leads", () => {
     expect(activity.status).toBe(201);
     expectDocumented(activity, "post", "/crm/leads/{id}/activities");
     leadActivityId = activity.body.id;
+
+    const task = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
+      .send({ type: "task", title: "Wysłać ofertę", assigned_to: user.id, priority: "asap" });
+    expectDocumented(task, "post", "/crm/leads/{id}/activities");
+    expect(task.body.priority).toBe("asap");
+    expect(task.body.assigned_to).toBe(user.id);
+
+    const note = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
+      .send({ type: "note", title: "Notatka", priority: "asap" });
+    expect(note.body.priority).toBeNull();
+
+    const wrong = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
+      .send({ type: "task", title: "Zadanie", priority: "urgent" });
+    expect(wrong.status).toBe(400);
   });
 
   test("GET /crm/leads", async () => {

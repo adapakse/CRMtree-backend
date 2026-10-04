@@ -1540,6 +1540,8 @@ function computeReminderAt(activity_at, reminder_type, reminder_at_custom) {
   return d.toISOString();
 }
 
+const TASK_PRIORITIES = ['asap', 'important', 'medium', 'low'];
+
 router.post('/:id/activities',
   [
     param('id').isInt(),
@@ -1553,6 +1555,7 @@ router.post('/:id/activities',
     body('assigned_to').optional({ nullable: true, checkFalsy: true }).matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
     body('reminder_type').optional({ nullable: true, checkFalsy: true }).isIn(['at_due','30m_before','1h_before','1d_before','2d_before','3d_before','custom']),
     body('reminder_at').optional({ nullable: true }).isISO8601(),
+    body('priority').optional({ nullable: true, checkFalsy: true }).isIn(TASK_PRIORITIES),
   ],
   validate,
   async (req, res, next) => {
@@ -1560,13 +1563,15 @@ router.post('/:id/activities',
       const id = parseInt(req.params.id);
       const { type, title, body: bodyText, activity_at, duration_min, participants, meeting_location, assigned_to,
               reminder_type, reminder_at: reminder_at_custom } = req.body;
+      // Only a task has a priority; the form sends it for tasks only.
+      const priority = type === 'task' ? (req.body.priority || null) : null;
 
       const reminder_at = computeReminderAt(activity_at, reminder_type, reminder_at_custom);
 
       const { rows } = await db.query(`
         INSERT INTO crm_lead_activities
-          (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, assigned_to, created_by, status, tenant_id, reminder_type, reminder_at, reminder_sent)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new',$11,$12,$13,false)
+          (lead_id, type, title, body, activity_at, duration_min, participants, meeting_location, assigned_to, created_by, status, tenant_id, reminder_type, reminder_at, reminder_sent, priority)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new',$11,$12,$13,false,$14)
         RETURNING *,
           (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $11) AS created_by_name,
           (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $11) AS assigned_to_name
@@ -1574,7 +1579,7 @@ router.post('/:id/activities',
           activity_at||null,
           duration_min||null, participants||null, meeting_location||null,
           assigned_to||null, req.user.id, req.tenantId,
-          reminder_type||null, reminder_at||null]);
+          reminder_type||null, reminder_at||null, priority]);
 
       await db.query('UPDATE crm_leads SET updated_at=now() WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]);
       await audit.log({

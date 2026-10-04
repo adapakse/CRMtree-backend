@@ -884,6 +884,7 @@ components:
         is_read: { type: boolean, nullable: true }
         reminder_type: { type: string, nullable: true }
         reminder_at: { type: string, format: date-time, nullable: true }
+        priority: { type: string, nullable: true, description: 'Tasks only: asap, important, medium or low' }
 
     ActivityCreate:
       type: object
@@ -902,6 +903,11 @@ components:
           nullable: true
           enum: [at_due, 30m_before, 1h_before, 1d_before, 2d_before, 3d_before, custom, null]
         reminder_at: { type: string, format: date-time, nullable: true, description: Only with reminder_type custom }
+        priority:
+          type: string
+          nullable: true
+          enum: [asap, important, medium, low, null]
+          description: Kept for tasks only
 
     ActivityUpdate:
       type: object
