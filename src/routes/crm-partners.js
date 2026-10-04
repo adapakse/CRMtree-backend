@@ -6,8 +6,7 @@ const express  = require("express");
 const router   = express.Router();
 const { pool } = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
-const { crmAuth, loadCrmScope, loadCrmModuleGrants, canOperateForOwner, requireFeature } = require("../middleware/crm-rbac");
-const projectCrmLinkService = require("../services/projectCrmLinkService");
+const { crmAuth, loadCrmScope, loadCrmModuleGrants, canOperateForOwner } = require("../middleware/crm-rbac");
 const calendarService = require("../services/calendarService");
 const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
@@ -897,19 +896,6 @@ router.delete("/:id", requireAuth, crmAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // AKTYWNOŚCI
 // ═══════════════════════════════════════════════════════════════════════════════
-// Projects linked to the partner, with their tasks — visible to everyone who
-// can open the partner card, project member or not.
-router.get("/:id/projects", requireAuth, crmAuth, requireFeature("projects"), async (req, res) => {
-  try {
-    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
-    if (!crmId) return res.status(404).json({ error: "Nie znaleziono" });
-    res.json(await projectCrmLinkService.listLinkedProjects({ tenantId: req.tenantId, viewer: req.user, partnerId: crmId }));
-  } catch (err) {
-    logger.error("GET /partners/:id/projects error", { error: err.message });
-    res.status(500).json({ error: "Błąd serwera" });
-  }
-});
-
 router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
   try {
     const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);

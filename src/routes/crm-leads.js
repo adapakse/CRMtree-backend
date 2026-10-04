@@ -10,8 +10,7 @@ const audit  = require('../services/auditService');
 const logger = require('../utils/logger');
 const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
-const { crmAuth, loadCrmScope, loadCrmModuleGrants, crmScope, requireCrmManager, assertOwnership, canOperateForOwner, requireFeature } = require('../middleware/crm-rbac');
-const projectCrmLinkService = require('../services/projectCrmLinkService');
+const { crmAuth, loadCrmScope, loadCrmModuleGrants, crmScope, requireCrmManager, assertOwnership, canOperateForOwner } = require('../middleware/crm-rbac');
 const testAccountSvc = require('../services/testAccountService');
 const crmLeadHoldSvc = require('../services/crmLeadHoldService');
 const email          = require('../utils/email');
@@ -1833,26 +1832,6 @@ router.delete('/:id/documents/:docId',
   }
 );
 
-// ── Projects linked to the lead, with their tasks ────────────────
-// Visible to everyone who can see the lead, project member or not.
-router.get('/:id/projects',
-  requireFeature('projects'), crmScope,
-  [param('id').isInt()], validate,
-  async (req, res, next) => {
-    try {
-      const id = parseInt(req.params.id);
-      const scopeParams = [id];
-      const scope = req.scopeFilter('l', 'assigned_to', scopeParams);
-      scopeParams.push(req.tenantId);
-      const { rows: lead } = await db.query(
-        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope} AND l.tenant_id = $${scopeParams.length}`, scopeParams
-      );
-      if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
-      res.json(await projectCrmLinkService.listLinkedProjects({ tenantId: req.tenantId, viewer: req.user, leadId: id }));
-    } catch (err) { next(err); }
-  }
-);
-
 // ── Historia Leada (audit_logs) ──────────────────────────────────
 router.get('/:id/history',
   crmScope,
@@ -2331,15 +2310,6 @@ router.post('/:id/migrate',
       } catch (e) {
         const logger = require('../utils/logger');
         logger.error('Błąd kopiowania aktywności leada do partnera', { error: e.message });
-      }
-
-      // ── Projects linked to the lead follow it to the partner ──────────────────
-      try {
-        await projectCrmLinkService.moveLeadProjectsToPartner({
-          tenantId: req.tenantId, leadId: id, partnerId: partner.id,
-        });
-      } catch (e) {
-        logger.error('Błąd przenoszenia projektów leada do partnera', { error: e.message });
       }
 
       // ── Kontakt admina z konta testowego ──────────────────────────────────────
