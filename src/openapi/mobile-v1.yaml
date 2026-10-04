@@ -495,8 +495,10 @@ paths:
       summary: Partners (customers)
       parameters:
         - { name: search, in: query, schema: { type: string } }
-        - { name: status, in: query, schema: { type: string } }
-        - { name: manager_id, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string }, description: 'active, inactive or churned; a partner without a CRM status counts as active' }
+        - { name: manager_id, in: query, schema: { type: string }, description: Managers only }
+        - { name: group_name, in: query, schema: { type: string } }
+        - { name: industry, in: query, schema: { type: string } }
         - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, default: 50 } }
         - { name: sort, in: query, schema: { type: string, enum: [company, status, contract_signed, contract_value, created_at, industry, group_name, manager_name, contract_expires], default: company } }
@@ -507,6 +509,21 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PartnerListResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /crm/partners/group-names:
+    get:
+      tags: [partners]
+      operationId: listPartnerGroupNames
+      summary: Names of the partner groups, for the group filter
+      responses:
+        '200':
+          description: Group names
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
         '401': { $ref: '#/components/responses/Error' }
 
   /crm/partners/tasks:

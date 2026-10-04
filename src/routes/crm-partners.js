@@ -207,7 +207,9 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     }
     if (status) {
       params.push(status);
-      where.push(`p.status = $${params.length}`);
+      // A partner known only from the data warehouse has no CRM status and
+      // is listed as active, so it has to match the "active" filter too.
+      where.push(`COALESCE(p.status, 'active') = $${params.length}`);
     }
     if (group_name) {
       params.push(group_name);

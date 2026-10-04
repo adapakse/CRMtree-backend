@@ -267,6 +267,12 @@ describe("partners", () => {
     expectDocumented(listed, "get", "/crm/partners");
     expect(listed.body.data[0].next_activity_title).toBe("Telefon kontrolny");
 
+    const active = await request(app).get("/api/crm/partners?search=Spec%20Partner&status=active").set(auth);
+    expect(active.body.data.map((p) => p.crm_uuid)).toContain(partnerId);
+    const churned = await request(app).get("/api/crm/partners?search=Spec%20Partner&status=churned").set(auth);
+    expect(churned.body.data).toEqual([]);
+    expectDocumented(await request(app).get("/api/crm/partners/group-names").set(auth), "get", "/crm/partners/group-names");
+
     const logo = await request(app).get(`/api/crm/partners/${partnerId}/logo-img`).set(auth);
     expect(logo.status).toBe(404);
     expectDocumented(logo, "get", "/crm/partners/{partnerId}/logo-img");
