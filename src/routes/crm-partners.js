@@ -6,7 +6,8 @@ const express  = require("express");
 const router   = express.Router();
 const { pool } = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
-const { crmAuth, loadCrmScope, loadCrmModuleGrants, canOperateForOwner } = require("../middleware/crm-rbac");
+const { crmAuth, loadCrmScope, loadCrmModuleGrants, canOperateForOwner, requireFeature } = require("../middleware/crm-rbac");
+const projectCrmLinkService = require("../services/projectCrmLinkService");
 const calendarService = require("../services/calendarService");
 const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
@@ -291,6 +292,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
                    ))::int AS missed_call_count,
               (SELECT COUNT(*) FROM crm_partner_documents WHERE partner_id = p.id AND tenant_id = p.tenant_id)::int AS doc_count,
               p.churn_exempt,
+              COALESCE(dm.created_at, p.created_at) AS active_since,
               p.website,
               p.logo_url,
               next_act.type        AS next_activity_type,
@@ -536,6 +538,7 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               dm.is_contract_signed   AS dwh_is_contract_signed,
               dm.custom_contact_email AS dwh_custom_contact_email,
               dm.created_at           AS dwh_created_at,
+              COALESCE(dm.created_at, p.created_at) AS active_since,
               dm.updated_at           AS dwh_updated_at,
               -- Relacje
               u.display_name AS manager_name,
@@ -894,6 +897,19 @@ router.delete("/:id", requireAuth, crmAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // AKTYWNOŚCI
 // ═══════════════════════════════════════════════════════════════════════════════
+// Projects linked to the partner, with their tasks — visible to everyone who
+// can open the partner card, project member or not.
+router.get("/:id/projects", requireAuth, crmAuth, requireFeature("projects"), async (req, res) => {
+  try {
+    const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
+    if (!crmId) return res.status(404).json({ error: "Nie znaleziono" });
+    res.json(await projectCrmLinkService.listLinkedProjects({ tenantId: req.tenantId, viewer: req.user, partnerId: crmId }));
+  } catch (err) {
+    logger.error("GET /partners/:id/projects error", { error: err.message });
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
 router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
   try {
     const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
@@ -1145,6 +1161,10 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
     const meeting_location = req.body.meeting_location !== undefined ? req.body.meeting_location : act.meeting_location;
     const assigned_to      = req.body.assigned_to      !== undefined ? req.body.assigned_to      : act.assigned_to;
     const close_comment    = req.body.close_comment    !== undefined ? req.body.close_comment    : act.close_comment;
+    if (req.body.priority && !TASK_PRIORITIES.includes(req.body.priority)) {
+      return res.status(400).json({ error: "Nieznany priorytet" });
+    }
+    const priority         = req.body.priority         !== undefined ? (req.body.priority || null) : act.priority;
     const opp_value        = req.body.opp_value        !== undefined ? req.body.opp_value        : act.opp_value;
     const opp_currency     = req.body.opp_currency     !== undefined ? req.body.opp_currency     : act.opp_currency;
     const opp_status       = req.body.opp_status       !== undefined ? req.body.opp_status       : act.opp_status;
@@ -1162,7 +1182,7 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
       SET type=$1, title=$2, body=$3, activity_at=$4, participants=$5, meeting_location=$6,
           assigned_to=$7, status=$8, close_comment=$9,
           opp_value=$10, opp_currency=$11, opp_status=$12, opp_due_date=$13,
-          reminder_type=$14, reminder_at=$15, reminder_sent=$16,
+          reminder_type=$14, reminder_at=$15, reminder_sent=$16, priority=$19,
           updated_at=NOW()
       WHERE id=$17 AND tenant_id=$18
       RETURNING *,
@@ -1172,7 +1192,7 @@ router.patch("/:id/activities/:actId", requireAuth, crmAuth, async (req, res) =>
         assigned_to||null, newStatus, close_comment||null,
         opp_value??null, opp_currency||'PLN', opp_status||null, opp_due_date||null,
         reminderTypeSafe, reminder_at||null, reminder_sent,
-        actId, req.tenantId]);
+        actId, req.tenantId, priority]);
 
     const auditAction = newStatus === 'closed' && act.status !== 'closed'
       ? 'crm_activity_close'

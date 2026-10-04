@@ -10,7 +10,8 @@ const audit  = require('../services/auditService');
 const logger = require('../utils/logger');
 const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
-const { crmAuth, loadCrmScope, loadCrmModuleGrants, crmScope, requireCrmManager, assertOwnership, canOperateForOwner } = require('../middleware/crm-rbac');
+const { crmAuth, loadCrmScope, loadCrmModuleGrants, crmScope, requireCrmManager, assertOwnership, canOperateForOwner, requireFeature } = require('../middleware/crm-rbac');
+const projectCrmLinkService = require('../services/projectCrmLinkService');
 const testAccountSvc = require('../services/testAccountService');
 const crmLeadHoldSvc = require('../services/crmLeadHoldService');
 const email          = require('../utils/email');
@@ -1652,6 +1653,7 @@ router.patch('/:id/activities/:actId',
     body('close_comment').optional({ nullable: true }).trim(),
     body('reminder_type').optional({ nullable: true, checkFalsy: true }).isIn(['at_due','30m_before','1h_before','1d_before','2d_before','3d_before','custom']),
     body('reminder_at').optional({ nullable: true }).isISO8601(),
+    body('priority').optional({ nullable: true, checkFalsy: true }).isIn(TASK_PRIORITIES),
   ],
   validate,
   async (req, res, next) => {
@@ -1687,6 +1689,7 @@ router.patch('/:id/activities/:actId',
       const meeting_location = req.body.meeting_location !== undefined ? req.body.meeting_location : act.meeting_location;
       const assigned_to      = req.body.assigned_to      !== undefined ? req.body.assigned_to      : act.assigned_to;
       const close_comment    = req.body.close_comment    !== undefined ? req.body.close_comment    : act.close_comment;
+      const priority         = req.body.priority         !== undefined ? (req.body.priority || null) : act.priority;
       const reminder_type      = req.body.reminder_type !== undefined ? req.body.reminder_type : act.reminder_type;
       const reminder_at_custom = req.body.reminder_at   !== undefined ? req.body.reminder_at   : null;
 
@@ -1699,14 +1702,14 @@ router.patch('/:id/activities/:actId',
         UPDATE crm_lead_activities
         SET type=$1, title=$2, body=$3, activity_at=$4, participants=$5, meeting_location=$6,
             assigned_to=$7, status=$8, close_comment=$9,
-            reminder_type=$10, reminder_at=$11, reminder_sent=$12, updated_at=now()
+            reminder_type=$10, reminder_at=$11, reminder_sent=$12, priority=$15, updated_at=now()
         WHERE id=$13 AND tenant_id=$14
         RETURNING *,
           (SELECT display_name FROM users WHERE id = created_by  AND tenant_id = $14) AS created_by_name,
           (SELECT display_name FROM users WHERE id = assigned_to AND tenant_id = $14) AS assigned_to_name
       `, [type, title, body||null, activity_at||null, participants||null, meeting_location||null,
           assigned_to||null, newStatus, close_comment||null,
-          reminder_type||null, reminder_at||null, reminder_sent, actId, req.tenantId]);
+          reminder_type||null, reminder_at||null, reminder_sent, actId, req.tenantId, priority]);
 
       const auditAction = newStatus === 'closed' && act.status !== 'closed'
         ? 'crm_activity_close'
@@ -1826,6 +1829,26 @@ router.delete('/:id/documents/:docId',
       await db.query('DELETE FROM crm_lead_documents WHERE lead_id=$1 AND document_id=$2 AND tenant_id=$3',
         [parseInt(req.params.id), req.params.docId, req.tenantId]);
       res.status(204).end();
+    } catch (err) { next(err); }
+  }
+);
+
+// ── Projects linked to the lead, with their tasks ────────────────
+// Visible to everyone who can see the lead, project member or not.
+router.get('/:id/projects',
+  requireFeature('projects'), crmScope,
+  [param('id').isInt()], validate,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      const scopeParams = [id];
+      const scope = req.scopeFilter('l', 'assigned_to', scopeParams);
+      scopeParams.push(req.tenantId);
+      const { rows: lead } = await db.query(
+        `SELECT id FROM crm_leads l WHERE l.id = $1 ${scope} AND l.tenant_id = $${scopeParams.length}`, scopeParams
+      );
+      if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
+      res.json(await projectCrmLinkService.listLinkedProjects({ tenantId: req.tenantId, viewer: req.user, leadId: id }));
     } catch (err) { next(err); }
   }
 );
@@ -2308,6 +2331,15 @@ router.post('/:id/migrate',
       } catch (e) {
         const logger = require('../utils/logger');
         logger.error('Błąd kopiowania aktywności leada do partnera', { error: e.message });
+      }
+
+      // ── Projects linked to the lead follow it to the partner ──────────────────
+      try {
+        await projectCrmLinkService.moveLeadProjectsToPartner({
+          tenantId: req.tenantId, leadId: id, partnerId: partner.id,
+        });
+      } catch (e) {
+        logger.error('Błąd przenoszenia projektów leada do partnera', { error: e.message });
       }
 
       // ── Kontakt admina z konta testowego ──────────────────────────────────────

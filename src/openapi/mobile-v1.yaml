@@ -545,6 +545,23 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
 
+  /crm/sales-data/report:
+    get:
+      tags: [partners]
+      operationId: getSalesReport
+      summary: Sales from the data warehouse, per partner, for a range of months
+      parameters:
+        - { name: period_from, in: query, schema: { type: string }, description: 'First month, YYYY-MM' }
+        - { name: period_to, in: query, schema: { type: string }, description: 'Last month, YYYY-MM' }
+      responses:
+        '200':
+          description: The report; the app reads by_partner
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SalesReport' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
   /crm/partners/{partnerId}/logo-img:
     parameters:
       - $ref: '#/components/parameters/PartnerId'
@@ -966,6 +983,10 @@ components:
           nullable: true
           enum: [at_due, 30m_before, 1h_before, 1d_before, 2d_before, 3d_before, custom, null]
         reminder_at: { type: string, format: date-time, nullable: true }
+        priority:
+          type: string
+          nullable: true
+          enum: [asap, important, medium, low, null]
 
     AgendaItem:
       type: object
@@ -1012,11 +1033,29 @@ components:
         missed_call_count: { type: integer }
         churn_risk: { type: string, nullable: true }
         churn_score: { type: number, nullable: true }
+        dwh_partner_id: { type: integer, nullable: true, description: Key of the partner in the sales report }
+        active_since: { type: string, format: date-time, nullable: true, description: 'When the customer started: from the data warehouse, otherwise when the partner was created in the CRM' }
         website: { type: string, nullable: true }
         logo_url: { type: string, nullable: true, description: 'Set when the partner has a logo; fetch it from /crm/partners/{partnerId}/logo-img' }
         next_activity_type: { type: string, nullable: true, description: 'meeting, call or task: the earliest open dated one, overdue first' }
         next_activity_title: { type: string, nullable: true }
         next_activity_at: { type: string, format: date-time, nullable: true }
+
+    SalesReport:
+      type: object
+      required: [by_partner]
+      additionalProperties: true
+      properties:
+        by_partner:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              partner_id: { type: string, format: uuid, nullable: true, description: CRM partner id }
+              dwh_partner_id: { type: integer, nullable: true }
+              gross_turnover_pln: { type: string, nullable: true, description: Decimal string }
+              revenue_pln: { type: string, nullable: true, description: 'Margin, decimal string' }
 
     PartnerListResponse:
       type: object
@@ -1051,6 +1090,7 @@ components:
         contract_value: { type: string, nullable: true, description: Decimal string }
         contract_signed: { type: string, nullable: true }
         contract_expires: { type: string, nullable: true }
+        active_since: { type: string, format: date-time, nullable: true }
         notes: { type: string, nullable: true }
         tags:
           type: array

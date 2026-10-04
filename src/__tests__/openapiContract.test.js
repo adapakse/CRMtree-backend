@@ -155,6 +155,13 @@ describe("leads", () => {
       .send({ type: "note", title: "Notatka", priority: "asap" });
     expect(note.body.priority).toBeNull();
 
+    const edited = await request(app).patch(`/api/crm/leads/${leadId}/activities/${task.body.id}`).set(auth)
+      .send({ title: "Wysłać ofertę dziś", priority: "low", reminder_type: null, assigned_to: null });
+    expectDocumented(edited, "patch", "/crm/leads/{id}/activities/{actId}");
+    expect(edited.body.priority).toBe("low");
+    expect(edited.body.title).toBe("Wysłać ofertę dziś");
+    expect(edited.body.assigned_to).toBeNull();
+
     const wrong = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
       .send({ type: "task", title: "Zadanie", priority: "urgent" });
     expect(wrong.status).toBe(400);
@@ -219,6 +226,8 @@ describe("leads", () => {
   });
 });
 
+const listed0ActiveSince = (res) => !Number.isNaN(new Date(res.body.data[0].active_since).getTime());
+
 describe("partners", () => {
   test("create a partner and an activity (setup through the API)", async () => {
     const partner = await request(app).post("/api/crm/partners").set(auth)
@@ -244,6 +253,15 @@ describe("partners", () => {
     expect(closed.status).toBe(200);
     expectDocumented(closed, "patch", "/crm/partners/{partnerId}/activities/{actId}");
     expect(closed.body.status).toBe("closed");
+
+    const reprioritised = await request(app).patch(`/api/crm/partners/${partnerId}/activities/${task.body.id}`).set(auth)
+      .send({ priority: "low" });
+    expect(reprioritised.body.priority).toBe("low");
+    expect(listed0ActiveSince(await request(app).get("/api/crm/partners?search=Spec%20Partner").set(auth))).toBe(true);
+
+    const report = await request(app).get("/api/crm/sales-data/report?period_from=2026-01&period_to=2026-12").set(auth);
+    expect(report.status).toBe(200);
+    expectDocumented(report, "get", "/crm/sales-data/report");
 
     const listed = await request(app).get("/api/crm/partners?search=Spec%20Partner").set(auth);
     expectDocumented(listed, "get", "/crm/partners");
