@@ -20,8 +20,16 @@ const db = require('../config/database');
 const logger = require('../utils/logger');
 const emailUtil = require('../utils/email');
 const projectService = require('./projectService');
+const projectConfigService = require('./projectConfigService');
 
-const CONTENT_FIELDS   = ['name', 'description', 'type_id', 'priority_id', 'start_date', 'end_date', 'custom_values'];
+const CONTENT_FIELDS   = [
+  'name', 'description', 'type_id', 'priority_id', 'start_date', 'end_date', 'custom_values',
+  'reminder_type', 'reminder_at',
+];
+// A project task has a due date but no due time, so relative reminders are
+// sent at the hour the task is shown at in the calendar.
+const REMINDER_LOCAL_TIME = '09:00';
+const REMINDER_TIME_ZONE  = 'Europe/Warsaw';
 const STRUCTURE_FIELDS = ['parent_task_id', 'assignee_ids'];
 const PARTICIPANT_ROLES = ['internal_participant', 'external_participant'];
 
@@ -34,6 +42,7 @@ const TASK_SELECT = `
   SELECT t.id, t.project_id, t.task_number, t.name, t.description,
          t.type_id, t.status_id, t.priority_id, t.start_date, t.end_date,
          t.parent_task_id, t.custom_values, t.created_by, t.created_at, t.updated_at,
+         t.reminder_type, t.reminder_at,
          COALESCE((
            SELECT json_agg(json_build_object('user_id', u.id, 'display_name', u.display_name)
                            ORDER BY u.last_name, u.first_name)
@@ -224,6 +233,8 @@ function assertDateOrder(startDate, endDate) {
 }
 
 async function findDefaultStatusId(tenantId) {
+  // A task can be the first thing a tenant does in the module, before anyone read the configuration.
+  await projectConfigService.ensureDefaults(tenantId);
   const { rows: [status] } = await db.query(
     `SELECT id FROM project_task_statuses
      WHERE tenant_id = $1 AND is_active
@@ -233,6 +244,30 @@ async function findDefaultStatusId(tenantId) {
   );
   if (!status) throw httpError(409, 'Brak skonfigurowanych statusów zadań');
   return status.id;
+}
+
+// Stores the reminder choice and derives when it fires. Re-arming
+// (reminder_sent = false) happens on every call: the callers invoke this only
+// when the reminder settings or the due date changed.
+async function applyReminder(client, taskId, reminderType, customReminderAt) {
+  if (reminderType === 'custom' && !customReminderAt) {
+    throw httpError(400, 'Własne przypomnienie wymaga daty');
+  }
+  await client.query(
+    `UPDATE project_tasks
+     SET reminder_type = $2::text,
+         reminder_sent = FALSE,
+         reminder_at = CASE
+           WHEN $2::text IS NULL THEN NULL
+           WHEN $2::text = 'custom' THEN $3::timestamptz
+           WHEN end_date IS NULL THEN NULL
+           ELSE ((end_date + $4::time) AT TIME ZONE $5::text)
+                - make_interval(days => CASE $2::text WHEN '1d_before' THEN 1 WHEN '2d_before' THEN 2
+                                                     WHEN '3d_before' THEN 3 ELSE 0 END)
+         END
+     WHERE id = $1`,
+    [taskId, reminderType || null, customReminderAt || null, REMINDER_LOCAL_TIME, REMINDER_TIME_ZONE],
+  );
 }
 
 async function replaceAssignees(client, tenantId, taskId, assigneeIds) {
@@ -279,6 +314,7 @@ async function createTask({ tenantId, project, actor, input }) {
        JSON.stringify(customValues), actor.user.id],
     );
     await replaceAssignees(client, tenantId, created.id, assigneeIds);
+    if (input.reminder_type) await applyReminder(client, created.id, input.reminder_type, input.reminder_at);
     return created.id;
   });
 
@@ -342,8 +378,16 @@ async function updateTask({ tenantId, project, actor, taskId, changes }) {
   const addedAssigneeIds = nextAssigneeIds.filter((id) => !previousAssigneeIds.includes(id));
   const assigneesChanged = addedAssigneeIds.length > 0 || nextAssigneeIds.length !== previousAssigneeIds.length;
 
+  const nextReminderType = has('reminder_type') ? changes.reminder_type : task.reminder_type;
+  const reminderSettingsChanged = (has('reminder_type') && changes.reminder_type !== task.reminder_type)
+    || (nextReminderType === 'custom' && has('reminder_at')
+        && new Date(changes.reminder_at).getTime() !== new Date(task.reminder_at).getTime());
+  // A changed due date moves a relative reminder with it.
+  const reminderNeedsRecalculation = reminderSettingsChanged
+    || (Boolean(nextReminderType) && nextReminderType !== 'custom' && 'end_date' in next);
+
   const changedFields = Object.keys(next);
-  if (!changedFields.length && !assigneesChanged) {
+  if (!changedFields.length && !assigneesChanged && !reminderNeedsRecalculation) {
     return { task, before: null, after: null, addedAssigneeIds: [] };
   }
 
@@ -360,6 +404,9 @@ async function updateTask({ tenantId, project, actor, taskId, changes }) {
       );
     }
     if (assigneesChanged) await replaceAssignees(client, tenantId, taskId, nextAssigneeIds);
+    if (reminderNeedsRecalculation) {
+      await applyReminder(client, taskId, nextReminderType, has('reminder_at') ? changes.reminder_at : task.reminder_at);
+    }
   });
 
   const before = Object.fromEntries(changedFields.map((field) => [field, task[field]]));
@@ -367,6 +414,10 @@ async function updateTask({ tenantId, project, actor, taskId, changes }) {
   if (assigneesChanged) {
     before.assignee_ids = previousAssigneeIds;
     after.assignee_ids = nextAssigneeIds;
+  }
+  if (reminderSettingsChanged) {
+    before.reminder_type = task.reminder_type;
+    after.reminder_type = nextReminderType;
   }
   // The PM always sees the task; a participant keeps seeing it because only the PM changes assignees.
   const updated = await findVisibleTask({ projectId: project.id, taskId, actor });

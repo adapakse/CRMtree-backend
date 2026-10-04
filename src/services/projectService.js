@@ -72,14 +72,6 @@ async function generateUniqueKey(client, tenantId, name) {
   throw httpError(409, 'Nie udało się nadać prefiksu projektu');
 }
 
-async function assertPartnerInTenant(tenantId, partnerId) {
-  if (!partnerId) return;
-  const { rows } = await db.query(
-    'SELECT 1 FROM crm_partners WHERE id = $1 AND tenant_id = $2', [partnerId, tenantId],
-  );
-  if (!rows.length) throw httpError(400, 'Nie znaleziono partnera');
-}
-
 async function listProjects({ tenantId, user, status }) {
   const params = [tenantId, user.id];
   const conditions = ['p.tenant_id = $1'];
@@ -89,8 +81,8 @@ async function listProjects({ tenantId, user, status }) {
     conditions.push(`p.status = $${params.length}`);
   }
   const { rows } = await db.query(
-    `SELECT p.id, p.key, p.name, p.description, p.status, p.partner_id, p.created_at, p.closed_at,
-            partner.company AS partner_name,
+    `SELECT p.id, p.key, p.name, p.description, p.status, p.partner_id, p.lead_id, p.created_at, p.closed_at,
+            partner.company AS partner_name, lead.company AS lead_name,
             me.role AS my_role, me.access_level AS my_access_level,
             (SELECT COUNT(*)::int FROM project_members m WHERE m.project_id = p.id) AS member_count,
             (SELECT COUNT(*)::int FROM project_tasks t WHERE t.project_id = p.id)   AS task_count,
@@ -102,6 +94,7 @@ async function listProjects({ tenantId, user, status }) {
      FROM projects p
      LEFT JOIN project_members me ON me.project_id = p.id AND me.user_id = $2
      LEFT JOIN crm_partners partner ON partner.id = p.partner_id AND partner.tenant_id = p.tenant_id
+     LEFT JOIN crm_leads lead ON lead.id = p.lead_id AND lead.tenant_id = p.tenant_id
      WHERE ${conditions.join(' AND ')}
      ORDER BY p.status, p.name`,
     params,
@@ -109,15 +102,14 @@ async function listProjects({ tenantId, user, status }) {
   return rows;
 }
 
-async function createProject({ tenantId, user, name, description, partnerId }) {
-  await assertPartnerInTenant(tenantId, partnerId);
+async function createProject({ tenantId, user, name, description }) {
   try {
     return await db.transaction(async (client) => {
       const key = await generateUniqueKey(client, tenantId, name);
       const { rows: [project] } = await client.query(
-        `INSERT INTO projects (tenant_id, key, name, description, partner_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-        [tenantId, key, name, description || null, partnerId || null, user.id],
+        `INSERT INTO projects (tenant_id, key, name, description, created_by)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [tenantId, key, name, description || null, user.id],
       );
       await client.query(
         `INSERT INTO project_members (project_id, user_id, tenant_id, role, access_level, added_by)
@@ -137,9 +129,10 @@ async function createProject({ tenantId, user, name, description, partnerId }) {
 // not see it — callers answer 404 in both cases so project ids do not leak.
 async function loadProjectForUser({ tenantId, user, projectId }) {
   const { rows: [project] } = await db.query(
-    `SELECT p.*, partner.company AS partner_name
+    `SELECT p.*, partner.company AS partner_name, lead.company AS lead_name
      FROM projects p
      LEFT JOIN crm_partners partner ON partner.id = p.partner_id AND partner.tenant_id = p.tenant_id
+     LEFT JOIN crm_leads lead ON lead.id = p.lead_id AND lead.tenant_id = p.tenant_id
      WHERE p.id = $1 AND p.tenant_id = $2`,
     [projectId, tenantId],
   );
@@ -183,10 +176,9 @@ async function listProjectFields(projectId) {
 }
 
 async function updateProject({ tenantId, projectId, changes }) {
-  if (changes.partner_id) await assertPartnerInTenant(tenantId, changes.partner_id);
   const setClauses = [];
   const params = [];
-  for (const field of ['name', 'description', 'partner_id']) {
+  for (const field of ['name', 'description']) {
     if (changes[field] === undefined) continue;
     params.push(changes[field]);
     setClauses.push(`${field} = $${params.length}`);

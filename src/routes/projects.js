@@ -15,6 +15,8 @@
 // PATCH  /api/projects/:id/members/:userId
 // DELETE /api/projects/:id/members/:userId
 // PUT    /api/projects/:id/fields                — custom fields attached to the project
+// PUT    /api/projects/:id/crm-link              — link to one lead or one partner (or unlink)
+// GET    /api/projects/assigned-tasks            — open project tasks assigned to me / to given people
 // GET    /api/projects/:id/messages              — general project chat
 // POST   /api/projects/:id/messages
 
@@ -22,12 +24,13 @@ const router = require('express').Router();
 const { body, param, query } = require('express-validator');
 const audit = require('../services/auditService');
 const { requireAuth } = require('../middleware/auth');
-const { requireFeature } = require('../middleware/crm-rbac');
+const { requireFeature, loadCrmScope } = require('../middleware/crm-rbac');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { loadProject, requireProjectManager, requireOpenProject } = require('../middleware/project-access');
 const projectConfigService = require('../services/projectConfigService');
 const projectService = require('../services/projectService');
 const projectMessageService = require('../services/projectMessageService');
+const projectCrmLinkService = require('../services/projectCrmLinkService');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isAnyUUID = (field) => field.matches(UUID_RE).withMessage('Invalid UUID');
@@ -60,6 +63,29 @@ router.get('/config', async (req, res, next) => {
 });
 
 router.get(
+  '/assigned-tasks',
+  [
+    query('assigned_to').optional().isString(),
+    query('include_done').optional().isBoolean().toBoolean(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const requestedIds = (req.query.assigned_to || '').split(',').map((id) => id.trim()).filter(Boolean);
+      if (requestedIds.some((id) => !UUID_RE.test(id))) {
+        return res.status(400).json({ error: 'Invalid UUID' });
+      }
+      res.json(await projectCrmLinkService.listAssignedTasks({
+        tenantId: req.tenantId,
+        viewer: req.user,
+        assigneeIds: requestedIds.length ? requestedIds : [req.user.id],
+        includeDone: req.query.include_done === true,
+      }));
+    } catch (err) { next(err); }
+  },
+);
+
+router.get(
   '/',
   [query('status').optional().isIn(['open', 'closed', 'all'])],
   validate,
@@ -81,7 +107,6 @@ router.post(
   [
     body('name').isString().trim().notEmpty().isLength({ max: 200 }),
     body('description').optional({ nullable: true }).isString().isLength({ max: 20000 }),
-    isAnyUUID(body('partner_id').optional({ nullable: true })),
   ],
   validate,
   async (req, res, next) => {
@@ -94,7 +119,6 @@ router.post(
         user: req.user,
         name: req.body.name,
         description: req.body.description,
-        partnerId: req.body.partner_id,
       });
       req.project = project;
       await logProjectEvent(req, 'project_created', { afterState: { name: project.name } });
@@ -126,7 +150,6 @@ router.patch(
     projectId,
     body('name').optional().isString().trim().notEmpty().isLength({ max: 200 }),
     body('description').optional({ nullable: true }).isString().isLength({ max: 20000 }),
-    isAnyUUID(body('partner_id').optional({ nullable: true })),
   ],
   validate,
   loadProject, requireProjectManager, requireOpenProject,
@@ -136,10 +159,8 @@ router.patch(
         tenantId: req.tenantId, projectId: req.project.id, changes: req.body,
       });
       await logProjectEvent(req, 'project_updated', {
-        beforeState: {
-          name: req.project.name, description: req.project.description, partner_id: req.project.partner_id,
-        },
-        afterState: { name: project.name, description: project.description, partner_id: project.partner_id },
+        beforeState: { name: req.project.name, description: req.project.description },
+        afterState: { name: project.name, description: project.description },
       });
       res.json(project);
     } catch (err) { sendServiceError(err, res, next); }
@@ -271,6 +292,39 @@ router.put(
         afterState: { fields: fields.map((field) => ({ id: field.field_definition_id, is_required: field.is_required })) },
       });
       res.json(fields);
+    } catch (err) { sendServiceError(err, res, next); }
+  },
+);
+
+// Linking needs CRM access: the PM picks a lead or partner they can see in the CRM.
+function requireCrmAccess(req, res, next) {
+  if (req.user.is_admin || req.user.crm_role) return next();
+  return res.status(403).json({ error: 'Powiązanie z leadem lub partnerem wymaga dostępu do CRM' });
+}
+
+router.put(
+  '/:id/crm-link',
+  [
+    projectId,
+    body('lead_id').optional({ nullable: true }).isInt({ min: 1 }).toInt(),
+    body('partner_ref').optional({ nullable: true }).isString().isLength({ max: 40 }),
+  ],
+  validate,
+  loadProject, requireProjectManager, requireOpenProject, requireCrmAccess, loadCrmScope,
+  async (req, res, next) => {
+    try {
+      const link = await projectCrmLinkService.setCrmLink({
+        tenantId: req.tenantId,
+        projectId: req.project.id,
+        leadId: req.body.lead_id || null,
+        partnerRef: req.body.partner_ref || null,
+        crmScopeUserIds: req.crmScopeUserIds,
+      });
+      await logProjectEvent(req, 'project_updated', {
+        beforeState: { lead_id: req.project.lead_id, partner_id: req.project.partner_id },
+        afterState: { lead_id: link.lead_id, partner_id: link.partner_id },
+      });
+      res.json(link);
     } catch (err) { sendServiceError(err, res, next); }
   },
 );

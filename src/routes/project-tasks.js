@@ -65,6 +65,8 @@ function taskBodyRules({ isCreate }) {
     body('assignee_ids').optional().isArray({ max: 100 }),
     isAnyUUID(body('assignee_ids.*')),
     body('custom_values').optional().isObject(),
+    body('reminder_type').optional({ nullable: true }).isIn(['at_due', '1d_before', '2d_before', '3d_before', 'custom']),
+    body('reminder_at').optional({ nullable: true }).isISO8601(),
   ];
 }
 

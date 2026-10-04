@@ -112,11 +112,15 @@ async function seedDefaults(tenantId) {
   });
 }
 
-async function getConfig(tenantId) {
+async function ensureDefaults(tenantId) {
   const { rows: anyStatus } = await db.query(
     'SELECT 1 FROM project_task_statuses WHERE tenant_id = $1 LIMIT 1', [tenantId],
   );
   if (!anyStatus.length) await seedDefaults(tenantId);
+}
+
+async function getConfig(tenantId) {
+  await ensureDefaults(tenantId);
 
   const [statuses, types, priorities, transitions, fieldDefinitions] = await Promise.all([
     db.query(
@@ -304,6 +308,7 @@ module.exports = {
   STATUS_CATEGORIES,
   TRANSITION_ROLES,
   FIELD_TYPES,
+  ensureDefaults,
   getConfig,
   createDictionaryItem,
   updateDictionaryItem,
