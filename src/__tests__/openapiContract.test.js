@@ -145,6 +145,11 @@ describe("leads", () => {
     expectDocumented(activity, "post", "/crm/leads/{id}/activities");
     leadActivityId = activity.body.id;
 
+    const leadContacts = await request(app).post(`/api/crm/leads/${leadId}/contacts`).set(auth)
+      .send({ contacts: [{ contact_name: "Piotr Drugi", phone: "600300400" }] });
+    expectDocumented(leadContacts, "post", "/crm/leads/{id}/contacts");
+    expect(leadContacts.body).toHaveLength(1);
+
     const task = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
       .send({ type: "task", title: "Wysłać ofertę", assigned_to: user.id, priority: "asap" });
     expectDocumented(task, "post", "/crm/leads/{id}/activities");
@@ -272,6 +277,15 @@ describe("partners", () => {
     const listed = await request(app).get("/api/crm/partners?search=Spec%20Partner").set(auth);
     expectDocumented(listed, "get", "/crm/partners");
     expect(listed.body.data[0].next_activity_title).toBe("Telefon kontrolny");
+
+    const contacts = await request(app).post(`/api/crm/partners/${partnerId}/contacts`).set(auth)
+      .send({ contacts: [{ contact_name: "Ewa Druga", contact_title: "CFO", email: "ewa@spec.example", phone: "600200300" }, { contact_title: "pusty" }] });
+    expect(contacts.status).toBe(200);
+    expectDocumented(contacts, "post", "/crm/partners/{partnerId}/contacts");
+    expect(contacts.body.map((c) => c.contact_name)).toEqual(["Ewa Druga"]);
+    const card = await request(app).get(`/api/crm/partners/${partnerId}`).set(auth);
+    expect(card.body.extra_contacts.map((c) => c.email)).toEqual(["ewa@spec.example"]);
+    expect((await request(app).get(`/api/crm/partners/${partnerId}/contacts`).set(auth)).body).toHaveLength(1);
 
     const renamed = await request(app).patch(`/api/crm/partners/${partnerId}`).set(auth)
       .send({ phone: "+48 600 100 300", contact_title: null, address: "ul. Testowa 1" });

@@ -443,6 +443,30 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { description: The lead has no logo }
 
+  /crm/leads/{id}/contacts:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    post:
+      tags: [leads]
+      operationId: replaceLeadContacts
+      summary: Replace the lead's additional contacts with the given set
+      description: Rows without a name, an email and a phone are skipped. The main contact stays on the lead itself.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContactsReplace' }
+      responses:
+        '200':
+          description: The contacts now stored
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ExtraContact' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
   /crm/leads/{id}/activities:
     parameters:
       - { name: id, in: path, required: true, schema: { type: integer } }
@@ -624,6 +648,31 @@ paths:
               schema: { $ref: '#/components/schemas/SalesReport' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+
+  /crm/partners/{partnerId}/contacts:
+    parameters:
+      - $ref: '#/components/parameters/PartnerId'
+    post:
+      tags: [partners]
+      operationId: replacePartnerContacts
+      summary: Replace the partner's additional contacts with the given set
+      description: Same contract as the lead's contacts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContactsReplace' }
+      responses:
+        '200':
+          description: The contacts now stored
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ExtraContact' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
 
   /crm/partners/{partnerId}/logo-img:
     parameters:
@@ -979,6 +1028,20 @@ components:
         address: { type: string, nullable: true }
         industry: { type: string, nullable: true }
         notes: { type: string, nullable: true }
+
+    ContactsReplace:
+      type: object
+      required: [contacts]
+      properties:
+        contacts:
+          type: array
+          items:
+            type: object
+            properties:
+              contact_name: { type: string, nullable: true }
+              contact_title: { type: string, nullable: true }
+              email: { type: string, nullable: true }
+              phone: { type: string, nullable: true }
 
     ExtraContact:
       type: object

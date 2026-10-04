@@ -955,6 +955,58 @@ function computeReminderAt(activity_at, reminder_type, reminder_at_custom) {
 
 // ── POST /crm/partners/:id/activities ─────────────────────────────────────────
 // Przy typie 'meeting' automatycznie tworzy event w Google Calendar.
+// ── Additional contacts of a partner ──────────────────────────────
+// The same contract as the lead's contacts (crm-leads.js): GET lists them,
+// POST replaces the whole set with { contacts: [...] }. The main contact
+// stays on the partner itself.
+router.get("/:id/contacts", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const partnerId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
+    if (!partnerId) return res.status(404).json({ error: "Partner nie znaleziony" });
+    const { rows } = await pool.query(
+      "SELECT * FROM crm_partner_contacts WHERE partner_id = $1 AND tenant_id = $2 ORDER BY created_at, id",
+      [partnerId, req.tenantId]
+    );
+    res.json(rows);
+  } catch (err) {
+    logger.error("GET /crm/partners/:id/contacts error", { error: err.message });
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+router.post("/:id/contacts", requireAuth, crmAuth, async (req, res) => {
+  const { contacts } = req.body;
+  if (!Array.isArray(contacts)) return res.status(400).json({ error: "contacts must be array" });
+  const client = await pool.connect();
+  try {
+    const partnerId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
+    if (!partnerId) return res.status(404).json({ error: "Partner nie znaleziony" });
+
+    // One transaction: a failed insert must not leave the partner without
+    // the contacts it had.
+    await client.query("BEGIN");
+    await client.query("DELETE FROM crm_partner_contacts WHERE partner_id = $1 AND tenant_id = $2", [partnerId, req.tenantId]);
+    const inserted = [];
+    for (const contact of contacts) {
+      if (!contact.contact_name && !contact.email && !contact.phone) continue;
+      const { rows } = await client.query(
+        `INSERT INTO crm_partner_contacts (partner_id, contact_name, contact_title, email, phone, tenant_id)
+         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+        [partnerId, contact.contact_name || null, contact.contact_title || null, contact.email || null, contact.phone || null, req.tenantId]
+      );
+      inserted.push(rows[0]);
+    }
+    await client.query("COMMIT");
+    res.json(inserted);
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    logger.error("POST /crm/partners/:id/contacts error", { error: err.message });
+    res.status(500).json({ error: "Błąd serwera" });
+  } finally {
+    client.release();
+  }
+});
+
 // ── GET /api/crm/partners/:id/logo-img ── the logo as image bytes ──
 // Same as the lead route: streamed from blob storage, so the client needs no
 // SAS URL.
