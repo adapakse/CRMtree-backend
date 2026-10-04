@@ -352,6 +352,22 @@ między zadaniami, licznik nieprzeczytanych wiadomości, edycja i usuwanie wiado
 
 ---
 
+## Wielojęzyczność (i18n)
+
+Aplikacja jest tłumaczona na 10 języków (`pl, en, de, it, es, fr, ro, ru, sl, hr`), polski jest
+źródłowy. Zasady i słowniczek: `crmtree-frontend/docs/i18n.md`.
+
+- Lista języków: `src/config/locales.js` (musi zgadzać się z migracją 0312 i frontendem).
+- Język użytkownika: `users.locale` (NULL = domyślny tenanta), ustawiany przez
+  `PUT /api/profile/locale`. Domyślny język tenanta: `tenants.default_locale`, ustawiany przez
+  admina tenanta (`PUT /api/admin/settings/default-locale`). `/api/auth/me` zwraca oba.
+- `resolveLocale()` wybiera język, w którym zwracamy się do danej osoby. Maile i przypomnienia
+  mają iść w języku **odbiorcy**, faktura PDF w języku tenanta.
+- **Stan na 2026-10-04:** jest tylko przechowywanie i API języka. Komunikaty błędów, szablony
+  maili i PDF są nadal po polsku — ich tłumaczenie idzie etapami razem z modułami frontendu.
+
+---
+
 ## Code quality standards
 
 ### Language
