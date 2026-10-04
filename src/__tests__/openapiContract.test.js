@@ -234,6 +234,24 @@ describe("partners", () => {
       .send({ type: "call", title: "Telefon kontrolny", activity_at: new Date(Date.now() + 2 * 86400000).toISOString() });
     expect(activity.status).toBe(201);
     expectDocumented(activity, "post", "/crm/partners/{partnerId}/activities");
+
+    const task = await request(app).post(`/api/crm/partners/${partnerId}/activities`).set(auth)
+      .send({ type: "task", title: "Odnowić umowę", priority: "important" });
+    expect(task.body.priority).toBe("important");
+
+    const closed = await request(app).patch(`/api/crm/partners/${partnerId}/activities/${task.body.id}`).set(auth)
+      .send({ status: "closed", close_comment: "Zrobione" });
+    expect(closed.status).toBe(200);
+    expectDocumented(closed, "patch", "/crm/partners/{partnerId}/activities/{actId}");
+    expect(closed.body.status).toBe("closed");
+
+    const listed = await request(app).get("/api/crm/partners?search=Spec%20Partner").set(auth);
+    expectDocumented(listed, "get", "/crm/partners");
+    expect(listed.body.data[0].next_activity_title).toBe("Telefon kontrolny");
+
+    const logo = await request(app).get(`/api/crm/partners/${partnerId}/logo-img`).set(auth);
+    expect(logo.status).toBe(404);
+    expectDocumented(logo, "get", "/crm/partners/{partnerId}/logo-img");
   });
 
   test("GET /crm/partners/{partnerId} and its activities", async () => {

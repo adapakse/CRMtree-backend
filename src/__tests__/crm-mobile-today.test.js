@@ -127,6 +127,8 @@ describe("GET /api/crm/mobile/today", () => {
     expect(res.body.attention).toEqual([{
       lead_id: String(users.myLead),
       company: "Vantex Sp. z o.o.",
+      logo_url: null,
+      website: null,
       new_email_count: 1,
       unread_sms_count: 0,
       unread_whatsapp_count: 0,

@@ -545,6 +545,45 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
 
+  /crm/partners/{partnerId}/logo-img:
+    parameters:
+      - $ref: '#/components/parameters/PartnerId'
+    get:
+      tags: [partners]
+      operationId: getPartnerLogo
+      summary: The company logo of a partner, as image bytes
+      responses:
+        '200':
+          description: The image
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { description: The partner has no logo }
+
+  /crm/partners/{partnerId}/activities/{actId}:
+    parameters:
+      - $ref: '#/components/parameters/PartnerId'
+      - { name: actId, in: path, required: true, schema: { type: integer } }
+    patch:
+      tags: [activities]
+      operationId: updatePartnerActivity
+      summary: Edit a partner activity or close it (status closed + close_comment)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivityUpdate' }
+      responses:
+        '200':
+          description: Updated activity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Activity' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
   /crm/partners/{partnerId}/activities:
     parameters:
       - $ref: '#/components/parameters/PartnerId'
@@ -973,6 +1012,11 @@ components:
         missed_call_count: { type: integer }
         churn_risk: { type: string, nullable: true }
         churn_score: { type: number, nullable: true }
+        website: { type: string, nullable: true }
+        logo_url: { type: string, nullable: true, description: 'Set when the partner has a logo; fetch it from /crm/partners/{partnerId}/logo-img' }
+        next_activity_type: { type: string, nullable: true, description: 'meeting, call or task: the earliest open dated one, overdue first' }
+        next_activity_title: { type: string, nullable: true }
+        next_activity_at: { type: string, format: date-time, nullable: true }
 
     PartnerListResponse:
       type: object
@@ -1059,6 +1103,8 @@ components:
       properties:
         lead_id: { type: string }
         company: { type: string }
+        logo_url: { type: string, nullable: true, description: 'Set when the lead has a logo; fetch it from /crm/leads/{id}/logo-img' }
+        website: { type: string, nullable: true }
         new_email_count: { type: integer }
         unread_sms_count: { type: integer }
         unread_whatsapp_count: { type: integer }

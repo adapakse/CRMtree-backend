@@ -107,7 +107,7 @@ router.get('/today',
         db.query(agendaQuery({ ...PARTNER_AGENDA, ...overdue }), [...base, req.query.day_start]),
         db.query(`
           SELECT * FROM (
-            SELECT l.id::text AS lead_id, l.company, l.updated_at,
+            SELECT l.id::text AS lead_id, l.company, l.updated_at, l.logo_url, l.website,
               (SELECT COUNT(*) FROM crm_lead_activities
                 WHERE lead_id = l.id AND tenant_id = l.tenant_id AND type = 'email' AND is_read = false)::int AS new_email_count,
               (SELECT COUNT(*) FROM sms_messages
