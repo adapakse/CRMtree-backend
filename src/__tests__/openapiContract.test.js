@@ -221,6 +221,12 @@ describe("leads", () => {
     expectDocumented(res, "get", "/admin/settings");
   });
 
+  test("GET /crm/leads/sources", async () => {
+    const res = await request(app).get("/api/crm/leads/sources").set(auth);
+    expect(res.status).toBe(200);
+    expectDocumented(res, "get", "/crm/leads/sources");
+  });
+
   test("GET /crm/leads/users", async () => {
     expectDocumented(await request(app).get("/api/crm/leads/users").set(auth), "get", "/crm/leads/users");
   });

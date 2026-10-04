@@ -257,6 +257,8 @@ paths:
         - { name: stage, in: query, schema: { $ref: '#/components/schemas/LeadStage' }, description: Without it archived leads are hidden }
         - { name: mine, in: query, schema: { type: boolean } }
         - { name: hot, in: query, schema: { type: boolean } }
+        - { name: hold_only, in: query, schema: { type: boolean } }
+        - { name: source, in: query, schema: { type: string }, description: 'A source value, or several separated by commas' }
         - { name: search, in: query, schema: { type: string }, description: 'Matches company, contact, email, NIP, phone, notes and tags' }
         - { name: assigned_to, in: query, schema: { type: string }, description: User id or comma-separated ids (managers only) }
         - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
@@ -306,6 +308,27 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SettingsResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /crm/leads/sources:
+    get:
+      tags: [leads]
+      operationId: listLeadSources
+      summary: The company's lead sources, for the source filter
+      responses:
+        '200':
+          description: Sources
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [value, label]
+                  additionalProperties: true
+                  properties:
+                    value: { type: string }
+                    label: { type: string }
         '401': { $ref: '#/components/responses/Error' }
 
   /crm/leads/users:
