@@ -35,6 +35,14 @@
     "intro": "Пользователем <strong>{assignerName}</strong> вам назначена активность:",
     "subject": "[CRMtree] Новая задача CRM: {activityTitle}"
   },
+  "crmOwnerAssigned": {
+    "headingLead": "Вам назначен лид",
+    "headingPartner": "Вам назначен партнёр",
+    "introLead": "Пользователем <strong>{assignerName}</strong> вам назначен лид:",
+    "introPartner": "Пользователем <strong>{assignerName}</strong> вам назначен партнёр:",
+    "subjectLead": "[CRMtree] Новый лид: {sourceName}",
+    "subjectPartner": "[CRMtree] Новый партнёр: {sourceName}"
+  },
   "documentSigned": {
     "heading": "Документ подписан",
     "intro": "Документ <strong>{documentName}</strong> успешно подписан электронной подписью.",

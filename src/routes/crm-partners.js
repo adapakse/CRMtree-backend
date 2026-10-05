@@ -875,13 +875,11 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
       logger.warn('Błąd zapisu audit logu dla partnera', { error: auditErr.message, partner_id: id });
     }
 
-    // The partner has a new owner: tell them on their phone.
+    // The partner has a new owner. Not awaited: notifying must not slow the request down.
     if (r.rows[0].manager_id && r.rows[0].manager_id !== beforeSnap.manager_id && r.rows[0].manager_id !== req.user.id) {
-      pushService.sendToUsers({
-        userIds: [r.rows[0].manager_id],
-        kind: 'partnerOwnerAssigned',
-        params: { sourceName: r.rows[0].company || '', assignerName: req.user.display_name || req.user.email },
-        data: { source_type: 'partner', source_id: r.rows[0].id },
+      notifyNewOwner({
+        ownerId: r.rows[0].manager_id, assigner: req.user, tenantId: req.tenantId,
+        sourceType: 'partner', sourceId: r.rows[0].id, sourceName: r.rows[0].company,
       });
     }
 

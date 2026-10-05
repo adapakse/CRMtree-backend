@@ -35,6 +35,14 @@
     "intro": "<strong>{assignerName}</strong> hat Ihnen eine Aktivität zugewiesen:",
     "subject": "[CRMtree] Neue CRM-Aufgabe: {activityTitle}"
   },
+  "crmOwnerAssigned": {
+    "headingLead": "Ihnen wurde ein Lead zugewiesen",
+    "headingPartner": "Ihnen wurde ein Partner zugewiesen",
+    "introLead": "<strong>{assignerName}</strong> hat Ihnen einen Lead zugewiesen:",
+    "introPartner": "<strong>{assignerName}</strong> hat Ihnen einen Partner zugewiesen:",
+    "subjectLead": "[CRMtree] Neuer Lead: {sourceName}",
+    "subjectPartner": "[CRMtree] Neuer Partner: {sourceName}"
+  },
   "documentSigned": {
     "heading": "Das Dokument wurde unterzeichnet",
     "intro": "Das Dokument <strong>{documentName}</strong> wurde erfolgreich elektronisch unterzeichnet.",

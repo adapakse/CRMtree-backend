@@ -620,6 +620,45 @@ async function sendCrmActivityAssigned({
 }
 
 /**
+ * The user became the owner of a lead or a partner.
+ */
+async function sendCrmOwnerAssigned({
+  to,
+  locale,
+  ownerName,
+  assignerName,
+  sourceName,
+  sourceType,  // 'lead' | 'partner'
+  sourceId,
+}) {
+  const t = emailTexts(locale);
+  const isPartner = sourceType === 'partner';
+  const variant = isPartner ? 'Partner' : 'Lead';
+  const url = `${BASE_URL}/crm/${isPartner ? 'partners' : 'leads'}/${sourceId}`;
+
+  await module.exports.sendMail({
+    to,
+    subject: t(`crmOwnerAssigned.subject${variant}`, { sourceName }),
+    html: template(locale, `
+      <h2>${t(`crmOwnerAssigned.heading${variant}`)}</h2>
+      <p>${t('common.greeting', { name: escapeHtml(ownerName) })}</p>
+      <p>${t(`crmOwnerAssigned.intro${variant}`, { assignerName: escapeHtml(assignerName) })}</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">${t(isPartner ? 'labels.partner' : 'labels.lead')}</span>
+          <span class="info-val">${escapeHtml(sourceName)}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('labels.assigner')}</span>
+          <span class="info-val">${escapeHtml(assignerName)}</span>
+        </div>
+      </div>
+      <a href="${url}" class="btn">${t(isPartner ? 'common.openPartner' : 'common.openLead')}</a>
+    `),
+  });
+}
+
+/**
  * Reminder about an upcoming CRM activity (of a lead or a partner),
  * sent by crmReminderService.js.
  */
@@ -839,6 +878,7 @@ module.exports = {
   sendDocumentSigned,
   sendUserInvitation,
   sendCrmActivityAssigned,
+  sendCrmOwnerAssigned,
   sendActivityReminder,
   sendSubstitutionAssigned,
 };
