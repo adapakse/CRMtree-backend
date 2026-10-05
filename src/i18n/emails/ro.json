@@ -35,6 +35,14 @@
     "intro": "<strong>{assignerName}</strong> v-a atribuit o activitate:",
     "subject": "[CRMtree] Sarcină CRM nouă: {activityTitle}"
   },
+  "crmOwnerAssigned": {
+    "headingLead": "Vi s-a atribuit un lead",
+    "headingPartner": "Vi s-a atribuit un partener",
+    "introLead": "<strong>{assignerName}</strong> v-a atribuit un lead:",
+    "introPartner": "<strong>{assignerName}</strong> v-a atribuit un partener:",
+    "subjectLead": "[CRMtree] Lead nou: {sourceName}",
+    "subjectPartner": "[CRMtree] Partener nou: {sourceName}"
+  },
   "documentSigned": {
     "heading": "Documentul a fost semnat",
     "intro": "Documentul <strong>{documentName}</strong> a fost semnat electronic cu succes.",

@@ -35,6 +35,14 @@
     "intro": "<strong>{assignerName}</strong> vam dodeljuje aktivnost:",
     "subject": "[CRMtree] Nova naloga CRM: {activityTitle}"
   },
+  "crmOwnerAssigned": {
+    "headingLead": "Dodeljen vam je lead",
+    "headingPartner": "Dodeljen vam je partner",
+    "introLead": "<strong>{assignerName}</strong> vam dodeljuje lead:",
+    "introPartner": "<strong>{assignerName}</strong> vam dodeljuje partnerja:",
+    "subjectLead": "[CRMtree] Nov lead: {sourceName}",
+    "subjectPartner": "[CRMtree] Nov partner: {sourceName}"
+  },
   "documentSigned": {
     "heading": "Dokument je podpisan",
     "intro": "Dokument <strong>{documentName}</strong> je bil uspešno elektronsko podpisan.",

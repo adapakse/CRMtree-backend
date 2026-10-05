@@ -139,6 +139,48 @@ describe('project task assignment', () => {
   });
 });
 
+describe('new owner of a lead or a partner', () => {
+  const { notifyNewOwner } = require('../services/crmOwnerNotification');
+  const assigner = { display_name: 'Anna <Boss>', email: 'anna@example.com' };
+
+  test('the new owner gets an e-mail in their own language, linking to the card', async () => {
+    await notifyNewOwner({
+      ownerId: ownEnglish.id, assigner, tenantId: tenantIds.pl,
+      sourceType: 'lead', sourceId: 12, sourceName: 'Vantex & Co',
+    });
+    await notifyNewOwner({
+      ownerId: noChoicePolishTenant.id, assigner, tenantId: tenantIds.pl,
+      sourceType: 'partner', sourceId: 34, sourceName: 'Alpine Travel',
+    });
+
+    const [english] = mailTo(ownEnglish);
+    expect(english.subject).toBe('[CRMtree] New lead: Vantex & Co');
+    expect(english.html).toContain('You are the new owner of a lead');
+    expect(english.html).toContain('<strong>Anna &lt;Boss&gt;</strong> has assigned a lead to you:');
+    expect(english.html).toContain('<span class="info-val">Vantex &amp; Co</span>');
+    expect(english.html).toContain('/crm/leads/12"');
+
+    const [polish] = mailTo(noChoicePolishTenant);
+    expect(polish.subject).toBe('[CRMtree] Nowy partner: Alpine Travel');
+    expect(polish.html).toContain('Jesteś nowym opiekunem partnera');
+    expect(polish.html).toContain('/crm/partners/34"');
+  });
+
+  test('a user of another tenant is never written to, and a failing mail server breaks nothing', async () => {
+    await notifyNewOwner({
+      ownerId: noChoiceEnglishTenant.id, assigner, tenantId: tenantIds.pl,
+      sourceType: 'lead', sourceId: 12, sourceName: 'Vantex',
+    });
+    expect(sendMailSpy).not.toHaveBeenCalled();
+
+    sendMailSpy.mockRejectedValue(new Error('smtp down'));
+    await expect(notifyNewOwner({
+      ownerId: ownEnglish.id, assigner, tenantId: tenantIds.pl,
+      sourceType: 'lead', sourceId: 12, sourceName: 'Vantex',
+    })).resolves.toBeUndefined();
+  });
+});
+
 describe('substitution route', () => {
   const day = (offsetDays) => {
     const date = new Date();

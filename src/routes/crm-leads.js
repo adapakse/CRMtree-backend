@@ -17,6 +17,7 @@ const crmLeadHoldSvc = require('../services/crmLeadHoldService');
 const email          = require('../utils/email');
 const pushService    = require('../services/pushService');
 const { resolveLocale } = require('../config/locales');
+const { notifyNewOwner } = require('../services/crmOwnerNotification');
 const { autoSaveLeadContacts } = require('../services/gmailProcessor');
 
 router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope, loadCrmModuleGrants('leads'));
@@ -1297,13 +1298,11 @@ router.patch('/:id',
         }
       } catch (auditErr) { /* nie blokuj odpowiedzi */ }
 
-      // The lead has a new owner: tell them on their phone.
+      // The lead has a new owner. Not awaited: notifying must not slow the request down.
       if (rows[0].assigned_to && rows[0].assigned_to !== existing[0].assigned_to && rows[0].assigned_to !== req.user.id) {
-        pushService.sendToUsers({
-          userIds: [rows[0].assigned_to],
-          kind: 'leadOwnerAssigned',
-          params: { sourceName: rows[0].company, assignerName: req.user.display_name || req.user.email },
-          data: { source_type: 'lead', source_id: rows[0].id },
+        notifyNewOwner({
+          ownerId: rows[0].assigned_to, assigner: req.user, tenantId: req.tenantId,
+          sourceType: 'lead', sourceId: rows[0].id, sourceName: rows[0].company,
         });
       }
 
