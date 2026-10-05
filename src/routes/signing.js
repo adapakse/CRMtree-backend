@@ -76,6 +76,10 @@ router.post(
 
       await perms.assertCanFull(req.user.id, doc);
 
+      // Signing stamps signing_date with today, and for an invoice that column is the issue date.
+      if (doc.doc_type === "invoice")
+        return res.status(400).json({ error: "An invoice cannot be sent for signing" });
+
       const training = await isTrainingMode(req.tenantId);
 
       if (!training && !doc.blob_path)
