@@ -4,7 +4,8 @@
 // KSeF configuration by the tenant admin (not the super admin).
 //
 // GET    /                  — settings and companies (never the token, only its last 4 characters)
-// PUT    /settings          — how many days the first sync of a new company goes back
+// PUT    /settings          — how many days the first sync of a new company goes back, and the
+//                             access group of documents registered from KSeF invoices
 // POST   /companies         — add a company: the tenant's NIP + its KSeF token (verified against KSeF)
 // PATCH  /companies/:id     — rename, or replace the token (verified; re-activates the company)
 // DELETE /companies/:id     — remove a company; its synced invoices stay
@@ -19,6 +20,7 @@ const { requireFeature } = require('../middleware/crm-rbac');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { requireFinanceEnabled } = require('../middleware/project-access');
 const ksefCompanyService = require('../services/ksefCompanyService');
+const invoiceDocumentService = require('../services/invoiceDocumentService');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isAnyUUID = (field) => field.matches(UUID_RE).withMessage('Invalid UUID');
@@ -52,16 +54,29 @@ router.get('/', async (req, res, next) => {
 
 router.put(
   '/settings',
-  [body('initial_sync_days').isInt({
-    min: ksefCompanyService.MIN_INITIAL_SYNC_DAYS, max: ksefCompanyService.MAX_INITIAL_SYNC_DAYS,
-  }).toInt()],
+  [
+    body('initial_sync_days').optional().isInt({
+      min: ksefCompanyService.MIN_INITIAL_SYNC_DAYS, max: ksefCompanyService.MAX_INITIAL_SYNC_DAYS,
+    }).toInt(),
+    // null clears the choice: invoices are then not registered as documents.
+    isAnyUUID(body('invoice_documents_group_id').optional({ nullable: true })),
+  ],
   validate,
   async (req, res, next) => {
     try {
-      await ksefCompanyService.setInitialSyncDays(req.tenantId, req.body.initial_sync_days, req.user.id);
-      await logConfigEvent(req, 'ksef_settings', { initial_sync_days: req.body.initial_sync_days });
+      const { initial_sync_days: initialSyncDays, invoice_documents_group_id: groupId } = req.body;
+      if (initialSyncDays === undefined && groupId === undefined) {
+        return res.status(400).json({ error: 'No settings provided' });
+      }
+      if (groupId !== undefined) await invoiceDocumentService.setInvoiceGroup(req.tenantId, groupId, req.user.id);
+      if (initialSyncDays !== undefined) {
+        await ksefCompanyService.setInitialSyncDays(req.tenantId, initialSyncDays, req.user.id);
+      }
+      await logConfigEvent(req, 'ksef_settings', {
+        initial_sync_days: initialSyncDays, invoice_documents_group_id: groupId,
+      });
       res.json(await ksefCompanyService.getConfig(req.tenantId));
-    } catch (err) { next(err); }
+    } catch (err) { sendServiceError(err, res, next); }
   },
 );
 

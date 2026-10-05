@@ -13,6 +13,7 @@
 const db = require('../config/database');
 const { encrypt } = require('../utils/encrypt');
 const ksefApiClient = require('./ksefApiClient');
+const invoiceDocumentService = require('./invoiceDocumentService');
 
 const INITIAL_SYNC_DAYS_KEY     = 'ksef_initial_sync_days';
 const DEFAULT_INITIAL_SYNC_DAYS = 30;
@@ -74,6 +75,7 @@ async function getConfig(tenantId) {
     is_configured: ksefApiClient.isConfigured(),
     environment: ksefApiClient.getEnvironment(),
     initial_sync_days: await getInitialSyncDays(tenantId),
+    invoice_documents_group: await invoiceDocumentService.getInvoiceGroup(tenantId),
     companies: await listCompanies(tenantId),
   };
 }

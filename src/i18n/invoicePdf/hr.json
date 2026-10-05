@@ -1,0 +1,50 @@
+{
+  "address": "Adresa",
+  "buyer": "Kupac",
+  "footer": "Generirano u sustavu CRMtree {date} na temelju podataka preuzetih iz KSeF-a.",
+  "issueDate": "Datum izdavanja",
+  "ksefNumber": "KSeF broj",
+  "lines": {
+    "empty": "Podaci računa ne sadrže stavke.",
+    "name": "Naziv robe ili usluge",
+    "netAmount": "Neto vrijednost",
+    "number": "R. br.",
+    "quantity": "Količina",
+    "unit": "Jed. mj.",
+    "unitNetPrice": "Jed. neto cijena",
+    "vatRate": "Stopa PDV-a"
+  },
+  "notice": {
+    "body": "Ovaj dokument je vizualizacija podataka računa preuzetih iz poljskog Nacionalnog sustava e-računa (KSeF). Ovo nije izvorni dokument – izvornik je strukturirani račun pohranjen u KSeF-u.",
+    "title": "Vizualizacija računa iz KSeF-a – ovo nije izvorni dokument"
+  },
+  "payment": {
+    "amountDue": "Za platiti",
+    "bankAccount": "Bankovni račun",
+    "dueDate": "Rok plaćanja",
+    "form": "Način plaćanja",
+    "paid": "Plaćeno",
+    "paidPartially": "djelomično",
+    "paidYes": "da",
+    "paymentDate": "Datum plaćanja",
+    "title": "Plaćanje"
+  },
+  "paymentForm": {
+    "card": "kartica",
+    "cash": "gotovina",
+    "cheque": "ček",
+    "credit": "kredit",
+    "mobile": "mobilno plaćanje",
+    "transfer": "bankovni prijenos",
+    "voucher": "vaučer"
+  },
+  "saleDate": "Datum prodaje",
+  "seller": "Prodavatelj",
+  "taxId": "Porezni broj (NIP)",
+  "title": "Račun {invoiceNumber}",
+  "totals": {
+    "gross": "Ukupno bruto",
+    "net": "Ukupno neto",
+    "vat": "Ukupno PDV"
+  }
+}

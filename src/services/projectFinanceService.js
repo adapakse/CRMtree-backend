@@ -25,6 +25,18 @@
 //   - linking is never blocked — see ksefInvoiceService for how over-allocation
 //     is reported instead.
 //
+// A cost item MAY also be linked to an invoice DOCUMENT (document_id — a
+// document of type invoice in the Documents module):
+//   - a KSeF-linked item always points at the document registered from its
+//     invoice (or at none while the invoice has no document). Linking a KSeF
+//     invoice registers it in Documents when the tenant has chosen an access
+//     group for invoice documents; attaching the document of a KSeF invoice is
+//     the same as linking that invoice, with the same permission;
+//   - a document entered by hand is attached and detached by whoever has
+//     finance write access and can open the document in Documents;
+//   - other_links lists every other cost item sharing the KSeF invoice or the
+//     document, so the same rules apply to both kinds.
+//
 // Changes are recorded in audit_logs by the routes. Their metadata carries no
 // task_id on purpose: the task history is read by everyone who sees the task.
 
@@ -32,6 +44,7 @@ const db = require('../config/database');
 const projectConfigService = require('./projectConfigService');
 const exchangeRateService = require('./exchangeRateService');
 const ksefInvoiceService = require('./ksefInvoiceService');
+const invoiceDocumentService = require('./invoiceDocumentService');
 const { roundMoney, buildTotals, buildCategoryRows, buildTaskRows } = require('./projectFinanceCalculations');
 
 const COST_STATUSES    = ['planned', 'incurred'];
@@ -46,7 +59,7 @@ const COST_ITEM_SELECT = `
          c.task_id, t.task_number, t.name AS task_name,
          c.supplier_name, c.document_number, c.status,
          c.original_amount::float AS original_amount, c.original_currency,
-         c.exchange_rate::float AS exchange_rate, c.exchange_rate_date, c.ksef_invoice_id,
+         c.exchange_rate::float AS exchange_rate, c.exchange_rate_date, c.ksef_invoice_id, c.document_id,
          c.created_by, author.display_name AS created_by_name, c.created_at, c.updated_at
   FROM project_cost_items c
   JOIN project_cost_categories category ON category.id = c.category_id
@@ -63,12 +76,15 @@ const REVENUE_ITEM_SELECT = `
 const COST_AUDIT_FIELDS = [
   'date', 'amount', 'category_id', 'task_id', 'status', 'description', 'supplier_name',
   'document_number', 'original_amount', 'original_currency', 'exchange_rate', 'exchange_rate_date',
-  'ksef_invoice_id',
+  'ksef_invoice_id', 'document_id',
 ];
 const MAX_SUPPLIER_NAME_LENGTH   = 200;
 const MAX_DOCUMENT_NUMBER_LENGTH = 100;
 const KSEF_LINKING_DENIED =
   'Linking KSeF invoices requires the KSeF invoices permission and write access to the project finance';
+const DOCUMENT_LINKING_DENIED =
+  'Linking an invoice document requires write access to the project finance and access to the document';
+const DOCUMENT_INVOICE_MISMATCH = 'The document does not belong to this KSeF invoice';
 const REVENUE_AUDIT_FIELDS = ['date', 'amount', 'status', 'description'];
 
 function httpError(status, message) {
@@ -341,11 +357,11 @@ async function setTaskPlannedCost({ projectId, taskId, plannedCost }) {
 
 // ── Cost items ──────────────────────────────────────────────────────────
 
-async function listCostItems({ projectId, access, userId, taskId }) {
+async function listCostItems({ projectId, access, user, taskId }) {
   const params = [projectId];
   const conditions = ['c.project_id = $1'];
   if (!access.canRead) {
-    params.push(userId);
+    params.push(user.id);
     conditions.push(`c.created_by = $${params.length}`);
   }
   if (taskId) {
@@ -356,11 +372,11 @@ async function listCostItems({ projectId, access, userId, taskId }) {
     `${COST_ITEM_SELECT} WHERE ${conditions.join(' AND ')} ORDER BY c.cost_date DESC, c.created_at DESC`,
     params,
   );
-  return withInvoiceInfo(rows, access);
+  return withInvoiceInfo(rows, access, user);
 }
 
-function withInvoiceInfo(items, access) {
-  return ksefInvoiceService.attachInvoiceInfo(items, { canSeeInvoices: access.canRead });
+function withInvoiceInfo(items, access, user) {
+  return ksefInvoiceService.attachInvoiceInfo(items, { canSeeInvoices: access.canRead, user });
 }
 
 // Returns null when the item does not exist in the project or the caller may
@@ -405,6 +421,42 @@ function canUseKsefInvoices(user, access) {
   return access.canWrite && Boolean(user.is_admin || user.can_view_ksef_invoices);
 }
 
+async function loadInvoiceDocument(tenantId, documentId) {
+  const document = await invoiceDocumentService.findInvoiceDocument({ tenantId, documentId });
+  if (!document) throw httpError(400, 'Unknown invoice document');
+  return document;
+}
+
+async function assertCanLinkDocument({ user, access, documentId }) {
+  if (!access.canWrite || !await invoiceDocumentService.canOpenDocument(user, documentId)) {
+    throw httpError(403, DOCUMENT_LINKING_DENIED);
+  }
+}
+
+// The KSeF invoice a request points at — directly, or through the document
+// registered from it — after checking that the two agree.
+function resolveKsefInvoiceId({ requestedInvoiceId, isInvoiceRequested, document }) {
+  if (!document) return requestedInvoiceId;
+  const isMismatch = document.ksef_invoice_id
+    ? isInvoiceRequested && requestedInvoiceId !== document.ksef_invoice_id
+    : Boolean(requestedInvoiceId);
+  if (isMismatch) throw httpError(400, DOCUMENT_INVOICE_MISMATCH);
+  return document.ksef_invoice_id || requestedInvoiceId;
+}
+
+// What a cost item takes over from a hand-entered invoice document, in the
+// shape of a KSeF invoice summary. The seller is the second entity; with fewer
+// than two the only name may be the buyer's, so none is taken.
+function invoiceDefaultsOf(document) {
+  return {
+    issue_date: document.signing_date,
+    net_amount: document.net_amount,
+    currency: document.currency,
+    seller_name: document.entities.length > 1 ? document.entities[1] : null,
+    invoice_number: document.invoice_number,
+  };
+}
+
 // Decides the amount in the project currency. An explicit amount always wins;
 // otherwise an amount entered in another currency is converted with the NBP
 // rate for `date` (the cost date, or the issue date of the linked KSeF
@@ -440,12 +492,22 @@ async function resolveCostAmounts({ amount, originalAmount, originalCurrency, pr
 
 async function createCostItem({ tenantId, project, access, user, input }) {
   const taskId = input.task_id || null;
-  let invoice = null;
-  if (input.ksef_invoice_id) {
+  const document = input.document_id ? await loadInvoiceDocument(tenantId, input.document_id) : null;
+  const ksefInvoiceId = resolveKsefInvoiceId({
+    requestedInvoiceId: input.ksef_invoice_id || null,
+    isInvoiceRequested: Boolean(input.ksef_invoice_id),
+    document,
+  });
+  let ksefInvoice = null;
+  if (ksefInvoiceId) {
     if (!canUseKsefInvoices(user, access)) throw httpError(403, KSEF_LINKING_DENIED);
-    invoice = await ksefInvoiceService.findInvoiceSummary({ tenantId, invoiceId: input.ksef_invoice_id });
-    if (!invoice) throw httpError(400, 'Unknown KSeF invoice');
+    ksefInvoice = await ksefInvoiceService.findInvoiceSummary({ tenantId, invoiceId: ksefInvoiceId });
+    if (!ksefInvoice) throw httpError(400, 'Unknown KSeF invoice');
+  } else if (document) {
+    await assertCanLinkDocument({ user, access, documentId: document.id });
   }
+  // The invoice the defaults come from: the KSeF invoice, else the hand-entered document.
+  const invoice = ksefInvoice || (document && invoiceDefaultsOf(document));
   const date = input.date || invoice?.issue_date;
   if (!date) throw httpError(400, 'The date is required');
   await assertActiveCategory(tenantId, input.category_id);
@@ -456,7 +518,7 @@ async function createCostItem({ tenantId, project, access, user, input }) {
   const hasNoAmount = (input.amount === null || input.amount === undefined)
     && (input.original_amount === null || input.original_amount === undefined);
   const usesInvoiceAmount = Boolean(invoice) && hasNoAmount;
-  if (usesInvoiceAmount && !(invoice.net_amount > 0)) {
+  if (usesInvoiceAmount && !(invoice.net_amount > 0 && invoice.currency)) {
     throw httpError(400, 'The invoice has no positive net amount; provide the amount');
   }
   const amounts = await resolveCostAmounts({
@@ -471,21 +533,27 @@ async function createCostItem({ tenantId, project, access, user, input }) {
     || invoice?.invoice_number?.slice(0, MAX_DOCUMENT_NUMBER_LENGTH)
     || null;
 
+  const documentId = ksefInvoice
+    ? await invoiceDocumentService.registerKsefInvoiceOnLink({ tenantId, user, invoiceId: ksefInvoice.id })
+    : document?.id || null;
+  const linkedAt = new Date();
   const { rows: [created] } = await db.query(
     `INSERT INTO project_cost_items
        (tenant_id, project_id, task_id, category_id, cost_date, amount, description, supplier_name,
         document_number, status, original_amount, original_currency, exchange_rate, exchange_rate_date,
-        created_by, ksef_invoice_id, ksef_linked_by, ksef_linked_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        created_by, ksef_invoice_id, ksef_linked_by, ksef_linked_at,
+        document_id, document_linked_by, document_linked_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
      RETURNING id`,
     [tenantId, project.id, taskId, input.category_id, date, amounts.amount,
      input.description || null, supplierName, documentNumber,
      input.status || 'incurred', amounts.original_amount, amounts.original_currency,
      amounts.exchange_rate, amounts.exchange_rate_date, user.id,
-     invoice?.id || null, invoice ? user.id : null, invoice ? new Date() : null],
+     ksefInvoice?.id || null, ksefInvoice ? user.id : null, ksefInvoice ? linkedAt : null,
+     documentId, documentId ? user.id : null, documentId ? linkedAt : null],
   );
   const item = await findCostItem({ projectId: project.id, itemId: created.id, access, userId: user.id });
-  const [itemWithInvoice] = await withInvoiceInfo([item], access);
+  const [itemWithInvoice] = await withInvoiceInfo([item], access, user);
   return { item: itemWithInvoice, after: pick(item, COST_AUDIT_FIELDS) };
 }
 
@@ -503,7 +571,43 @@ const COST_COLUMN_BY_FIELD = {
   exchange_rate: 'exchange_rate',
   exchange_rate_date: 'exchange_rate_date',
   ksef_invoice_id: 'ksef_invoice_id',
+  document_id: 'document_id',
 };
+
+// Works out the invoice link a PATCH results in and checks the permission for
+// changing it. An unchanged link needs no permission, so the other fields of a
+// linked item stay editable. Returns the KSeF invoice id, its summary, and the
+// document id — `undefined` when the item was just linked to another KSeF
+// invoice and the document is still to be registered.
+async function resolveInvoiceLinkChange({ tenantId, user, access, item, changes }) {
+  const has = (field) => changes[field] !== undefined;
+  const isNewDocumentRequested = Boolean(changes.document_id) && changes.document_id !== item.document_id;
+  const requestedDocument = isNewDocumentRequested ? await loadInvoiceDocument(tenantId, changes.document_id) : null;
+  const ksefInvoiceId = resolveKsefInvoiceId({
+    requestedInvoiceId: has('ksef_invoice_id') ? changes.ksef_invoice_id || null : item.ksef_invoice_id,
+    isInvoiceRequested: has('ksef_invoice_id'),
+    document: requestedDocument,
+  });
+
+  const isKsefLinkChanged = ksefInvoiceId !== item.ksef_invoice_id;
+  if (isKsefLinkChanged && !canUseKsefInvoices(user, access)) throw httpError(403, KSEF_LINKING_DENIED);
+  const ksefInvoice = ksefInvoiceId
+    ? await ksefInvoiceService.findInvoiceSummary({ tenantId, invoiceId: ksefInvoiceId })
+    : null;
+  if (isKsefLinkChanged && ksefInvoiceId && !ksefInvoice) throw httpError(400, 'Unknown KSeF invoice');
+
+  // The document of a KSeF-linked item follows the invoice, whatever the request says about it.
+  if (ksefInvoiceId) {
+    return { ksefInvoiceId, ksefInvoice, documentId: isKsefLinkChanged ? undefined : item.document_id };
+  }
+  let documentId = item.document_id;
+  if (requestedDocument) documentId = requestedDocument.id;
+  else if (isKsefLinkChanged || (has('document_id') && !changes.document_id)) documentId = null;
+  if (!isKsefLinkChanged && documentId !== item.document_id) {
+    await assertCanLinkDocument({ user, access, documentId: documentId || item.document_id });
+  }
+  return { ksefInvoiceId, ksefInvoice, documentId };
+}
 
 async function updateCostItem({ tenantId, project, access, user, itemId, changes }) {
   const item = await findCostItem({ projectId: project.id, itemId, access, userId: user.id });
@@ -515,16 +619,11 @@ async function updateCostItem({ tenantId, project, access, user, itemId, changes
     if (has(field)) next[field] = changes[field];
   }
   if (has('task_id')) next.task_id = changes.task_id || null;
-  if (has('ksef_invoice_id')) next.ksef_invoice_id = changes.ksef_invoice_id || null;
 
-  // Attaching and detaching an invoice are both "linking". An unchanged link
-  // needs no KSeF permission, so the other fields of a linked item stay editable.
+  const link = await resolveInvoiceLinkChange({ tenantId, user, access, item, changes });
+  const invoice = link.ksefInvoice;
+  next.ksef_invoice_id = link.ksefInvoiceId;
   const isLinkChanged = next.ksef_invoice_id !== item.ksef_invoice_id;
-  if (isLinkChanged && !canUseKsefInvoices(user, access)) throw httpError(403, KSEF_LINKING_DENIED);
-  const invoice = next.ksef_invoice_id
-    ? await ksefInvoiceService.findInvoiceSummary({ tenantId, invoiceId: next.ksef_invoice_id })
-    : null;
-  if (isLinkChanged && next.ksef_invoice_id && !invoice) throw httpError(400, 'Unknown KSeF invoice');
 
   if (next.category_id !== item.category_id) await assertActiveCategory(tenantId, next.category_id);
   if (next.task_id !== item.task_id) {
@@ -543,17 +642,27 @@ async function updateCostItem({ tenantId, project, access, user, itemId, changes
     }));
   }
 
+  // Last, once nothing can reject the request any more: it may create a document.
+  next.document_id = link.documentId !== undefined
+    ? link.documentId
+    : await invoiceDocumentService.registerKsefInvoiceOnLink({ tenantId, user, invoiceId: next.ksef_invoice_id });
+
   const changed = changedFields(pick(item, COST_AUDIT_FIELDS), next, COST_AUDIT_FIELDS);
   if (!changed.length) {
-    const [unchangedItem] = await withInvoiceInfo([item], access);
+    const [unchangedItem] = await withInvoiceInfo([item], access, user);
     return { item: unchangedItem, before: null, after: null };
   }
 
   const setClauses = changed.map((field, index) => `${COST_COLUMN_BY_FIELD[field]} = $${index + 1}`);
   const params = changed.map((field) => next[field]);
+  const linkedAt = new Date();
   if (isLinkChanged) {
-    params.push(next.ksef_invoice_id ? user.id : null, next.ksef_invoice_id ? new Date() : null);
+    params.push(next.ksef_invoice_id ? user.id : null, next.ksef_invoice_id ? linkedAt : null);
     setClauses.push(`ksef_linked_by = $${params.length - 1}`, `ksef_linked_at = $${params.length}`);
+  }
+  if (next.document_id !== item.document_id) {
+    params.push(next.document_id ? user.id : null, next.document_id ? linkedAt : null);
+    setClauses.push(`document_linked_by = $${params.length - 1}`, `document_linked_at = $${params.length}`);
   }
   params.push(itemId);
   await db.query(
@@ -561,7 +670,7 @@ async function updateCostItem({ tenantId, project, access, user, itemId, changes
     params,
   );
   const updated = await findCostItem({ projectId: project.id, itemId, access, userId: user.id });
-  const [updatedWithInvoice] = await withInvoiceInfo([updated], access);
+  const [updatedWithInvoice] = await withInvoiceInfo([updated], access, user);
   return { item: updatedWithInvoice, before: pick(item, changed), after: pick(updated, changed) };
 }
 

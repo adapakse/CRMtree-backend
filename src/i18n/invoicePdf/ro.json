@@ -1,0 +1,50 @@
+{
+  "address": "Adresă",
+  "buyer": "Cumpărător",
+  "footer": "Generat în CRMtree la {date} pe baza datelor descărcate din KSeF.",
+  "issueDate": "Data emiterii",
+  "ksefNumber": "Număr KSeF",
+  "lines": {
+    "empty": "Datele facturii nu conțin poziții.",
+    "name": "Denumirea bunului sau serviciului",
+    "netAmount": "Valoare netă",
+    "number": "Nr.",
+    "quantity": "Cantitate",
+    "unit": "U.M.",
+    "unitNetPrice": "Preț unitar net",
+    "vatRate": "Cota TVA"
+  },
+  "notice": {
+    "body": "Acest document este o vizualizare a datelor facturii descărcate din Sistemul național polonez de facturare electronică (KSeF). Nu este documentul original – originalul este factura structurată păstrată în KSeF.",
+    "title": "Vizualizare a unei facturi din KSeF – acesta nu este documentul original"
+  },
+  "payment": {
+    "amountDue": "De plată",
+    "bankAccount": "Cont bancar",
+    "dueDate": "Termen de plată",
+    "form": "Modalitate de plată",
+    "paid": "Plătit",
+    "paidPartially": "parțial",
+    "paidYes": "da",
+    "paymentDate": "Data plății",
+    "title": "Plată"
+  },
+  "paymentForm": {
+    "card": "card",
+    "cash": "numerar",
+    "cheque": "cec",
+    "credit": "credit",
+    "mobile": "plată mobilă",
+    "transfer": "transfer bancar",
+    "voucher": "voucher"
+  },
+  "saleDate": "Data vânzării",
+  "seller": "Vânzător",
+  "taxId": "Cod fiscal (NIP)",
+  "title": "Factura {invoiceNumber}",
+  "totals": {
+    "gross": "Total brut",
+    "net": "Total net",
+    "vat": "Total TVA"
+  }
+}

@@ -10,6 +10,22 @@ const email = require("../services/emailService");
 const { requireAuth } = require("../middleware/auth");
 const { validate, injectAuditContext } = require("../middleware/errorHandler");
 const upload = require("../middleware/upload");
+const invoiceDocuments = require("../services/invoiceDocumentService");
+
+// Largest value a NUMERIC(14,2) column holds.
+const MAX_AMOUNT = 999999999999.99;
+
+// Fields of documents of type "invoice" (see invoiceDocumentService for the
+// rules). An empty value clears the field, also in a multipart form.
+const invoiceFieldRules = [
+  body("invoice_number").optional({ nullable: true }).isString().trim().isLength({ max: 256 }),
+  ...["net_amount", "vat_amount", "gross_amount"].map((field) =>
+    body(field).optional({ values: "falsy" }).isFloat({ min: 0, max: MAX_AMOUNT }).toFloat(),
+  ),
+  body("currency").optional({ values: "falsy" }).matches(/^[A-Z]{3}$/),
+  body("bank_account").optional({ nullable: true }).isString().trim().isLength({ max: 64 }),
+  body("payment_status").optional({ nullable: true }).isString().trim().isLength({ max: 100 }),
+];
 
 // All document routes require authentication
 router.use(requireAuth, injectAuditContext);
@@ -105,6 +121,7 @@ router.get(
           @@ plainto_tsquery('simple', $${p})
           OR d.name ILIKE $${p + 1}
           OR d.doc_number ILIKE $${p + 1}
+          OR d.invoice_number ILIKE $${p + 1}
           OR EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id = d.id AND (dt.key ILIKE $${p + 1} OR dt.value ILIKE $${p + 1}))
         )`);
         params.push(search, `%${search}%`);
@@ -171,6 +188,8 @@ router.get(
              d.owner_id, u.display_name AS owner_name, u.email AS owner_email,
              d.document_group_id, dg.name AS document_group_name,
              d.signus_envelope_id,
+             d.invoice_number, d.currency, d.bank_account, d.payment_status, d.ksef_invoice_id,
+             ${invoiceDocuments.INVOICE_RESPONSE_COLUMNS},
              (SELECT json_agg(json_build_object('id',dt.id,'key',dt.key,'value',dt.value))
               FROM document_tags dt WHERE dt.document_id = d.id) AS tags,
              (SELECT COUNT(*) FROM document_versions dv WHERE dv.document_id = d.id) AS version_count,
@@ -246,6 +265,7 @@ router.post(
     body("tags").optional().isArray(),
     body("tags.*.key").optional().isString().trim(),
     body("tags.*.value").optional().isString().trim(),
+    ...invoiceFieldRules,
   ],
   validate,
   async (req, res, next) => {
@@ -280,14 +300,20 @@ router.post(
       } = req.body;
 
       const ownerId = owner_id || req.user.id;
+      const invoiceFields = await invoiceDocuments.resolveInvoiceFields({
+        tenantId: req.tenantId, docType: doc_type, input: req.body, current: null,
+      });
+      const isInvoice = doc_type === invoiceDocuments.INVOICE_DOC_TYPE;
 
-      await db.transaction(async (client) => {
+      const created = await db.transaction(async (client) => {
         const { rows } = await client.query(
           `INSERT INTO documents
              (tenant_id, name, doc_type, gdpr_type, group_id, entities, owner_id,
               document_group_id, expiration_date, signing_date, created_by,
-              nip, country, contract_subject, contact_name, contact_email, contact_phone)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+              nip, country, contract_subject, contact_name, contact_email, contact_phone,
+              ${invoiceDocuments.INVOICE_FIELDS.join(", ")})
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+                   ${invoiceDocuments.INVOICE_FIELDS.map((field, index) => `$${index + 18}`).join(",")})
            RETURNING *`,
           [
             req.tenantId,
@@ -303,10 +329,11 @@ router.post(
             req.user.id,
             nip || null,
             country || null,
-            contract_subject || null,
+            isInvoice ? null : contract_subject || null,
             contact_name || null,
             contact_email || null,
             contact_phone || null,
+            ...invoiceDocuments.INVOICE_FIELDS.map((field) => invoiceFields[field] ?? null),
           ],
         );
         const doc = rows[0];
@@ -375,15 +402,18 @@ router.post(
         });
 
         const { rows: full } = await client.query(
-          `SELECT d.*, gp.name AS group_name, u.display_name AS owner_name
+          `SELECT d.*, ${invoiceDocuments.INVOICE_RESPONSE_COLUMNS},
+                  gp.name AS group_name, u.display_name AS owner_name
            FROM documents d
            LEFT JOIN group_profiles gp ON gp.id = d.group_id
            LEFT JOIN users u ON u.id = d.owner_id
            WHERE d.id = $1 AND d.tenant_id = $2`,
           [doc.id, req.tenantId],
         );
-        res.status(201).json(full[0]);
+        return full[0];
       });
+      // Answered after the commit, so the document exists for the client's next request.
+      res.status(201).json(created);
     } catch (err) {
       next(err);
     }
@@ -396,7 +426,7 @@ router.post(
 router.get("/:id", [param("id").isUUID()], validate, async (req, res, next) => {
   try {
     const { rows } = await db.query(
-      `SELECT d.*,
+      `SELECT d.*, ${invoiceDocuments.INVOICE_RESPONSE_COLUMNS},
               gp.name AS group_name, gp.display_name AS group_display, gp.has_owner_restriction,
               u.display_name AS owner_name, u.email AS owner_email,
               dg.name AS document_group_name,
@@ -452,8 +482,14 @@ router.get("/:id", [param("id").isUUID()], validate, async (req, res, next) => {
       accessLevel = "full";
     }
 
+    const isInvoice = doc.doc_type === invoiceDocuments.INVOICE_DOC_TYPE;
     res.json({
       ...doc,
+      ...(isInvoice && {
+        project_links: await invoiceDocuments.listProjectLinks({
+          tenantId: req.tenantId, user: req.user, document: doc,
+        }),
+      }),
       _access: accessLevel,
       _task_access: !groupCanRead && !!taskAccess,
     });
@@ -485,6 +521,7 @@ router.patch(
     body("contact_name").optional({ nullable: true }).isString().trim().isLength({ max: 200 }),
     body("contact_email").optional({ nullable: true }).isEmail().normalizeEmail(),
     body("contact_phone").optional({ nullable: true }).isString().trim().isLength({ max: 50 }),
+    ...invoiceFieldRules,
   ],
   validate,
   async (req, res, next) => {
@@ -526,18 +563,23 @@ router.patch(
         "contact_phone",
       ];
       const updates = {};
+      for (const field of allowed) {
+        if (req.body[field] !== undefined) updates[field] = req.body[field];
+      }
+      const nextDocType = updates.doc_type || doc.doc_type;
+      await invoiceDocuments.assertTypeChangeAllowed(doc, nextDocType);
+      Object.assign(updates, await invoiceDocuments.resolveInvoiceFields({
+        tenantId: req.tenantId, docType: nextDocType, input: req.body, current: doc,
+      }));
+
       const setClauses = [];
       const params = [];
       let p = 1;
-
-      for (const field of allowed) {
-        if (req.body[field] !== undefined) {
-          updates[field] = req.body[field];
-          if (field === "status")
-            setClauses.push(`status = $${p++}::doc_status`);
-          else setClauses.push(`${field} = $${p++}`);
-          params.push(req.body[field] === "" ? null : req.body[field]);
-        }
+      for (const [field, value] of Object.entries(updates)) {
+        if (field === "status")
+          setClauses.push(`status = $${p++}::doc_status`);
+        else setClauses.push(`${field} = $${p++}`);
+        params.push(value === "" ? null : value);
       }
 
       if (setClauses.length === 0)
@@ -567,7 +609,7 @@ router.patch(
       // Owner field right after a save. Re-select with the same joins the GET
       // and POST endpoints use.
       const { rows: full } = await db.query(
-        `SELECT d.*,
+        `SELECT d.*, ${invoiceDocuments.INVOICE_RESPONSE_COLUMNS},
                 gp.name AS group_name, gp.display_name AS group_display, gp.has_owner_restriction,
                 u.display_name AS owner_name, u.email AS owner_email
            FROM documents d
@@ -608,6 +650,7 @@ router.delete(
         `UPDATE documents SET deleted_at = NOW(), deleted_by = $1 WHERE id = $2 AND tenant_id = $3`,
         [req.user.id, doc.id, req.tenantId],
       );
+      await invoiceDocuments.detachFromCostItems(doc.id);
 
       await audit.log({
         user: req.user,

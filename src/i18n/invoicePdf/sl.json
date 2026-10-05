@@ -1,0 +1,50 @@
+{
+  "address": "Naslov",
+  "buyer": "Kupec",
+  "footer": "Ustvarjeno v sistemu CRMtree dne {date} na podlagi podatkov, prenesenih iz KSeF.",
+  "issueDate": "Datum izdaje",
+  "ksefNumber": "Številka KSeF",
+  "lines": {
+    "empty": "Podatki računa ne vsebujejo postavk.",
+    "name": "Naziv blaga ali storitve",
+    "netAmount": "Neto vrednost",
+    "number": "Št.",
+    "quantity": "Količina",
+    "unit": "EM",
+    "unitNetPrice": "Neto cena/EM",
+    "vatRate": "Stopnja DDV"
+  },
+  "notice": {
+    "body": "Ta dokument je vizualizacija podatkov računa, prenesenih iz poljskega nacionalnega sistema e-računov (KSeF). To ni izvirni dokument – izvirnik je strukturirani račun, shranjen v KSeF.",
+    "title": "Vizualizacija računa iz KSeF – to ni izvirni dokument"
+  },
+  "payment": {
+    "amountDue": "Za plačilo",
+    "bankAccount": "Bančni račun",
+    "dueDate": "Rok plačila",
+    "form": "Način plačila",
+    "paid": "Plačano",
+    "paidPartially": "delno",
+    "paidYes": "da",
+    "paymentDate": "Datum plačila",
+    "title": "Plačilo"
+  },
+  "paymentForm": {
+    "card": "kartica",
+    "cash": "gotovina",
+    "cheque": "ček",
+    "credit": "kredit",
+    "mobile": "mobilno plačilo",
+    "transfer": "nakazilo",
+    "voucher": "bon"
+  },
+  "saleDate": "Datum prodaje",
+  "seller": "Prodajalec",
+  "taxId": "Davčna številka (NIP)",
+  "title": "Račun {invoiceNumber}",
+  "totals": {
+    "gross": "Skupaj bruto",
+    "net": "Skupaj neto",
+    "vat": "Skupaj DDV"
+  }
+}

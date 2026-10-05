@@ -1,9 +1,10 @@
 'use strict';
 // utils/i18n.js
 //
-// Texts the backend writes itself (e-mails for now), in the language of the
-// person they are addressed to. Files: src/i18n/<scope>/<lang>.json, the scope
-// being the first segment of a key ("emails.taskAssigned.subject"). Same
+// Texts the backend writes itself (e-mails, push notifications, generated
+// PDFs), in the language of the person or tenant they are addressed to.
+// Files: src/i18n/<scope>/<lang>.json, the scope being the first segment of a
+// key ("emails.taskAssigned.subject"). Same
 // conventions as the frontend: nested JSON, ICU message syntax, Polish as the
 // source language. Rules and glossary: crmtree-frontend/docs/i18n.md.
 
@@ -20,6 +21,7 @@ const INTL_LOCALE_TAGS = { en: 'en-GB' };
 
 const DATE_OPTIONS = { day: '2-digit', month: '2-digit', year: 'numeric' };
 const DATE_TIME_OPTIONS = { ...DATE_OPTIONS, hour: '2-digit', minute: '2-digit' };
+const AMOUNT_OPTIONS = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
 
 const scopeFiles = new Map();
 const compiledMessages = new Map();
@@ -94,4 +96,20 @@ function formatDateTime(locale, value) {
   return new Date(value).toLocaleString(INTL_LOCALE_TAGS[language] || language, DATE_TIME_OPTIONS);
 }
 
-module.exports = { translate, formatDate, formatDateTime, supportedOrDefault };
+// A calendar date ("YYYY-MM-DD") stays that day whatever the server time zone.
+function formatDateOnly(locale, value) {
+  return formatDate(locale, value, { ...DATE_OPTIONS, timeZone: 'UTC' });
+}
+
+function formatNumber(locale, value, options) {
+  const language = supportedOrDefault(locale);
+  return Number(value).toLocaleString(INTL_LOCALE_TAGS[language] || language, options);
+}
+
+function formatAmount(locale, value) {
+  return formatNumber(locale, value, AMOUNT_OPTIONS);
+}
+
+module.exports = {
+  translate, formatDate, formatDateOnly, formatDateTime, formatNumber, formatAmount, supportedOrDefault,
+};

@@ -1,0 +1,50 @@
+{
+  "address": "Adres",
+  "buyer": "Nabywca",
+  "footer": "Wygenerowano w CRMtree {date} na podstawie danych pobranych z KSeF.",
+  "issueDate": "Data wystawienia",
+  "ksefNumber": "Numer KSeF",
+  "lines": {
+    "empty": "Dane faktury nie zawierają pozycji.",
+    "name": "Nazwa towaru lub usługi",
+    "netAmount": "Wartość netto",
+    "number": "Lp.",
+    "quantity": "Ilość",
+    "unit": "J.m.",
+    "unitNetPrice": "Cena jedn. netto",
+    "vatRate": "Stawka VAT"
+  },
+  "notice": {
+    "body": "Ten dokument jest wizualizacją danych faktury pobranych z Krajowego Systemu e-Faktur (KSeF). Nie jest oryginalnym dokumentem — oryginałem jest faktura ustrukturyzowana przechowywana w KSeF.",
+    "title": "Wizualizacja faktury z KSeF — to nie jest oryginalny dokument"
+  },
+  "payment": {
+    "amountDue": "Do zapłaty",
+    "bankAccount": "Rachunek bankowy",
+    "dueDate": "Termin płatności",
+    "form": "Forma płatności",
+    "paid": "Zapłacono",
+    "paidPartially": "częściowo",
+    "paidYes": "tak",
+    "paymentDate": "Data zapłaty",
+    "title": "Płatność"
+  },
+  "paymentForm": {
+    "card": "karta",
+    "cash": "gotówka",
+    "cheque": "czek",
+    "credit": "kredyt",
+    "mobile": "płatność mobilna",
+    "transfer": "przelew",
+    "voucher": "bon"
+  },
+  "saleDate": "Data sprzedaży",
+  "seller": "Sprzedawca",
+  "taxId": "NIP",
+  "title": "Faktura {invoiceNumber}",
+  "totals": {
+    "gross": "Razem brutto",
+    "net": "Razem netto",
+    "vat": "Razem VAT"
+  }
+}

@@ -275,6 +275,58 @@ nie po surowym stringu — inaczej ten sam numer tworzy dwie osobne karty. Szcze
 
 ---
 
+## Moduł Dokumenty — typ „Faktura”
+
+Dokumenty (`src/routes/documents.js`) mają typ (`doc_type`, zwykły tekst od migracji 0128),
+status (enum `doc_status`), typ GDPR i grupę dostępu (`group_id` → `group_profiles`; kto ma
+rolę w grupie, widzi dokument — `permissionService`). Słowniki leżą w `app_settings` tenanta
+jako tablice JSON **kodów** (etykiety tłumaczy frontend): `doc_types`, `doc_statuses`,
+`doc_gdpr_types`, `doc_contract_subjects`, `doc_entity1_options`, `doc_payment_statuses`.
+Admin tenanta edytuje je przez `PUT /api/admin/settings`; nowy tenant kopiuje je z
+`crmtree-gold`, więc migracja dodająca słownik musi objąć także ten tenant.
+
+**Faktura to dokument z `doc_type = 'invoice'`** (decyzje biznesowe, 2026-10-05 — nie cofaj
+bez pytania). Reguły i mapowanie są w nagłówku `src/services/invoiceDocumentService.js`:
+
+- **Istniejące kolumny w nowym znaczeniu:** `signing_date` = data wystawienia,
+  `expiration_date` = termin płatności (najwcześniejszy) — celowo ta sama kolumna, żeby
+  kolorowanie „wygasa wkrótce” i filtry po dacie działały dla terminu płatności; `entities` =
+  [nabywca, sprzedawca] (własna firma pierwsza, kontrahent drugi — jak w każdym dokumencie);
+  `nip` = NIP sprzedawcy; `contract_subject` nie jest używany (zawsze `NULL`, wartość z
+  żądania jest pomijana).
+- **Kolumny tylko dla faktury** (migracja 0320): `invoice_number`, `net_amount`,
+  `vat_amount`, `gross_amount`, `currency`, `bank_account`, `payment_status`,
+  `ksef_invoice_id` (NULL = faktura wpisana ręcznie). Dla innych typów są puste, a próba ich
+  ustawienia daje 400; zmiana typu z faktury na inny je czyści. Umowy i pozostałe typy
+  działają jak dotąd.
+- **Status płatności** to wartość słownika `doc_payment_statuses` (domyślnie `unpaid`,
+  `partially_paid`, `paid`, `overdue`), ustawiana ręcznie; nowa faktura dostaje `unpaid`.
+  „Po terminie” jest dodatkowo **wyliczane przy odczycie**: `is_payment_overdue` = termin
+  płatności minął i status ≠ `paid`. Zapisanego statusu nic samo nie zmienia. Kod `paid` jest
+  przez to znaczący — usunięcie go ze słownika wyłącza „opłacone” dla flagi.
+- **Faktura wpisana ręcznie** (zagraniczna, sprzed KSeF) powstaje zwykłym
+  `POST /api/documents` z plikiem PDF i polami faktury; dostaje status `new` jak każdy
+  dokument i może przejść zwykły obieg.
+- **Odpowiedź szczegółów faktury ma `project_links`** — pozycje kosztów projektów powiązane
+  z dokumentem (projekt, zadanie, kwota, status, kto i kiedy powiązał). Widzi je każdy, kto
+  widzi dokument, także bez dostępu do projektu; `can_open` mówi tylko, czy może do projektu
+  wejść (członek albo admin). Przy wyłączonych finansach projektów lista jest pusta.
+- Faktura zarejestrowana z KSeF albo powiązana z kosztami nie może zmienić typu (409).
+  Usunięcie dokumentu odpina go od pozycji kosztów (powiązanie z fakturą KSeF zostaje).
+- `POST /api/documents` odpowiada **po** zatwierdzeniu transakcji — wcześniej odpowiedź
+  wychodziła przed `COMMIT` i natychmiastowy odczyt nowego dokumentu potrafił dać 404.
+
+**Co reaguje na daty dokumentu:** tylko frontend (progi `expiration_red_days` /
+`expiration_soon_days`) i filtry listy (`expiry_before` / `expiry_after`). Backend nie ma
+żadnego joba ani maila o wygasaniu — `emailService.sendExpiryWarning` istnieje, ale nikt go
+nie wywołuje (a jego treść mówi o „wygasającym dokumencie”, więc przed podpięciem trzeba by ją
+rozróżnić dla faktur). `signing_date` nadpisuje podpis elektroniczny (`signing.js`,
+`signusService.js`) — faktur się nie podpisuje, więc nie koliduje to z datą wystawienia.
+
+Testy: `src/__tests__/invoice-documents.test.js`, `documents.test.js`.
+
+---
+
 ## Moduł Projekty
 
 Projekty z zespołem, zadaniami, osią czasu i czatem. Osobny moduł poza CRM — dostępny dla
@@ -320,8 +372,8 @@ każdego usera tenanta, niezależnie od roli handlowej. Zobacz też `CRMtree-fro
 ### Finanse projektu — etap 1 (decyzje Adama, 2026-10-05) — nie cofaj bez pytania
 
 Controlling projektu, nie księgowość: **kwoty netto, bez VAT, jedna waluta na projekt**.
-Faktury kosztowe z KSeF opisuje osobna sekcja niżej; typ dokumentu „Faktura” to kolejny
-etap — jeszcze go nie ma.
+Faktury kosztowe z KSeF i ich rejestrację w Dokumentach opisują osobne sekcje niżej; typ
+dokumentu „Faktura” — sekcja „Moduł Dokumenty” wyżej.
 
 - **Przełącznik per tenant:** admin tenanta włącza finanse w ustawieniach Projektów
   (`PUT /api/admin/project-config/finance`). Leży w `app_settings` pod kluczem
@@ -435,6 +487,48 @@ projektów — przy wyłączonych każda trasa KSeF odpowiada 403, a job pomija 
   projekt — tylko odczyt. Podpięcie i odpięcie idą do `audit_logs` jak inne zmiany kosztu
   (`ksef_invoice_id` w `before_state` / `after_state`).
 
+### Faktury KSeF w Dokumentach — etap 4 (decyzje biznesowe, 2026-10-05) — nie cofaj bez pytania
+
+Fakturę z KSeF rejestruje się jako dokument typu „Faktura” (mapowanie pól — sekcja „Moduł
+Dokumenty”). Kod: `invoiceDocumentService.js`, PDF: `invoiceVisualisationPdfService.js`.
+
+- **Kiedy:** automatycznie przy pierwszym powiązaniu faktury z pozycją kosztu (utworzenie
+  pozycji z `ksef_invoice_id` albo podpięcie przez `PATCH`) oraz jawnie:
+  `POST /api/ksef/invoices/:id/document` (uprawnienie KSeF; 201 nowy dokument, 200 gdy już
+  był). **Jeden żywy dokument na fakturę KSeF** (częściowy indeks unikalny po
+  `tenant_id, ksef_invoice_id`); usunięty dokument zwalnia fakturę do ponownej rejestracji.
+- **Grupa dostępu:** admin tenanta wybiera JEDNĄ grupę dla dokumentów faktur w ustawieniach
+  KSeF (`PUT /api/admin/ksef/settings` z `invoice_documents_group_id`, `null` czyści;
+  `GET /api/admin/ksef` zwraca `invoice_documents_group`). Leży w `app_settings` pod kluczem
+  `ksef_invoice_documents_group_id`. Bez wybranej (albo po dezaktywacji) grupy rejestracja
+  automatyczna jest pomijana — **wiązanie z kosztem i tak się udaje** — a jawna odpowiada 409.
+  Listy i szczegóły faktur niosą `document_id` i `is_document_group_configured`.
+- **Bez obiegu:** dokument dostaje status `completed` („zarejestrowany, nic do zrobienia”),
+  żadnych zadań akceptacji ani podpisu. Właściciel = użytkownik, którego akcja go
+  zarejestrowała (może nie należeć do grupy — wtedy sam dokumentu nie otworzy).
+- **Dane** z wiersza `ksef_invoices`: numer, sprzedawca, nabywca, daty, kwoty, waluta,
+  rachunek; status płatności: `is_paid` → `paid`, zapłata częściowa → `partially_paid`,
+  inaczej `unpaid`. Późniejsze zmiany w dokumencie są ręczne — synchronizacja go nie nadpisuje.
+- **Wizualizacja PDF jest głównym plikiem dokumentu** (wersja 1), więc istniejący podgląd
+  pokazuje ją bez zmian we frontendzie. Zawiera wyraźną informację, że to wizualizacja danych
+  z KSeF, a nie oryginał. Etykiety idą przez i18n (zakres `invoicePdf`), język = domyślny
+  język tenanta. Ta sama biblioteka i czcionka co faktura rozliczeniowa
+  (`src/utils/pdfDocument.js`: PDFKit + DejaVu, wyłączone ligatury) — nie dodawaj drugiej
+  biblioteki PDF. Treść powstaje w `buildVisualisationContent` (testowalna bez renderowania).
+- **Pozycja kosztu ↔ dokument faktury** (`project_cost_items.document_id`): pozycja powiązana
+  z fakturą KSeF zawsze wskazuje dokument zarejestrowany z tej faktury (albo żaden) — pole
+  `document_id` w żądaniu jest wtedy ignorowane, a rejestracja dokumentu uzupełnia je także
+  na wcześniejszych pozycjach. Dokument wpisany ręcznie podpina i odpina (`POST` / `PATCH`
+  z `document_id`) osoba z prawem zapisu finansów projektu, która widzi dokument; uprawnienie
+  KSeF nie jest potrzebne. Podanie dokumentu zarejestrowanego z KSeF jest wiązaniem tej
+  faktury KSeF (z jej regułą uprawnień). Dokumentu ręcznego i faktury KSeF nie łączy się na
+  jednej pozycji (400).
+- **`other_links` jest wspólne:** wszystkie pozostałe pozycje dzielące fakturę KSeF **albo**
+  dokument, każda raz. Wiązanie nadal nigdy nie jest blokowane. Pozycja niesie też
+  `document` (id, numer, nazwa, `can_open` dla oglądającego).
+- Poza zakresem: korekty, faktury sprzedaży, integracja z płatnościami/bankiem, odświeżanie
+  dokumentu po zmianie faktury.
+
 **Zmienna środowiskowa:** `KSEF_ENVIRONMENT` = `test` | `production` (to nie sekret —
 zwykła zmienna Container Appa). Pusta = integracja wyłączona: job nie startuje (ostrzeżenie
 w logu), zapis tokenu i „synchronizuj teraz” odpowiadają 400, ekran konfiguracji dostaje
@@ -451,7 +545,7 @@ tokenu wraca tylko raz) → faktury testowe wysyła się sesją online jako inny
 aplikacji. Lokalnie ustaw `KSEF_ENVIRONMENT=test` w `.env.local`. Testy Jest nie wołają
 prawdziwego KSeF (`src/__tests__/helpers/ksefMock.js` udaje API z prawdziwym RSA/AES).
 
-### Baza danych (migracje 0307–0311, finanse 0316–0317, KSeF 0319)
+### Baza danych (migracje 0307–0311, finanse 0316–0317, KSeF 0319, faktury w Dokumentach 0320)
 
 `project_task_statuses`, `project_task_types`, `project_task_priorities`,
 `project_status_transitions`, `project_field_definitions`, `projects`, `project_members`,
@@ -473,6 +567,10 @@ kursor `sync_from`, `last_attempt_at`, `last_synced_at`; `UNIQUE (tenant_id, nip
 `project_cost_items.ksef_invoice_id` / `ksef_linked_by` / `ksef_linked_at` oraz
 `users.can_view_ksef_invoices`.
 
+Faktury w Dokumentach (0320): kolumny faktury na `documents` (lista w sekcji „Moduł
+Dokumenty”), `project_cost_items.document_id` / `document_linked_by` / `document_linked_at`,
+słownik `doc_payment_statuses` dla każdego tenanta i kod `invoice` dopisany do `doc_types`.
+
 ### Kluczowe pliki
 
 - `src/routes/projects.js` — projekty, członkowie, pola, powiązanie z CRM, czat projektu,
@@ -489,7 +587,9 @@ kursor `sync_from`, `last_attempt_at`, `last_synced_at`; `UNIQUE (tenant_id, nip
   `ksefPackage.js` (hash, AES, ZIP), `ksefInvoiceParser.js` (FA(3)), `ksefSyncService.js`
   (okna, kursor, blokada, statusy — reguły w nagłówku pliku), `ksefCompanyService.js`
   (konfiguracja i tokeny), `ksefInvoiceService.js` (lista, szczegóły, powiązania — reguła
-  `linked_total` w nagłówku pliku). Job: `src/jobs/ksef-sync.js`.
+  `linked_total` w nagłówku pliku), `invoiceDocumentService.js` (typ „Faktura”, rejestracja
+  faktur KSeF, grupa dostępu, `project_links`), `invoiceVisualisationPdfService.js`.
+  Job: `src/jobs/ksef-sync.js`.
 - `src/middleware/project-access.js` — `loadProject` (404 także dla nie-członka, żeby nie
   ujawniać id), `requireProjectManager`, `requireOpenProject`, a dla finansów
   `requireFinanceEnabled`, `requireKsefAccess`, `loadFinanceAccess` i `requireFinance*` /
@@ -507,15 +607,16 @@ kursor `sync_from`, `last_attempt_at`, `last_synced_at`; `UNIQUE (tenant_id, nip
   `projects-crm-integration.test.js`, `project-finance.test.js`,
   `projectFinanceCalculations.test.js` (bez bazy), `ksef-sync.test.js` (klient, paczki,
   synchronizacja), `ksef-invoices.test.js` (trasy, uprawnienia, wiązanie),
-  `ksefInvoiceParser.test.js` (bez bazy; fixture to próbka MF `tpl-fa3-s3.xml`).
+  `ksefInvoiceParser.test.js` (bez bazy; fixture to próbka MF `tpl-fa3-s3.xml`),
+  `invoice-documents.test.js` (typ „Faktura”, rejestracja z KSeF, dokument ↔ koszt),
+  `invoiceVisualisationPdf.test.js` (bez bazy).
 
 ### Poza zakresem pierwszej wersji
 
 Załączniki, aplikacja mobilna (kontrakt `mobile-v1.yaml` nie zawiera Projektów), zależności
 między zadaniami, licznik nieprzeczytanych wiadomości, edycja i usuwanie wiadomości czatu.
-W finansach: typ dokumentu „Faktura”, VAT, wiele walut w jednym projekcie. W KSeF: faktury
-korygujące, rejestracja faktury w module Dokumenty, wizualizacja PDF, faktury wpisywane
-ręcznie, faktury sprzedaży jako przychód.
+W finansach: VAT, wiele walut w jednym projekcie. W KSeF: faktury korygujące, faktury
+sprzedaży jako przychód, integracja z płatnościami.
 
 ---
 
@@ -564,11 +665,12 @@ Aplikacja jest tłumaczona na 10 języków (`pl, en, de, it, es, fr, ro, ru, sl,
 
 ### Teksty backendu
 
-- Pliki: `src/i18n/<zakres>/<język>.json`, zakres to pierwszy człon klucza. Na razie jest jeden
-  zakres: `emails`. Konwencje jak we frontendzie: zagnieżdżony JSON, klucze angielskie camelCase,
+- Pliki: `src/i18n/<zakres>/<język>.json`, zakres to pierwszy człon klucza. Zakresy: `emails`,
+  `push`, `invoicePdf` (wizualizacja faktury KSeF — w języku domyślnym tenanta). Konwencje jak we frontendzie: zagnieżdżony JSON, klucze angielskie camelCase,
   parametry `{name}`, liczba mnoga w składni ICU.
 - Helper: `src/utils/i18n.js` — `translate(locale, 'emails.taskAssigned.subject', { documentName })`,
-  `formatDate(locale, value)`, `formatDateTime(locale, value)`. Składnię ICU obsługuje
+  `formatDate(locale, value)`, `formatDateTime(locale, value)`, `formatDateOnly` (data bez godziny,
+  niezależna od strefy serwera), `formatNumber` / `formatAmount`. Składnię ICU obsługuje
   `@messageformat/core`, skompilowane teksty są cache'owane.
 - `translate` nigdy nie rzuca: nieobsługiwany lub pusty język → polski; brak klucza w danym języku
   (albo zepsute ICU) → tekst polski; brak klucza wszędzie → sam klucz.
@@ -602,7 +704,7 @@ Aplikacja jest tłumaczona na 10 języków (`pl, en, de, it, es, fr, ro, ru, sl,
 ### Co jest nadal po polsku
 
 - Komunikaty błędów API (`res.status(...).json({ error })`) i wpisy logów.
-- Faktura PDF.
+- Faktura rozliczeniowa PDF (`invoicePdfService.js`). Wizualizacja faktury KSeF jest tłumaczona.
 - Treści zapisywane w bazie przez backend, np. tytuł i opis automatycznego zadania churn
   (`Churn: <partner> [Krytyczne]` w `crm-churn.js` i `jobs/daily-scores.js`) — trafiają do maila
   jako dane, w brzmieniu z bazy.

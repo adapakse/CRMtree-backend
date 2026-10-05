@@ -6,6 +6,7 @@
 //
 // GET  /invoices        — invoices issued in a period, with filters, newest first, paginated
 // GET  /invoices/:id    — everything parsed from one invoice plus its links to project costs
+// POST /invoices/:id/document — register the invoice in Documents (or return the document it already has)
 // GET  /companies       — the synced companies and their sync state (no token data)
 // POST /sync            — "sync now": starts a sync in the background and answers 202
 //
@@ -17,12 +18,13 @@ const router = require('express').Router();
 const { body, param, query } = require('express-validator');
 const { requireAuth } = require('../middleware/auth');
 const { requireFeature } = require('../middleware/crm-rbac');
-const { validate } = require('../middleware/errorHandler');
+const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { requireFinanceEnabled, requireKsefAccess } = require('../middleware/project-access');
 const logger = require('../utils/logger');
 const ksefApiClient = require('../services/ksefApiClient');
 const ksefCompanyService = require('../services/ksefCompanyService');
 const ksefInvoiceService = require('../services/ksefInvoiceService');
+const invoiceDocumentService = require('../services/invoiceDocumentService');
 const ksefSyncService = require('../services/ksefSyncService');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -69,6 +71,35 @@ router.get(
       if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
       res.json(invoice);
     } catch (err) { next(err); }
+  },
+);
+
+// 201 for a new document, 200 when the invoice already had one.
+router.post(
+  '/invoices/:id/document',
+  injectAuditContext,
+  [isAnyUUID(param('id'))],
+  validate,
+  async (req, res, next) => {
+    try {
+      const registration = await invoiceDocumentService.registerKsefInvoice({
+        tenantId: req.tenantId, user: req.user, invoiceId: req.params.id, auditContext: req.auditContext,
+      });
+      if (!registration) {
+        return res.status(409).json({ error: invoiceDocumentService.GROUP_NOT_CONFIGURED });
+      }
+      const { document, isNew } = registration;
+      res.status(isNew ? 201 : 200).json({
+        document_id: document.id,
+        doc_number: document.doc_number,
+        name: document.name,
+        is_new: isNew,
+        can_open: await invoiceDocumentService.canOpenDocument(req.user, document.id),
+      });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
   },
 );
 

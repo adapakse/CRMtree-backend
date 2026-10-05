@@ -302,7 +302,9 @@ describe('admin configuration', () => {
     }
     const config = await api('get', '/api/admin/ksef', admin);
     expect(config.status).toBe(200);
-    expect(config.body).toEqual({ is_configured: true, environment: 'test', initial_sync_days: 30, companies: [] });
+    expect(config.body).toEqual({
+      is_configured: true, environment: 'test', initial_sync_days: 30, invoice_documents_group: null, companies: [],
+    });
   });
 
   test('the first sync reaches back 1 to 365 days, 30 by default', async () => {
@@ -448,6 +450,7 @@ describe('invoice list', () => {
       gross_amount: 1230,
       currency: 'PLN',
       payment_due_date: '2026-12-01',
+      document_id: null,
       links_count: 1,
     });
     expect(body.items[1].links_count).toBe(0);
@@ -640,6 +643,7 @@ describe('creating a cost item from an invoice', () => {
       gross_amount: 1230,
       currency: 'PLN',
       payment_due_date: null,
+      document_id: null,
       links_count: 1,
       linked_total: 1000,
       is_over_allocated: false,

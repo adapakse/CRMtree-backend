@@ -1,0 +1,50 @@
+{
+  "address": "Adresse",
+  "buyer": "Käufer",
+  "footer": "Erstellt in CRMtree am {date} auf Grundlage der aus KSeF abgerufenen Daten.",
+  "issueDate": "Ausstellungsdatum",
+  "ksefNumber": "KSeF-Nummer",
+  "lines": {
+    "empty": "Die Rechnungsdaten enthalten keine Positionen.",
+    "name": "Bezeichnung der Ware oder Leistung",
+    "netAmount": "Nettobetrag",
+    "number": "Nr.",
+    "quantity": "Menge",
+    "unit": "Einh.",
+    "unitNetPrice": "Einzelpreis netto",
+    "vatRate": "USt.-Satz"
+  },
+  "notice": {
+    "body": "Dieses Dokument ist eine Visualisierung von Rechnungsdaten, die aus dem polnischen Nationalen E-Rechnungssystem (KSeF) abgerufen wurden. Es ist nicht das Originaldokument – das Original ist die in KSeF gespeicherte strukturierte Rechnung.",
+    "title": "Visualisierung einer Rechnung aus KSeF – dies ist nicht das Originaldokument"
+  },
+  "payment": {
+    "amountDue": "Zu zahlen",
+    "bankAccount": "Bankkonto",
+    "dueDate": "Zahlungsfrist",
+    "form": "Zahlungsart",
+    "paid": "Bezahlt",
+    "paidPartially": "teilweise",
+    "paidYes": "ja",
+    "paymentDate": "Zahlungsdatum",
+    "title": "Zahlung"
+  },
+  "paymentForm": {
+    "card": "Karte",
+    "cash": "Bargeld",
+    "cheque": "Scheck",
+    "credit": "Kredit",
+    "mobile": "mobile Zahlung",
+    "transfer": "Überweisung",
+    "voucher": "Gutschein"
+  },
+  "saleDate": "Verkaufsdatum",
+  "seller": "Verkäufer",
+  "taxId": "Steuernummer (NIP)",
+  "title": "Rechnung {invoiceNumber}",
+  "totals": {
+    "gross": "Summe brutto",
+    "net": "Summe netto",
+    "vat": "Summe USt."
+  }
+}
