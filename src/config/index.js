@@ -197,6 +197,11 @@ module.exports = {
 
   // Mobile app (ADR 001) — oldest app version still allowed to talk to this
   // API. Raising it forces an update without shipping backend code.
+  // Push notifications of the mobile app. Without the service account the
+  // backend simply does not push.
+  push: {
+    firebaseServiceAccountJson: optional("FIREBASE_SERVICE_ACCOUNT_JSON", ""),
+  },
   mobile: {
     minVersionAndroid: optional("MOBILE_MIN_VERSION_ANDROID", "0.0.0"),
     minVersionIos: optional("MOBILE_MIN_VERSION_IOS", "0.0.0"),

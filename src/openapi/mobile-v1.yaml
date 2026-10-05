@@ -223,6 +223,39 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
 
+  /auth/devices/{deviceId}/push-token:
+    parameters:
+      - { name: deviceId, in: path, required: true, schema: { type: string, minLength: 8, maxLength: 128 }, description: The device id sent at mobile login }
+    put:
+      tags: [auth]
+      operationId: registerPushToken
+      summary: Tell the backend where to push notifications for this phone
+      description: |
+        Call after sign-in and whenever Firebase rotates the token. A token
+        registered by another account on the same phone moves to this one.
+        Signing out, here or from "My devices" on the web, forgets it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, platform]
+              properties:
+                token: { type: string, minLength: 20, description: Firebase Cloud Messaging registration token }
+                platform: { type: string, enum: [android, ios] }
+      responses:
+        '204': { description: Registered }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [auth]
+      operationId: removePushToken
+      summary: Stop pushing to this phone without signing it out
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Error' }
+
   /crm/mobile/today:
     get:
       tags: [agenda]

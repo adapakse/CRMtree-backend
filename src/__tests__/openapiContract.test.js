@@ -110,6 +110,17 @@ describe("auth and app config", () => {
     expectDocumented(bad, "post", "/auth/mobile/login");
   });
 
+  test("PUT and DELETE /auth/devices/{deviceId}/push-token", async () => {
+    const path = "/api/auth/devices/spec-device-0001/push-token";
+    const registered = await request(app).put(path).set(auth).send({ token: "spec-fcm-token-000000000000", platform: "android" });
+    expect(registered.status).toBe(204);
+    expectDocumented(registered, "put", "/auth/devices/{deviceId}/push-token");
+    expectDocumented(await request(app).put(path).set(auth).send({ platform: "android" }), "put", "/auth/devices/{deviceId}/push-token");
+    const removed = await request(app).delete(path).set(auth);
+    expect(removed.status).toBe(204);
+    expectDocumented(removed, "delete", "/auth/devices/{deviceId}/push-token");
+  });
+
   test("GET /auth/me", async () => {
     const res = await request(app).get("/api/auth/me").set(auth);
     expect(res.status).toBe(200);

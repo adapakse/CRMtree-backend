@@ -1,0 +1,26 @@
+{
+  "activityAssigned": {
+    "body": "{assignerName} · {sourceName}",
+    "title": "Sarcină nouă: {title}"
+  },
+  "activityReminder": {
+    "body": "{sourceName} · {when}",
+    "title": "Memento: {title}"
+  },
+  "leadOwnerAssigned": {
+    "body": "{assignerName} v-a atribuit acest lead",
+    "title": "Lead nou: {sourceName}"
+  },
+  "partnerOwnerAssigned": {
+    "body": "{assignerName} v-a atribuit acest partener",
+    "title": "Partener nou: {sourceName}"
+  },
+  "projectTaskAssigned": {
+    "body": "{assignerName} · {projectName}",
+    "title": "Sarcină nouă: {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "body": "{projectName}",
+    "title": "Memento: {taskLabel} {taskName}"
+  }
+}

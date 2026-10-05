@@ -1,0 +1,26 @@
+{
+  "activityAssigned": {
+    "body": "{assignerName} · {sourceName}",
+    "title": "Nova naloga: {title}"
+  },
+  "activityReminder": {
+    "body": "{sourceName} · {when}",
+    "title": "Opomnik: {title}"
+  },
+  "leadOwnerAssigned": {
+    "body": "{assignerName} vam je dodelil(a) ta lead",
+    "title": "Nov lead: {sourceName}"
+  },
+  "partnerOwnerAssigned": {
+    "body": "{assignerName} vam je dodelil(a) tega partnerja",
+    "title": "Nov partner: {sourceName}"
+  },
+  "projectTaskAssigned": {
+    "body": "{assignerName} · {projectName}",
+    "title": "Nova naloga: {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "body": "{projectName}",
+    "title": "Opomnik: {taskLabel} {taskName}"
+  }
+}

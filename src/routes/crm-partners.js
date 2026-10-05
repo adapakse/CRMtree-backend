@@ -13,6 +13,7 @@ const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
 const config   = require("../config");
 const email    = require("../utils/email");
+const pushService = require("../services/pushService");
 const { resolveLocale } = require("../config/locales");
 const logger   = require("../utils/logger");
 
@@ -874,6 +875,16 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
       logger.warn('Błąd zapisu audit logu dla partnera', { error: auditErr.message, partner_id: id });
     }
 
+    // The partner has a new owner: tell them on their phone.
+    if (r.rows[0].manager_id && r.rows[0].manager_id !== beforeSnap.manager_id && r.rows[0].manager_id !== req.user.id) {
+      pushService.sendToUsers({
+        userIds: [r.rows[0].manager_id],
+        kind: 'partnerOwnerAssigned',
+        params: { sourceName: r.rows[0].company || '', assignerName: req.user.display_name || req.user.email },
+        data: { source_type: 'partner', source_id: r.rows[0].id },
+      });
+    }
+
     res.json(r.rows[0]);
   } catch (err) {
     console.error("PATCH /crm/partners/:id error:", err);
@@ -1100,6 +1111,16 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
       afterState: { type, title, assigned_to: assigned_to || null, activity_at: activity_at || null },
       metadata:   { partner_id: partnerId, activity_id: newAct.id, source: 'partner' },
     });
+
+    if (assigned_to && assigned_to !== req.user.id) {
+      // Not awaited: the phone notification must not slow the request down.
+      pushService.sendToUsers({
+        userIds: [assigned_to],
+        kind: 'activityAssigned',
+        params: { title, assignerName: req.user.display_name || req.user.email, sourceName: partner.company || '' },
+        data: { source_type: 'partner', source_id: partnerId, activity_id: newAct.id },
+      });
+    }
 
     // Auto-zapis uczestników spotkania jako kontakty partnera.
     if (type === 'meeting' && participants) {

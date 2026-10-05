@@ -211,7 +211,13 @@ router.post('/logout', requireAuth, injectAuditContext, async (req, res, next) =
     const { refresh_token } = req.body;
     if (refresh_token) {
       const hash = crypto.createHash('sha256').update(refresh_token).digest('hex');
-      await db.query('UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1', [hash]);
+      const { rows: revoked } = await db.query(
+        'UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1 RETURNING device_id', [hash]);
+      // A phone that signed out must not keep getting this account's notifications.
+      if (revoked[0]?.device_id) {
+        await db.query('DELETE FROM mobile_push_tokens WHERE user_id = $1 AND device_id = $2',
+          [req.user.id, revoked[0].device_id]);
+      }
     }
     await audit.log({
       user:      req.user,
@@ -458,6 +464,44 @@ router.get('/devices', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─── PUT /api/auth/devices/:deviceId/push-token — where to push ─────────────
+// The app calls this after sign-in and whenever Firebase rotates the token.
+router.put('/devices/:deviceId/push-token', requireAuth, async (req, res, next) => {
+  try {
+    const { token, platform } = req.body ?? {};
+    const deviceId = req.params.deviceId;
+    if (typeof token !== 'string' || token.length < 20 || token.length > 4096) {
+      return res.status(400).json({ error: 'token jest wymagany' });
+    }
+    if (!['android', 'ios'].includes(platform)) {
+      return res.status(400).json({ error: 'platform musi być android albo ios' });
+    }
+    if (deviceId.length < 8 || deviceId.length > 128) {
+      return res.status(400).json({ error: 'device_id jest wymagane (8-128 znaków)' });
+    }
+    // The token names the installation: it follows whoever is signed in on it.
+    await db.query('DELETE FROM mobile_push_tokens WHERE token = $1 AND (user_id <> $2 OR device_id <> $3)',
+      [token, req.user.id, deviceId]);
+    await db.query(
+      `INSERT INTO mobile_push_tokens (tenant_id, user_id, device_id, token, platform)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (user_id, device_id)
+       DO UPDATE SET token = EXCLUDED.token, platform = EXCLUDED.platform, updated_at = now()`,
+      [req.user.tenant_id, req.user.id, deviceId, token, platform],
+    );
+    res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+// ─── DELETE /api/auth/devices/:deviceId/push-token — notifications off ──────
+router.delete('/devices/:deviceId/push-token', requireAuth, async (req, res, next) => {
+  try {
+    await db.query('DELETE FROM mobile_push_tokens WHERE user_id = $1 AND device_id = $2',
+      [req.user.id, req.params.deviceId]);
+    res.status(204).end();
+  } catch (err) { next(err); }
+});
+
 // ─── DELETE /api/auth/devices/:deviceId — sign one phone out ────────────────
 router.delete('/devices/:deviceId', requireAuth, injectAuditContext, async (req, res, next) => {
   try {
@@ -467,6 +511,8 @@ router.delete('/devices/:deviceId', requireAuth, injectAuditContext, async (req,
         RETURNING device_name`,
       [req.user.id, req.params.deviceId]
     );
+    await db.query('DELETE FROM mobile_push_tokens WHERE user_id = $1 AND device_id = $2',
+      [req.user.id, req.params.deviceId]);
     if (!rows.length) return res.status(404).json({ error: 'Nie znaleziono zalogowanego urządzenia.' });
     await audit.log({
       user:      req.user,

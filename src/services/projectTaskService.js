@@ -19,6 +19,7 @@
 const db = require('../config/database');
 const logger = require('../utils/logger');
 const emailUtil = require('../utils/email');
+const pushService = require('./pushService');
 const { resolveLocale } = require('../config/locales');
 const projectService = require('./projectService');
 const projectConfigService = require('./projectConfigService');
@@ -441,6 +442,15 @@ async function listTaskHistory({ tenantId, taskId }) {
 async function notifyNewAssignees({ project, task, assigner, assigneeIds }) {
   const recipientIds = assigneeIds.filter((id) => id !== assigner.id);
   if (!recipientIds.length) return;
+  pushService.sendToUsers({
+    userIds: recipientIds,
+    kind: 'projectTaskAssigned',
+    params: {
+      taskLabel: `${project.key}-${task.task_number}`, taskName: task.name,
+      assignerName: assigner.display_name || assigner.email, projectName: project.name,
+    },
+    data: { source_type: 'project_task', project_id: project.id, task_id: task.id },
+  });
   try {
     const { rows: recipients } = await db.query(
       `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
