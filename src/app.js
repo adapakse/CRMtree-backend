@@ -337,6 +337,9 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
 
     const { rows } = await db.query(
       `SELECT d.id, d.doc_number, d.name, d.status, d.expiration_date,
+              d.doc_type, d.payment_status,
+              (d.doc_type = 'invoice' AND d.expiration_date < CURRENT_DATE
+                AND COALESCE(d.payment_status, '') <> 'paid') AS is_payment_overdue,
               d.owner_id, u.display_name AS owner_name,
               gp.name AS group_name, gp.display_name AS group_display,
               (SELECT COUNT(*)
