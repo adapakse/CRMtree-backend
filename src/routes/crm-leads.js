@@ -12,6 +12,7 @@ const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
 const { crmAuth, loadCrmScope, loadCrmModuleGrants, crmScope, requireCrmManager, assertOwnership, canOperateForOwner, requireFeature } = require('../middleware/crm-rbac');
 const projectCrmLinkService = require('../services/projectCrmLinkService');
+const salesMetrics   = require('../services/crmSalesMetricsService');
 const testAccountSvc = require('../services/testAccountService');
 const crmLeadHoldSvc = require('../services/crmLeadHoldService');
 const email          = require('../utils/email');
@@ -567,21 +568,7 @@ router.get('/report',
   validate,
   async (req, res, next) => {
     try {
-      // Kursy walut z app_settings (pkt 10/11)
-      const { rows: rateRows } = await db.query(
-        `SELECT DISTINCT ON (key) key, value::numeric AS rate FROM app_settings
-         WHERE key IN ('exchange_rate_eur','exchange_rate_usd','exchange_rate_gbp','exchange_rate_chf')
-           AND (tenant_id = $1 OR tenant_id IS NULL)
-         ORDER BY key, (tenant_id IS NOT NULL) DESC`,
-        [req.tenantId]
-      );
-      const rates = { EUR: 4.25, USD: 3.90, GBP: 4.90, CHF: 4.20 };
-      for (const r of rateRows) {
-        if (r.key === 'exchange_rate_eur') rates.EUR = Number(r.rate);
-        if (r.key === 'exchange_rate_usd') rates.USD = Number(r.rate);
-        if (r.key === 'exchange_rate_gbp') rates.GBP = Number(r.rate);
-        if (r.key === 'exchange_rate_chf') rates.CHF = Number(r.rate);
-      }
+      const rates = await salesMetrics.loadExchangeRates();
       // Wyrażenie SQL przeliczające wartość leada na PLN wg kursów
       const valPln = `(CASE COALESCE(l.annual_turnover_currency,'PLN')
         WHEN 'EUR' THEN COALESCE(l.value_pln,0) * ${rates.EUR}

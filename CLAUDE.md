@@ -317,7 +317,61 @@ każdego usera tenanta, niezależnie od roli handlowej. Zobacz też `CRMtree-fro
   `Europe/Warsaw` (`REMINDER_LOCAL_TIME` w `projectTaskService.js`), frontend stawia zadanie
   w kalendarzu o tej samej godzinie.
 
-### Baza danych (migracje 0307–0311)
+### Finanse projektu — etap 1 (decyzje Adama, 2026-10-05) — nie cofaj bez pytania
+
+Controlling projektu, nie księgowość: **kwoty netto, bez VAT, jedna waluta na projekt**.
+Faktury KSeF i typ dokumentu „Faktura” to kolejne etapy — jeszcze ich nie ma.
+
+- **Przełącznik per tenant:** admin tenanta włącza finanse w ustawieniach Projektów
+  (`PUT /api/admin/project-config/finance`). Leży w `app_settings` pod kluczem
+  `projects_finance_enabled`; brak wiersza = wyłączone. Przy wyłączonym każda trasa finansów
+  (i słownik kategorii kosztów) odpowiada 403, a pozostałe odpowiedzi mają `finance: null`.
+  Wyłączenie ukrywa dane, nie usuwa ich.
+- **Kategorie kosztów:** słownik admina tenanta (nazwa, kolejność, aktywność), jeden poziom,
+  bez usuwania — tylko dezaktywacja. Nieaktywna kategoria zostaje na istniejących pozycjach
+  i w budżecie, który już ją ma; nie da się jej wybrać na nowo. Domyślne (Praca własna,
+  Podwykonawcy, Materiały, Licencje, Podróże, Inne) powstają leniwie
+  (`projectConfigService.listCostCategories`).
+- **Budżet (plan):** waluta projektu (ISO, domyślnie PLN — zmienna tylko, dopóki projekt nie
+  ma żadnej pozycji kosztu ani przychodu), planowany przychód, planowany koszt per kategoria.
+  Zadanie może mieć własny planowany koszt (`project_tasks.planned_cost`) — raportowany
+  **obok** budżetu kategorii, nigdy do niego nie dodawany i nie zwracany w odpowiedziach
+  zadań.
+- **Pozycje kosztów** (`planned` | `incurred`): data, kwota > 0 w walucie projektu,
+  kategoria (wymagana), opis, opcjonalne zadanie tego samego projektu, dostawca, numer
+  dokumentu. **Pozycje przychodów** (`planned` | `invoiced` | `paid`) są tylko na projekcie,
+  nigdy na zadaniu. Jedne i drugie usuwa się naprawdę (hard delete); edycja tylko w otwartym
+  projekcie.
+- **Koszt w innej walucie:** `original_amount` + `original_currency` bez `amount` → kwota
+  liczona kursem NBP wg reguły poniżej, kurs i jego data zapisane na pozycji. **Jawne
+  `amount` zawsze wygrywa** (wtedy kursu nie zapisujemy). Przy edycji przeliczamy tylko, gdy
+  żądanie dotyka kwot — sama zmiana daty nie zmienia kwoty.
+- **Definicje liczb:** przychód rzeczywisty = pozycje `invoiced` + `paid`; koszt rzeczywisty
+  = pozycje `incurred`; koszt planowany = suma budżetów kategorii; marża % = marża /
+  przychód (`null` bez przychodu); pozostały budżet i odchylenie kategorii = budżet −
+  poniesione (pozycje `planned` nie robią przekroczenia). Suma zadania = własne pozycje +
+  wszystkich podzadań. Arytmetyka jest w `projectFinanceCalculations.js` (bez bazy).
+- **Uprawnienia:** PM i admin tenanta — wszystko. Kontroler — czyta wszystko, nic nie
+  zapisuje. Uczestnik wewnętrzny — nic, chyba że PM włączy na projekcie
+  `participants_can_add_costs`: wtedy dodaje koszty do zadań, do których jest przypisany,
+  i widzi/edytuje/usuwa wyłącznie pozycje, które sam utworzył (budżetu, przychodów
+  i podsumowania dalej nie widzi). Uczestnik zewnętrzny — nigdy nic. Zamknięty projekt —
+  tylko odczyt.
+- **Strona CRM:** kto widzi kartę leada/partnera, widzi tam sumy finansowe powiązanego
+  projektu (plan/wykonanie przychodu i kosztu, marża) także bez członkostwa — same sumy,
+  bez pozycji. Lista projektów pokazuje sumy tylko PM-owi, adminowi i kontrolerowi.
+- **Podpowiedź planowanego przychodu:** gdy projekt jest powiązany z leadem mającym wartość,
+  a planowany przychód jest pusty, podsumowanie zwraca `suggested_planned_revenue` (wartość
+  leada po najnowszym kursie). Nic nie zapisuje się samo. Przychody projektu nie mają
+  związku z transakcjami partnera ani danymi sprzedażowymi.
+- Pole dodatkowe typu `money` nie wchodzi do żadnej liczby finansowej.
+- **Historia:** zmiany pozycji idą do `audit_logs` (`project_cost_*`, `project_revenue_*`,
+  plan jako `project_updated`). Metadane celowo **nie mają `task_id`** — historię zadania
+  czyta każdy, kto widzi zadanie, także uczestnik zewnętrzny.
+- Ustawienia finansowe projektu są w osobnej tabeli `project_finance`, a nie w `projects`,
+  bo `projects` jest czytane przez `SELECT *` w odpowiedziach dla wszystkich członków.
+
+### Baza danych (migracje 0307–0311, finanse 0316–0317)
 
 `project_task_statuses`, `project_task_types`, `project_task_priorities`,
 `project_status_transitions`, `project_field_definitions`, `projects`, `project_members`,
@@ -326,29 +380,73 @@ każdego usera tenanta, niezależnie od roli handlowej. Zobacz też `CRMtree-fro
 Numer zadania = `projects.key` (prefiks generowany z nazwy przy zakładaniu, niezmienny) +
 licznik `projects.next_task_number`.
 
+Finanse: `project_cost_categories`, `project_finance` (0–1 wiersz na projekt: waluta,
+planowany przychód, `participants_can_add_costs`), `project_category_budgets`,
+`project_cost_items` (z kolumnami `original_amount`, `original_currency`, `exchange_rate`,
+`exchange_rate_date`), `project_revenue_items`, kolumna `project_tasks.planned_cost` oraz
+globalna tabela kursów `nbp_exchange_rates`.
+
 ### Kluczowe pliki
 
 - `src/routes/projects.js` — projekty, członkowie, pola, powiązanie z CRM, czat projektu,
   `GET /assigned-tasks` (musi być zarejestrowane przed `/:id`).
 - `src/routes/project-tasks.js` — zadania, historia, czat zadania (`/api/projects/:id/tasks`).
-- `src/routes/admin-project-config.js` — konfiguracja admina tenanta.
+- `src/routes/project-finance.js` — finanse projektu (`/api/projects/:id/finance`):
+  podsumowanie, plan, pozycje kosztów i przychodów, planowany koszt zadania.
+- `src/routes/admin-project-config.js` — konfiguracja admina tenanta, w tym przełącznik
+  finansów i słownik `cost-categories`.
 - `src/middleware/project-access.js` — `loadProject` (404 także dla nie-członka, żeby nie
-  ujawniać id), `requireProjectManager`, `requireOpenProject`.
+  ujawniać id), `requireProjectManager`, `requireOpenProject`, a dla finansów
+  `requireFinanceEnabled`, `loadFinanceAccess` i `requireFinance*` / `requireCost*`.
 - `src/services/projectService.js`, `projectTaskService.js` (reguły uprawnień do zadań są
   opisane w nagłówku pliku), `projectConfigService.js`, `projectCrmLinkService.js`,
-  `projectMessageService.js`.
+  `projectMessageService.js`, `projectFinanceService.js` (reguły uprawnień do finansów
+  w nagłówku pliku), `projectFinanceCalculations.js`.
 - `GET /api/crm/leads/:id/projects` i `/api/crm/partners/:id/projects` — w trasach CRM.
 - Przypomnienia: trzeci blok w `src/services/crmReminderService.js`; maile
   `sendProjectTaskAssigned` (od razu przy przypisaniu) i `sendProjectTaskReminder`.
 - Historia zadania: `audit_logs` z `metadata.task_id` (akcje `project_task_created` /
   `project_task_updated`).
 - Testy: `src/__tests__/projects.test.js`, `project-tasks.test.js`,
-  `projects-crm-integration.test.js`.
+  `projects-crm-integration.test.js`, `project-finance.test.js`,
+  `projectFinanceCalculations.test.js` (bez bazy).
 
 ### Poza zakresem pierwszej wersji
 
 Załączniki, aplikacja mobilna (kontrakt `mobile-v1.yaml` nie zawiera Projektów), zależności
 między zadaniami, licznik nieprzeczytanych wiadomości, edycja i usuwanie wiadomości czatu.
+W finansach: faktury KSeF, typ dokumentu „Faktura”, VAT, wiele walut w jednym projekcie.
+
+---
+
+## Kursy walut (NBP)
+
+Jedno źródło kursów dla całej aplikacji: tabela A NBP (kursy średnie), globalna tabela
+`nbp_exchange_rates` (waluta, data, kurs do PLN) — **nie per tenant**. Kod:
+`src/services/exchangeRateService.js`, job `src/jobs/exchange-rates-sync.js`.
+
+- **Reguła kursu:** `getRate(waluta, data)` zwraca kurs z **ostatniego dnia roboczego PRZED
+  datą** (polska zasada księgowa), nigdy z samego dnia. PLN = 1, dwie waluty obce liczymy
+  przez PLN (`getCrossRate`). Dla daty przyszłej bierzemy najnowszą opublikowaną tabelę.
+  Nieznana waluta albo brak kursu → błąd 4xx (422), **nigdy cichy kurs 1**. Kurs starszy
+  niż 10 dni od daty nie jest uznawany za „ostatni dzień roboczy”.
+- **Zasilanie:** job co godzinę dociąga dni po najnowszym zapisanym (pierwsze uruchomienie:
+  ostatnie ~3 miesiące), upsert jest idempotentny. API NBP: maks. 93 dni na zapytanie (kod
+  tnie po 90), 404 = brak tabeli w zakresie, 400 gdy zakres kończy się w przyszłości.
+- **Zapisany zakres jest ciągły** (od najstarszego do najnowszego dnia nie ma dziur poza
+  dniami bez tabeli). Dlatego dociąganie wstecz na żądanie (`getRate` dla daty starszej niż
+  zapisane) zawsze sięga aż do najstarszego zapisanego dnia — nie rób z tego „okienka”, bo
+  późniejszy odczyt zwróci nieaktualny kurs. Jedno żądanie dociąga najwyżej ok. 3 lata.
+- **Raporty sprzedaży** (`crmSalesMetricsService.loadExchangeRates`, używane przez ekran
+  mobilny i `GET /api/crm/leads/report`): najnowszy kurs NBP dla EUR/USD/GBP/CHF, stałe
+  4.25/3.90/4.90/4.20 tylko gdy tabela kursów jest pusta — takie same dla każdego tenanta.
+  Dawne ustawienia tenanta `exchange_rate_eur|usd|gbp|chf` w `app_settings` **nie są już
+  czytane**, a migracja 0318 usuwa je wszystkim tenantom (także `crmtree-gold`, z którego
+  nowe tenanty kopiują ustawienia). Nie przywracaj ręcznego kursu per tenant bez pytania —
+  decyzja Adama z 2026-10-05.
+- Testy nie wołają prawdziwego NBP (`fetch` jest podmieniany). Dane testowe kursów leżą
+  w roku 1999 — sprzed archiwum NBP (2002) — żeby nie kolidować z prawdziwymi kursami
+  w globalnej tabeli. Testy: `exchange-rates.test.js`, `exchangeRateNbpClient.test.js`.
 
 ---
 
@@ -418,6 +516,8 @@ Aplikacja jest tłumaczona na 10 języków (`pl, en, de, it, es, fr, ro, ru, sl,
   constant names, and inline comments.
 - Polish is only acceptable in user-facing API error messages and log descriptions
   directed at end users.
+- API messages are written in English (decision of 2026-10-05); older Polish messages are
+  being converted separately.
 
 ### Naming conventions
 - Use descriptive, self-explanatory names — a reader should understand intent without

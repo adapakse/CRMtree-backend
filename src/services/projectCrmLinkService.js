@@ -10,6 +10,8 @@
 //     and the sales dashboard.
 
 const db = require('../config/database');
+const projectConfigService = require('./projectConfigService');
+const projectFinanceService = require('./projectFinanceService');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -91,6 +93,8 @@ const TASK_SUMMARY_COLUMNS = `
 // Projects linked to a lead or a partner, open ones first, each with its tasks.
 // `can_open` tells the card whether the viewer may enter the project itself
 // (a member or the tenant admin); everyone else only sees this summary.
+// `finance` holds the project's totals, or null while the tenant has project
+// finance switched off.
 async function listLinkedProjects({ tenantId, viewer, leadId = null, partnerId = null }) {
   const { rows: projects } = await db.query(
     `SELECT p.id, p.key, p.name, p.status, p.created_at, p.closed_at,
@@ -114,9 +118,15 @@ async function listLinkedProjects({ tenantId, viewer, leadId = null, partnerId =
      ORDER BY t.task_number`,
     [projects.map((project) => project.id)],
   );
+  // Whoever sees the lead or partner card sees the finance totals of its
+  // projects, member or not — totals only, never the items.
+  const financeByProject = await projectConfigService.isFinanceEnabled(tenantId)
+    ? await projectFinanceService.loadTotalsByProject(projects.map((project) => project.id))
+    : new Map();
   return projects.map((project) => ({
     ...project,
     tasks: tasks.filter((task) => task.project_id === project.id),
+    finance: financeByProject.get(project.id) ?? null,
   }));
 }
 

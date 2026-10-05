@@ -6,6 +6,7 @@ const request = require("supertest");
 const app = require("../app");
 const db = require("../config/database");
 const { signAccessToken } = require("../middleware/auth");
+const exchangeRateService = require("../services/exchangeRateService");
 
 const DOMAIN = "mobile-today-test.crmtree.local";
 const DAY_START = "2026-10-05T00:00:00+02:00";
@@ -197,18 +198,18 @@ describe("GET /api/crm/mobile/today — kpis", () => {
   }, 60000);
 
   test("my pipeline, my wins this month and my budget, in whole PLN", async () => {
-    const { rows: [rate] } = await db.query(
-      `SELECT value::numeric AS eur FROM app_settings WHERE key = 'exchange_rate_eur'
-        ORDER BY (tenant_id IS NOT NULL) DESC LIMIT 1`,
-    );
-    const eurRate = rate ? Number(rate.eur) : 4.25;
-
-    expect(await getKpis(users.rep)).toEqual({
-      active_leads: 2,
-      pipeline_value_pln: 25200 + Math.round(1000 * eurRate),
-      month_won_value_pln: 40000,
-      month_budget_pln: 100000,
-    });
+    // The NBP rate changes daily, so the newest table is pinned for this check.
+    const latestRates = jest.spyOn(exchangeRateService, "getLatestRates").mockResolvedValue({ EUR: 4.25 });
+    try {
+      expect(await getKpis(users.rep)).toEqual({
+        active_leads: 2,
+        pipeline_value_pln: 25200 + 4250,
+        month_won_value_pln: 40000,
+        month_budget_pln: 100000,
+      });
+    } finally {
+      latestRates.mockRestore();
+    }
   });
 
   test("a colleague's numbers are their own, and no budget means 0", async () => {

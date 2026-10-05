@@ -17,6 +17,7 @@ const { startBillingRunJob } = require("./jobs/billing-run");
 const { startCrmRemindersJob } = require("./jobs/crm-reminders");
 const { startSmsPollerJob } = require("./jobs/sms-poller");
 const { startCrmHoldExpiryJob } = require("./jobs/crm-hold-expiry");
+const { startExchangeRatesSyncJob } = require("./jobs/exchange-rates-sync");
 
 async function start() {
   // ─── Startup security checks ──────────────────────────────
@@ -54,6 +55,7 @@ async function start() {
     startCrmRemindersJob();
     startSmsPollerJob();
     startCrmHoldExpiryJob();
+    startExchangeRatesSyncJob();
   });
 
   // ─── Graceful shutdown ────────────────────────────────────

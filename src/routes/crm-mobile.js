@@ -50,7 +50,7 @@ const PARTNER_AGENDA = { activityTable: 'crm_partner_activities', parentTable: '
 // (past "new", not closed, not on hold) and the budget is met by leads won in
 // the month. Only the person's own leads count, never the team's.
 async function loadMonthKpis({ tenantId, userId, monthStart, monthEnd }) {
-  const rates = await salesMetrics.loadExchangeRates(tenantId);
+  const rates = await salesMetrics.loadExchangeRates();
   const valuePln = salesMetrics.leadValuePlnSql(rates);
   // The middle of the range is inside the month in every time zone.
   const midMonth = new Date((new Date(monthStart).getTime() + new Date(monthEnd).getTime()) / 2);

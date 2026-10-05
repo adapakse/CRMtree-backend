@@ -32,6 +32,7 @@ const adminProspectsRoutes        = require('./routes/admin-prospects');
 const crmProspectsDashboardRoutes = require('./routes/crm-prospects-dashboard');
 const projectRoutes            = require('./routes/projects');
 const projectTaskRoutes        = require('./routes/project-tasks');
+const projectFinanceRoutes     = require('./routes/project-finance');
 const adminProjectConfigRoutes = require('./routes/admin-project-config');
 const profileRoutes       = require('./routes/profile');
 const crmGmail 		  = require('./routes/crm-gmail');
@@ -230,6 +231,7 @@ app.use('/api/crm/seo',          crmSeoRoutes);
 app.use('/api/crm/prospects-dashboard', crmProspectsDashboardRoutes);
 
 app.use('/api/projects/:id/tasks',   projectTaskRoutes);
+app.use('/api/projects/:id/finance', projectFinanceRoutes);
 app.use('/api/projects',             projectRoutes);
 app.use('/api/admin/project-config', adminProjectConfigRoutes);
 

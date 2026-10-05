@@ -6,25 +6,18 @@
 // ─────────────────────────────────────────────────────────────────
 
 const db = require('../config/database');
+const exchangeRateService = require('./exchangeRateService');
 
-const DEFAULT_RATES = { EUR: 4.25, USD: 3.90, GBP: 4.90, CHF: 4.20 };
-const RATE_KEYS = {
-  exchange_rate_eur: 'EUR',
-  exchange_rate_usd: 'USD',
-  exchange_rate_gbp: 'GBP',
-  exchange_rate_chf: 'CHF',
-};
+// Used only until the first NBP table is stored (fresh install, NBP unreachable).
+const FALLBACK_RATES = { EUR: 4.25, USD: 3.90, GBP: 4.90, CHF: 4.20 };
 
-/** Exchange rates to PLN: the tenant's own setting wins over the global one. */
-async function loadExchangeRates(tenantId) {
-  const { rows } = await db.query(
-    `SELECT DISTINCT ON (key) key, value::numeric AS rate FROM app_settings
-      WHERE key = ANY($2::text[]) AND (tenant_id = $1 OR tenant_id IS NULL)
-      ORDER BY key, (tenant_id IS NOT NULL) DESC`,
-    [tenantId, Object.keys(RATE_KEYS)],
-  );
-  const rates = { ...DEFAULT_RATES };
-  for (const row of rows) rates[RATE_KEYS[row.key]] = Number(row.rate);
+/** Exchange rates to PLN for the sales reports: the newest NBP rates, the same for every tenant. */
+async function loadExchangeRates() {
+  const latestNbpRates = await exchangeRateService.getLatestRates();
+  const rates = { ...FALLBACK_RATES };
+  for (const currency of Object.keys(FALLBACK_RATES)) {
+    if (latestNbpRates[currency]) rates[currency] = latestNbpRates[currency];
+  }
   return rates;
 }
 

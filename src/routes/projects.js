@@ -5,7 +5,8 @@
 // the `projects` feature, independent of CRM roles.
 //
 // GET    /api/projects/config                    — dictionaries, transitions, field definitions
-// GET    /api/projects                           — projects the user is a member of (admin: all)
+// GET    /api/projects                           — projects the user is a member of (admin: all);
+//                                                  finance totals for PM / admin / controller
 // POST   /api/projects                           — create (admin or users.can_create_projects)
 // GET    /api/projects/:id                       — project card: project, members, fields
 // PATCH  /api/projects/:id                       — name / description / partner
@@ -31,6 +32,7 @@ const projectConfigService = require('../services/projectConfigService');
 const projectService = require('../services/projectService');
 const projectMessageService = require('../services/projectMessageService');
 const projectCrmLinkService = require('../services/projectCrmLinkService');
+const projectFinanceService = require('../services/projectFinanceService');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isAnyUUID = (field) => field.matches(UUID_RE).withMessage('Invalid UUID');
@@ -94,8 +96,11 @@ router.get(
       const projects = await projectService.listProjects({
         tenantId: req.tenantId, user: req.user, status: req.query.status || 'open',
       });
+      const financeByProject = await projectFinanceService.loadTotalsForList({
+        tenantId: req.tenantId, user: req.user, projects,
+      });
       res.json({
-        projects,
+        projects: projects.map((project) => ({ ...project, finance: financeByProject.get(project.id) ?? null })),
         can_create: Boolean(req.user.is_admin || req.user.can_create_projects),
       });
     } catch (err) { next(err); }
@@ -129,9 +134,15 @@ router.post(
 
 router.get('/:id', [projectId], validate, loadProject, async (req, res, next) => {
   try {
-    const [members, fields] = await Promise.all([
+    const [members, fields, finance] = await Promise.all([
       projectService.listMembers(req.project.id),
       projectService.listProjectFields(req.project.id),
+      projectFinanceService.describeAccess({
+        tenantId: req.tenantId,
+        project: req.project,
+        membership: req.projectMembership,
+        canManage: req.canManageProject,
+      }),
     ]);
     res.json({
       project: req.project,
@@ -140,6 +151,7 @@ router.get('/:id', [projectId], validate, loadProject, async (req, res, next) =>
       my_role: req.projectMembership?.role ?? null,
       my_access_level: req.projectMembership?.access_level ?? null,
       can_manage: req.canManageProject,
+      finance,
     });
   } catch (err) { next(err); }
 });
