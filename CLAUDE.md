@@ -320,7 +320,8 @@ każdego usera tenanta, niezależnie od roli handlowej. Zobacz też `CRMtree-fro
 ### Finanse projektu — etap 1 (decyzje Adama, 2026-10-05) — nie cofaj bez pytania
 
 Controlling projektu, nie księgowość: **kwoty netto, bez VAT, jedna waluta na projekt**.
-Faktury KSeF i typ dokumentu „Faktura” to kolejne etapy — jeszcze ich nie ma.
+Faktury kosztowe z KSeF opisuje osobna sekcja niżej; typ dokumentu „Faktura” to kolejny
+etap — jeszcze go nie ma.
 
 - **Przełącznik per tenant:** admin tenanta włącza finanse w ustawieniach Projektów
   (`PUT /api/admin/project-config/finance`). Leży w `app_settings` pod kluczem
@@ -371,7 +372,86 @@ Faktury KSeF i typ dokumentu „Faktura” to kolejne etapy — jeszcze ich nie 
 - Ustawienia finansowe projektu są w osobnej tabeli `project_finance`, a nie w `projects`,
   bo `projects` jest czytane przez `SELECT *` w odpowiedziach dla wszystkich członków.
 
-### Baza danych (migracje 0307–0311, finanse 0316–0317)
+### Faktury kosztowe z KSeF — etap 3 (decyzje biznesowe, 2026-10-05) — nie cofaj bez pytania
+
+Faktury zakupu pobierane z KSeF (Krajowy System e-Faktur, API 2.0) do lokalnej kopii i
+wiązane z pozycjami kosztów projektu. Istnieją tylko u tenantów z włączonymi finansami
+projektów — przy wyłączonych każda trasa KSeF odpowiada 403, a job pomija tenanta.
+
+- **Konfiguracja należy do admina tenanta** (nie superadmina): lista firm, każda = własny
+  NIP tenanta (nabywca na fakturach) + token KSeF wklejony przez admina. Wiele NIP-ów na
+  tenanta jest dozwolone, każdy raz. Token jest sprawdzany przez **uwierzytelnienie w KSeF
+  przed zapisem**, leży zaszyfrowany (`src/utils/encrypt.js` — ten sam mechanizm co sekrety
+  WhatsApp i skrzynek) i **nigdy nie wraca w API** — tylko `token_hint` (4 ostatnie znaki).
+  Nie loguj tokenu ani tokenów dostępowych. Usunięcie firmy zostawia jej faktury
+  (`company_id` → NULL).
+- **Zakres pierwszej synchronizacji:** ustawienie tenanta `ksef_initial_sync_days` w
+  `app_settings` (domyślnie 30, 1–365). Liczy się wg daty trwałego zapisu w KSeF, nie daty
+  wystawienia; obowiązuje dla firm dodanych po zmianie.
+- **Synchronizacja:** job co 30 minut + „synchronizuj teraz” (`POST /api/ksef/sync`, 202,
+  działa w tle). Tylko faktury zakupu (`Subject2`), **korekty są pomijane** (typ zaczynający
+  się od `KOR`). Zapisujemy surowy XML i pola sparsowane. Filtr eksportu to data trwałego
+  zapisu (`PermanentStorage`), kursor `ksef_companies.sync_from` idzie tylko do przodu i jest
+  zapisywany po każdym oknie (okno ≤ 90 dni, ostatnie otwarte — do znacznika HWM). Maks. 6
+  eksportów na przebieg (limit KSeF: 20 eksportów/h na NIP). HWM spóźnia się ok. 2 minuty —
+  pusty wynik tuż po wystawieniu faktury jest normalny. Wstawianie przez
+  `ON CONFLICT (tenant_id, ksef_number) DO NOTHING`.
+- **Jedna synchronizacja firmy naraz, także między instancjami:** sesyjna blokada doradcza
+  Postgresa (`pg_try_advisory_lock`) trzymana na osobnym połączeniu przez cały przebieg.
+- **Status firmy:** `active`; `invalid` — KSeF odrzucił token, firma wypada z synchronizacji
+  do czasu podmiany tokenu; `error` — inny błąd (sieć, 5xx, limit, zepsuta paczka), ponawiany
+  w następnym przebiegu, opis w `last_error`. Jedna firma z błędem nie zatrzymuje pozostałych.
+- **HTTP 429:** czekamy tyle, ile każe `Retry-After` (do 60 s, do 3 razy); dłuższe czekanie
+  kończy przebieg błędem. Token dostępowy (ok. 15 min) jest odświeżany przed oknem, gdy
+  zostało mu mniej niż 5 minut; odmowa odświeżenia → ponowne uwierzytelnienie.
+- **VAT faktury walutowej:** metadane KSeF podają VAT w PLN, a netto/brutto w walucie
+  faktury — zapisujemy VAT jako brutto − netto.
+- **Pola z XML są opcjonalne** (data sprzedaży, termin i forma płatności, rachunek, znacznik
+  i data zapłaty, kwota do zapłaty, adresy, pozycje): brak elementu = `null`, nigdy błąd.
+  Parser to `fast-xml-parser` z wartościami jako tekst (NIP i rachunek zachowują zera).
+- **Kto widzi faktury:** osobne uprawnienie `users.can_view_ksef_invoices` nadawane przez
+  admina tenanta w panelu użytkowników (`/api/auth/me` je zwraca); admin ma je zawsze. Konto
+  zewnętrzne nie może go dostać. Bez niego każda trasa `/api/ksef` odpowiada 403.
+- **Wiązanie z kosztami:** pozycja kosztu MOŻE wskazywać fakturę
+  (`project_cost_items.ksef_invoice_id`), nie musi. `POST …/finance/costs` z
+  `ksef_invoice_id`: kwota domyślna = całe netto faktury (edytowalna), data = data
+  wystawienia, dostawca i numer dokumentu z faktury. Przy innej walucie niż projekt kwota
+  domyślna liczy się kursem NBP z dnia roboczego przed datą **wystawienia** faktury (nie datą
+  kosztu); jawne `amount` wygrywa. Istniejącą pozycję podpina i odpina
+  `PATCH` z `ksef_invoice_id` / `null`; usunięcie pozycji usuwa powiązanie.
+- **Wiązanie nigdy nie jest blokowane.** Ta sama faktura może być powiązana wiele razy — z
+  wieloma zadaniami i projektami, nawet dwa razy z tym samym. Zamiast blokady każda
+  odpowiedź z powiązaną pozycją niesie `ksef_invoice` (z `links_count`, `linked_total`,
+  `is_over_allocated`) i `other_links` (pozostałe pozycje tej samej faktury).
+  `linked_total` jest w walucie faktury: powiązanie w tej samej walucie liczy się kwotą;
+  w innej — `original_amount`, jeśli wpisano go w walucie faktury, inaczej kwotą przeliczoną
+  kursem NBP dla daty wystawienia; brak kursu → `null` (nie zgadujemy).
+  `is_over_allocated` = `linked_total` > netto faktury; liczą się pozycje `planned`
+  i `incurred`.
+- **Kto wiąże:** kto może zapisywać finanse projektu (PM, admin tenanta) **i** ma uprawnienie
+  KSeF. Uczestnik z opcją „dodaje koszty do własnych zadań” nigdy nie użyje faktury KSeF.
+  Podsumowanie faktury i `other_links` widzi każdy, kto czyta finanse projektu — także bez
+  uprawnienia KSeF (uczestnik widzący tylko własne pozycje ich nie dostaje). Zamknięty
+  projekt — tylko odczyt. Podpięcie i odpięcie idą do `audit_logs` jak inne zmiany kosztu
+  (`ksef_invoice_id` w `before_state` / `after_state`).
+
+**Zmienna środowiskowa:** `KSEF_ENVIRONMENT` = `test` | `production` (to nie sekret —
+zwykła zmienna Container Appa). Pusta = integracja wyłączona: job nie startuje (ostrzeżenie
+w logu), zapis tokenu i „synchronizuj teraz” odpowiadają 400, ekran konfiguracji dostaje
+`is_configured: false`. Adresy API są w `ksefApiClient.js`. Klucz szyfrowania tokenów to
+istniejące `EMAIL_ENCRYPTION_KEY` (z fallbackiem na `JWT_SECRET`) — zmiana klucza unieważnia
+zapisane tokeny.
+
+**Token testowy:** środowisko testowe MF (`api-test.ksef.mf.gov.pl`) przyjmuje dowolny NIP
+z poprawną sumą kontrolną i certyfikat samopodpisany (tylko z
+`?verifyCertificateChain=false`). Token powstaje tak: uwierzytelnienie XAdES pieczęcią
+samopodpisaną dla NIP-u nabywcy → `POST /tokens` z `permissions: ["InvoiceRead"]` (wartość
+tokenu wraca tylko raz) → faktury testowe wysyła się sesją online jako inny NIP
+(sprzedawca). Backend nie zawiera kodu XAdES — to narzędzie deweloperskie, nie funkcja
+aplikacji. Lokalnie ustaw `KSEF_ENVIRONMENT=test` w `.env.local`. Testy Jest nie wołają
+prawdziwego KSeF (`src/__tests__/helpers/ksefMock.js` udaje API z prawdziwym RSA/AES).
+
+### Baza danych (migracje 0307–0311, finanse 0316–0317, KSeF 0319)
 
 `project_task_statuses`, `project_task_types`, `project_task_priorities`,
 `project_status_transitions`, `project_field_definitions`, `projects`, `project_members`,
@@ -386,6 +466,13 @@ planowany przychód, `participants_can_add_costs`), `project_category_budgets`,
 `exchange_rate_date`), `project_revenue_items`, kolumna `project_tasks.planned_cost` oraz
 globalna tabela kursów `nbp_exchange_rates`.
 
+KSeF: `ksef_companies` (NIP, zaszyfrowany token, `token_hint`, `status`, `last_error`,
+kursor `sync_from`, `last_attempt_at`, `last_synced_at`; `UNIQUE (tenant_id, nip)`),
+`ksef_invoices` (pola z metadanych i XML, `payment` i `lines` jako JSONB, `metadata`,
+`raw_xml`; `UNIQUE (tenant_id, ksef_number)`), kolumny
+`project_cost_items.ksef_invoice_id` / `ksef_linked_by` / `ksef_linked_at` oraz
+`users.can_view_ksef_invoices`.
+
 ### Kluczowe pliki
 
 - `src/routes/projects.js` — projekty, członkowie, pola, powiązanie z CRM, czat projektu,
@@ -395,9 +482,18 @@ globalna tabela kursów `nbp_exchange_rates`.
   podsumowanie, plan, pozycje kosztów i przychodów, planowany koszt zadania.
 - `src/routes/admin-project-config.js` — konfiguracja admina tenanta, w tym przełącznik
   finansów i słownik `cost-categories`.
+- `src/routes/admin-ksef.js` (`/api/admin/ksef`) — firmy i tokeny KSeF, zakres pierwszej
+  synchronizacji. `src/routes/ksef.js` (`/api/ksef`) — lista i szczegóły faktur, stan firm,
+  „synchronizuj teraz”. Wiązanie faktur idzie przez `project-finance.js`.
+- KSeF w serwisach: `ksefApiClient.js` (HTTP: uwierzytelnienie tokenem, eksport, 429),
+  `ksefPackage.js` (hash, AES, ZIP), `ksefInvoiceParser.js` (FA(3)), `ksefSyncService.js`
+  (okna, kursor, blokada, statusy — reguły w nagłówku pliku), `ksefCompanyService.js`
+  (konfiguracja i tokeny), `ksefInvoiceService.js` (lista, szczegóły, powiązania — reguła
+  `linked_total` w nagłówku pliku). Job: `src/jobs/ksef-sync.js`.
 - `src/middleware/project-access.js` — `loadProject` (404 także dla nie-członka, żeby nie
   ujawniać id), `requireProjectManager`, `requireOpenProject`, a dla finansów
-  `requireFinanceEnabled`, `loadFinanceAccess` i `requireFinance*` / `requireCost*`.
+  `requireFinanceEnabled`, `requireKsefAccess`, `loadFinanceAccess` i `requireFinance*` /
+  `requireCost*`.
 - `src/services/projectService.js`, `projectTaskService.js` (reguły uprawnień do zadań są
   opisane w nagłówku pliku), `projectConfigService.js`, `projectCrmLinkService.js`,
   `projectMessageService.js`, `projectFinanceService.js` (reguły uprawnień do finansów
@@ -409,13 +505,17 @@ globalna tabela kursów `nbp_exchange_rates`.
   `project_task_updated`).
 - Testy: `src/__tests__/projects.test.js`, `project-tasks.test.js`,
   `projects-crm-integration.test.js`, `project-finance.test.js`,
-  `projectFinanceCalculations.test.js` (bez bazy).
+  `projectFinanceCalculations.test.js` (bez bazy), `ksef-sync.test.js` (klient, paczki,
+  synchronizacja), `ksef-invoices.test.js` (trasy, uprawnienia, wiązanie),
+  `ksefInvoiceParser.test.js` (bez bazy; fixture to próbka MF `tpl-fa3-s3.xml`).
 
 ### Poza zakresem pierwszej wersji
 
 Załączniki, aplikacja mobilna (kontrakt `mobile-v1.yaml` nie zawiera Projektów), zależności
 między zadaniami, licznik nieprzeczytanych wiadomości, edycja i usuwanie wiadomości czatu.
-W finansach: faktury KSeF, typ dokumentu „Faktura”, VAT, wiele walut w jednym projekcie.
+W finansach: typ dokumentu „Faktura”, VAT, wiele walut w jednym projekcie. W KSeF: faktury
+korygujące, rejestracja faktury w module Dokumenty, wizualizacja PDF, faktury wpisywane
+ręcznie, faktury sprzedaży jako przychód.
 
 ---
 

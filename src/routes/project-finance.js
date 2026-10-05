@@ -6,8 +6,8 @@
 //                                         "participants may add costs" (PM, admin)
 // PUT    /tasks/:taskId/planned-cost    — planned cost of a task (PM, admin)
 // GET    /costs                         — cost items (?task_id=); a participant gets only own items
-// POST   /costs
-// PATCH  /costs/:itemId
+// POST   /costs                         — with ksef_invoice_id: a cost item created from a KSeF invoice
+// PATCH  /costs/:itemId                 — ksef_invoice_id (uuid | null) attaches / detaches an invoice
 // DELETE /costs/:itemId
 // GET    /revenues                      — revenue items (PM, admin, controller)
 // POST   /revenues                      — (PM, admin)
@@ -120,8 +120,11 @@ function costItemRules({ isCreate }) {
   const date = isDateOnly(body('date'));
   const category = isAnyUUID(body('category_id'));
   return [
-    isCreate ? date : date.optional(),
+    // On create the date may be left out only with ksef_invoice_id (it then
+    // defaults to the invoice issue date) — the service enforces that.
+    date.optional(),
     isCreate ? category : category.optional(),
+    isAnyUUID(body('ksef_invoice_id').optional({ nullable: true })),
     isPositiveMoney(body('amount').optional({ nullable: true })),
     isPositiveMoney(body('original_amount').optional({ nullable: true })),
     body('original_currency').optional({ nullable: true }).matches(CURRENCY_RE),

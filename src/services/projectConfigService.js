@@ -372,6 +372,7 @@ module.exports = {
   TRANSITION_ROLES,
   FIELD_TYPES,
   COST_CATEGORIES,
+  FINANCE_SETTING_KEY,
   ensureDefaults,
   isFinanceEnabled,
   setFinanceEnabled,

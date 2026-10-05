@@ -200,7 +200,7 @@ async function requireAuth(req, res, next) {
     const { rows } = await db.query(
       `SELECT id, email, first_name, last_name, display_name,
               is_admin, is_active, crm_role, tenant_id, is_super_admin,
-              is_external, can_create_projects
+              is_external, can_create_projects, can_view_ksef_invoices
        FROM users WHERE id = $1`,
       [decoded.sub]
     );

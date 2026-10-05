@@ -42,6 +42,13 @@ async function requireFinanceEnabled(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// KSeF invoices belong to project finance and need their own per-user right;
+// the tenant admin always has it.
+function requireKsefAccess(req, res, next) {
+  if (req.user.is_admin || req.user.can_view_ksef_invoices) return next();
+  return res.status(403).json({ error: 'No access to KSeF invoices' });
+}
+
 // Needs loadProject. Exposes what the caller may do with the project's finance.
 async function loadFinanceAccess(req, res, next) {
   try {
@@ -82,6 +89,7 @@ module.exports = {
   requireProjectManager,
   requireOpenProject,
   requireFinanceEnabled,
+  requireKsefAccess,
   loadFinanceAccess,
   requireFinanceRead,
   requireFinanceWrite,
