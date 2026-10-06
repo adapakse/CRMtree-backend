@@ -1129,7 +1129,12 @@ router.get('/:id',
       let can_edit = true;
       if (!req.user.is_admin) {
         if (req.user.crm_role === 'sales_manager') {
-          can_edit = !req.crmScopeUserIds || req.crmScopeUserIds.includes(lead.assigned_to);
+          // Scope ZAPISU — grant 'read' poszerza wyłącznie crmScopeUserIds, więc
+          // czytanie go tutaj pokazywałoby edytowalny formularz, który i tak
+          // poleciałby 403 z assertOwnership. Fallback zachowuje zachowanie tam,
+          // gdzie loadCrmModuleGrants nie jest w łańcuchu (jak w crm-partners.js).
+          const writeScope = req.crmWriteScopeUserIds ?? req.crmScopeUserIds;
+          can_edit = !writeScope || writeScope.includes(lead.assigned_to);
         } else {
           // own lead, or a lead of someone I'm actively substituting
           can_edit = canOperateForOwner(req, lead.assigned_to);
