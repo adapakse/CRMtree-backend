@@ -9,7 +9,12 @@
 // GET /tasks     — tasks across the projects in scope: paged, filtered, sorted
 // GET /gantt     — the same filtered tasks for the timeline, unpaged up to a cap
 // GET /projects  — the projects in scope: paged, filtered, sorted; dates, task
-//                  counts, delay, PMs
+//                  counts, delay, PMs, can_filter_finance
+// GET /people    — everyone who is a member of, or assigned to a task in, a
+//                  project in scope (the "participant" filter), unpaged up to a cap
+// GET /project-options — id, key, name and dates of every project in scope
+//                  (the project filter, the end-date lines of the timeline),
+//                  unpaged up to a cap
 // Query parameters: middleware/project-list-query.
 
 const router = require('express').Router();
@@ -60,6 +65,18 @@ router.get('/gantt', taskFilterRules, validate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router.get('/people', async (req, res, next) => {
+  try {
+    res.json(await projectPortfolioService.listScopePeople({ scopeProjectIds: req.scopeProjectIds }));
+  } catch (err) { next(err); }
+});
+
+router.get('/project-options', async (req, res, next) => {
+  try {
+    res.json(await projectPortfolioService.listScopeProjectOptions({ scopeProjectIds: req.scopeProjectIds }));
+  } catch (err) { next(err); }
+});
+
 router.get('/projects', projectListRules, validate, async (req, res, next) => {
   try {
     const page = await projectService.searchProjects({
@@ -77,6 +94,8 @@ router.get('/projects', projectListRules, validate, async (req, res, next) => {
     res.json({
       ...page,
       items: page.items.map((project) => ({ ...project, finance: financeByProject.get(project.id) ?? null })),
+      // Whoever has the view is admin, PM or controller of a project, so the tenant switch decides alone.
+      can_filter_finance: req.isFinanceEnabled,
     });
   } catch (err) { next(err); }
 });

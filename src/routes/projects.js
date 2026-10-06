@@ -8,7 +8,8 @@
 //                                                  at-risk threshold, has_cross_project_view
 // GET    /api/projects                           — projects the user is a member of (admin: all), paged,
 //                                                  filtered and sorted (middleware/project-list-query);
-//                                                  finance totals for PM / admin / controller
+//                                                  finance totals for PM / admin / controller;
+//                                                  can_create, can_filter_finance
 // POST   /api/projects                           — create (admin or users.can_create_projects)
 // GET    /api/projects/:id                       — project card: project (with its delay), members, fields
 // PATCH  /api/projects/:id                       — name / description / start and end date
@@ -127,20 +128,23 @@ router.get(
 router.get('/', projectListRules, validate, async (req, res, next) => {
   try {
     const filters = readProjectFilters(req);
+    const isFinanceEnabled = await projectConfigService.isFinanceEnabled(req.tenantId);
     const page = await projectService.searchProjects({
       tenantId: req.tenantId,
       user: req.user,
-      isFinanceEnabled: await projectConfigService.isFinanceEnabled(req.tenantId),
+      isFinanceEnabled,
       filters: { ...filters, status: filters.status || 'open' },
       ...readPagingAndSort(req),
     });
-    const financeByProject = await projectFinanceService.loadTotalsForList({
-      tenantId: req.tenantId, user: req.user, projects: page.items,
-    });
+    const [financeByProject, canFilterFinance] = await Promise.all([
+      projectFinanceService.loadTotalsForList({ tenantId: req.tenantId, user: req.user, projects: page.items }),
+      projectFinanceService.canReadAnyProjectFinance({ tenantId: req.tenantId, user: req.user, isFinanceEnabled }),
+    ]);
     res.json({
       ...page,
       items: page.items.map((project) => ({ ...project, finance: financeByProject.get(project.id) ?? null })),
       can_create: Boolean(req.user.is_admin || req.user.can_create_projects),
+      can_filter_finance: canFilterFinance,
     });
   } catch (err) { next(err); }
 });

@@ -86,8 +86,22 @@ const PROJECT_SORT_EXPRESSIONS = {
   // Delayed projects first when ascending; among them the longest overrun first.
   delay:      ['(NOT (project.has_task_after_end OR project.has_end_passed))',
                '(-GREATEST(COALESCE(project.days_after_end, 0), COALESCE(project.days_since_end, 0)))'],
+  pm:         ['project.first_manager_name'],
+  progress:   ['project.progress_percent'],
+  overdue:    ['project.overdue_task_count'],
+  at_risk:    ['project.at_risk_task_count'],
+  // Raw amounts in each project's own currency; NULL (finance not readable) sorts last.
+  cost:       ['project.filter_cost'],
+  revenue:    ['project.filter_revenue'],
 };
 const PROJECT_SORT_KEYS = Object.keys(PROJECT_SORT_EXPRESSIONS);
+// Selected only to filter or sort by; not part of a project row.
+const PROJECT_HELPER_COLUMNS = ['filter_cost', 'filter_revenue', 'first_manager_name'];
+const DELAY_REASON_COLUMNS = {
+  task_after_end: 'project.has_task_after_end',
+  end_passed:     'project.has_end_passed',
+};
+const DELAY_REASONS = Object.keys(DELAY_REASON_COLUMNS);
 const MY_ROLE_FILTERS = {
   pm:          ['pm'],
   controller:  ['controller'],
@@ -111,7 +125,13 @@ function projectOrderBy(sort, order) {
 //
 // filters (all optional, combined with AND): status ('open' | 'closed' | 'all'),
 // name (matches name or key), startFrom/startTo, endFrom/endTo, isDelayed,
-// leadId, partnerId, myRoles, costMin/costMax, revenueMin/revenueMax.
+// leadId, partnerId, myRoles, managerId (a PM of the project), delayReasons
+// (any of them), overdueMin/overdueMax and atRiskMin/atRiskMax (task counts),
+// progressMin/progressMax (progress_percent), costMin/costMax,
+// revenueMin/revenueMax.
+// progress_percent is the share of done tasks rounded to a whole percent, 0
+// for a project without tasks — the number the row carries, so the filter and
+// the column always agree.
 // The amounts are the actual ones the list shows (incurred cost; invoiced and
 // paid revenue), in each project's own currency — never converted. As in the
 // task lists, they are known only where the user may read the project's
@@ -145,6 +165,21 @@ async function searchProjects({
     const roles = filters.myRoles.flatMap((role) => MY_ROLE_FILTERS[role]);
     inner.push(`me.role = ANY(${addParam(roles)}::text[])`);
   }
+  if (filters.managerId) {
+    inner.push(`EXISTS (SELECT 1 FROM project_members manager
+                        WHERE manager.project_id = p.id AND manager.role = 'pm'
+                          AND manager.user_id = ${addParam(filters.managerId)}::uuid)`);
+  }
+  const countRange = (column, min, max) => {
+    if (min !== undefined) outer.push(`${column} >= ${addParam(min)}::int`);
+    if (max !== undefined) outer.push(`${column} <= ${addParam(max)}::int`);
+  };
+  countRange('project.overdue_task_count', filters.overdueMin, filters.overdueMax);
+  countRange('project.at_risk_task_count', filters.atRiskMin, filters.atRiskMax);
+  countRange('project.progress_percent', filters.progressMin, filters.progressMax);
+  if (filters.delayReasons?.length) {
+    outer.push(`(${filters.delayReasons.map((reason) => DELAY_REASON_COLUMNS[reason]).join(' OR ')})`);
+  }
   if (filters.isDelayed !== undefined) {
     outer.push(`(project.has_task_after_end OR project.has_end_passed) = ${addParam(filters.isDelayed)}::boolean`);
   }
@@ -163,6 +198,8 @@ async function searchProjects({
            me.role AS my_role, me.access_level AS my_access_level,
            (SELECT COUNT(*)::int FROM project_members m WHERE m.project_id = p.id) AS member_count,
            counts.task_count, counts.done_task_count, counts.overdue_task_count, counts.at_risk_task_count,
+           CASE WHEN counts.task_count = 0 THEN 0
+                ELSE ROUND(counts.done_task_count * 100.0 / counts.task_count)::int END AS progress_percent,
            (SELECT COUNT(*)::int
               FROM project_tasks t
               JOIN project_task_statuses s ON s.id = t.status_id
@@ -175,6 +212,10 @@ async function searchProjects({
              JOIN users u ON u.id = manager.user_id
              WHERE manager.project_id = p.id AND manager.role = 'pm'
            ), '[]'::json) AS project_managers,
+           (SELECT MIN(lower(u.display_name))
+            FROM project_members manager
+            JOIN users u ON u.id = manager.user_id
+            WHERE manager.project_id = p.id AND manager.role = 'pm') AS first_manager_name,
            ${projectDeadlineService.projectDelayColumns('$3')},
            CASE WHEN ${canReadFinance} THEN (
              SELECT COALESCE(SUM(c.amount), 0) FROM project_cost_items c
@@ -214,9 +255,8 @@ async function searchProjects({
   ]);
   const items = rows.map((row) => {
     const project = projectDeadlineService.withProjectDelay(row);
-    // Selected only to filter by; the amounts shown come with the finance totals.
-    delete project.filter_cost;
-    delete project.filter_revenue;
+    // The amounts shown come with the finance totals.
+    for (const column of PROJECT_HELPER_COLUMNS) delete project[column];
     return project;
   });
   return { items, total, page, page_size: pageSize };
@@ -478,6 +518,7 @@ module.exports = {
   EDITABLE_PROJECT_FIELDS,
   PROJECT_SORT_KEYS,
   MY_ROLE_FILTERS,
+  DELAY_REASONS,
   buildKeyBase,
   searchProjects,
   createProject,

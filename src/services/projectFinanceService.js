@@ -131,6 +131,21 @@ async function canReadTaskCosts({ tenantId, membership, canManage }) {
     && projectConfigService.isFinanceEnabled(tenantId);
 }
 
+// Whether the user reads the finance of at least one project, open or closed:
+// the lists offer their cost and revenue filters only then.
+async function canReadAnyProjectFinance({ tenantId, user, isFinanceEnabled }) {
+  if (!isFinanceEnabled) return false;
+  if (user.is_admin) return true;
+  const { rows: [found] } = await db.query(
+    `SELECT EXISTS (
+       SELECT 1 FROM project_members
+       WHERE tenant_id = $1 AND user_id = $2 AND role IN ('pm', 'controller')
+     ) AS can_read`,
+    [tenantId, user.id],
+  );
+  return found.can_read;
+}
+
 // What the project card tells the frontend about finance; null when the
 // caller has nothing to do with it (or the tenant switch is off).
 async function describeAccess({ tenantId, project, membership, canManage }) {
@@ -755,6 +770,7 @@ module.exports = {
   resolveAccess,
   canReadTaskCosts,
   describeAccess,
+  canReadAnyProjectFinance,
   loadTotalsByProject,
   loadTotalsForList,
   getSummary,

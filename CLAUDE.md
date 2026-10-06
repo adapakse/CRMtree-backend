@@ -410,7 +410,12 @@ w strefie `Europe/Warsaw` (ta sama co przypomnienia). Reguły: nagłówek
 - **Widok międzyprojektowy** (`/api/projects/portfolio`): admin tenanta — wszystkie otwarte
   projekty; każdy inny — otwarte projekty, w których jest PM-em albo kontrolerem; pozostali 403.
   `GET /api/projects/config` zwraca `has_cross_project_view`. Zamknięte projekty nigdy tu nie
-  wchodzą.
+  wchodzą. Filtry widoku zasilają dwa słowniki zakresu, bez stron (limit 500 + `truncated`):
+  `GET /portfolio/people` → `{ people: [{ user_id, display_name }] }` — każdy, kto jest członkiem
+  projektu z zakresu albo jest przypisany do zadania w takim projekcie (także konto
+  nieaktywne), po nazwie; `GET /portfolio/project-options` →
+  `{ projects: [{ id, key, name, start_date, end_date }] }` — wszystkie projekty zakresu, po
+  prefiksie (wybór projektów i linie końca projektu na osi czasu).
 - **Maile** (`projectDeadlineNotificationService.js`), w języku **odbiorcy** jak każdy inny
   mail:
   - *zmiana terminu zadania* — od razu, do PM-ów projektu poza tym, który sam zmienił
@@ -446,6 +451,10 @@ wartość = 400, pusta = filtr nieużyty.
 - **Oś czasu** potrzebuje całego przefiltrowanego zbioru: `GET /api/projects/:id/tasks/gantt`
   i `GET /api/projects/portfolio/gantt` — bez stron, limit 500 zadań i flaga `truncated`,
   te same filtry.
+- **Sortowanie zadań:** `number`, `name`, `parent` (podzadania pogrupowane po zadaniu
+  nadrzędnym, zadania bez nadrzędnego na końcu w obu kierunkach), `project`, `status`,
+  `priority`, `type`, `assignee`, `start_date`, `end_date`, `original_end_date`, `slip_days`,
+  `days_overdue`, `timeliness`, `cost`.
 - **Filtry zadań** (`projectTaskFilters.js`, te same nazwy wszędzie): `name`, `number`,
   `project_ids`, `status_ids`, `status_category`, `priority_ids`, `type_ids`, `assignee`
   (id albo `unassigned`; w „moich zadaniach” ignorowany), `start_from`/`start_to`,
@@ -458,11 +467,26 @@ wartość = 400, pusta = filtr nieużyty.
   przepuszcza zadanie.
 - **Lista projektów** (`GET /api/projects`, `projectService.searchProjects`) — filtry:
   `status`, `name` (nazwa albo prefiks), `start_from`/`start_to`, `end_from`/`end_to`,
-  `delayed`, `lead_id`, `partner_id`, `my_role` (`pm` | `controller` | `participant`),
+  `delayed`, `delay_reason` (`task_after_end` | `end_passed`, lista — dowolny z podanych),
+  `lead_id`, `partner_id`, `my_role` (`pm` | `controller` | `participant`), `pm` (id usera —
+  projekty, w których jest PM-em), `overdue_min`/`overdue_max` i `at_risk_min`/`at_risk_max`
+  (liczba zadań, liczby całkowite ≥ 0), `progress_min`/`progress_max` (całkowite 0–100),
   `cost_min`/`cost_max` i `revenue_min`/`revenue_max` (kwoty rzeczywiste, te same co
   w `finance`; ta sama reguła widoczności co koszt zadania); sortowanie: `name`, `key`,
-  `status`, `start_date`, `end_date`, `delay`. `GET /api/projects/portfolio/projects` to to samo
-  zapytanie zawężone do zakresu widoku (zawsze tylko otwarte).
+  `status`, `start_date`, `end_date`, `delay`, `pm` (alfabetycznie pierwszy PM), `progress`,
+  `overdue`, `at_risk`, `cost`, `revenue` (surowe kwoty w walucie projektu, bez przeliczania;
+  projekty, których finansów pytający nie czyta, idą na koniec w obu kierunkach).
+  `GET /api/projects/portfolio/projects` to to samo zapytanie zawężone do zakresu widoku
+  (zawsze tylko otwarte).
+  - **Zasada właściciela produktu: każda kolumna tabeli ma filtr i sortowanie.** Dodając
+    kolumnę do przeglądu projektów albo listy zadań, dodaj od razu jej filtr i klucz sortowania.
+  - **`progress_percent`** w wierszu projektu = udział zakończonych zadań zaokrąglony do
+    całego procenta, 0 dla projektu bez zadań. Filtr i sortowanie postępu działają na tej
+    samej liczbie — frontend ma ją pokazywać, a nie liczyć własną.
+  - **`can_filter_finance`** w odpowiedzi obu list projektów: finanse włączone i pytający
+    czyta finanse co najmniej jednego projektu (admin tenanta albo PM/kontroler dowolnego
+    projektu, otwartego lub zamkniętego). Frontend pokazuje filtry kosztu i przychodu tylko
+    wtedy.
 - **Zostały bez stron, celowo:** `GET /api/projects/:id/tasks` (całe drzewo dla niefiltrowanego
   widoku projektu) i `GET /api/projects/assigned-tasks` (zasilanie kalendarza i dashboardu CRM
   — potrzebują całego zbioru). Nie dodawaj do nich filtrów — do tego są listy stronicowane.

@@ -27,6 +27,9 @@ const GANTT_TASK_LIMIT = 500;
 const SORT_EXPRESSIONS = {
   number:            ['task.project_key', 'task.task_number'],
   name:              ['lower(task.name)'],
+  // Subtasks grouped by parent, top-level tasks last. Uses the parent number
+  // the row shows, so a parent hidden from a restricted viewer does not order it.
+  parent:            ['CASE WHEN task.parent_task_number IS NOT NULL THEN task.project_key END', 'task.parent_task_number'],
   project:           ['lower(task.project_name)'],
   status:            ['task.status_sort_order', 'lower(task.status_name)'],
   priority:          ['task.priority_sort_order', 'lower(task.priority_name)'],

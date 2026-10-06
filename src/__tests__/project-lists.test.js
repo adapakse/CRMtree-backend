@@ -227,6 +227,14 @@ describe('sorting of task lists', () => {
     expect(await namesOf('?sort=cost&order=desc')).toEqual(['Alfa', 'beta', 'gamma', 'Delta']);
   });
 
+  test('by parent: subtasks grouped by their parent, top-level tasks last in both directions', async () => {
+    const [beta, alfa, gamma, delta] = (await search()).items;
+    await api('patch', tasksUrl(`/${gamma.id}`), pm).send({ parent_task_id: alfa.id });
+    await api('patch', tasksUrl(`/${delta.id}`), pm).send({ parent_task_id: beta.id });
+    expect(await namesOf('?sort=parent')).toEqual(['Delta', 'gamma', 'beta', 'Alfa']);
+    expect(await namesOf('?sort=parent&order=desc')).toEqual(['gamma', 'Delta', 'beta', 'Alfa']);
+  });
+
   test('an unknown sort key or direction is rejected', async () => {
     expect((await api('get', tasksUrl('/search?sort=size'), pm)).status).toBe(400);
     expect((await api('get', tasksUrl('/search?sort=name&order=up'), pm)).status).toBe(400);
@@ -495,5 +503,215 @@ describe('projects list', () => {
     // The worker is controller of Beta only.
     const asController = await api('get', '/api/projects/portfolio/projects', worker);
     expect(asController.body.items.map((row) => row.name)).toEqual(['Beta Serwis']);
+  });
+
+  describe('every column of the overview: filters, sorting and lookups', () => {
+    let secondPm, atRiskTask;
+    const overviewNames = async (user, queryString = '') => {
+      const res = await api('get', `/api/projects/portfolio/projects${queryString}`, user);
+      expect(res.status).toBe(200);
+      return res.body.items.map((row) => row.name);
+    };
+
+    // Alfa: 1 overdue + 1 done task (50 %), end date passed. Beta: 2 at-risk, 1 done and 1 task
+    // ending after the project (25 %), PMs Adam and Piotr. "Listy Zadań": no tasks.
+    beforeAll(async () => {
+      secondPm = await mkUser('lpm2', 'Adam');
+      expect((await api('post', `/api/projects/${beta.id}/members`, pm).send({ user_id: secondPm.id, role: 'pm' })).status).toBe(201);
+      jest.spyOn(emailUtil, 'sendMail').mockResolvedValue();
+      atRiskTask = await createTask({ name: 'Ryzyko 1', end_date: day(1) }, beta);
+      await createTask({ name: 'Ryzyko 2', end_date: day(2) }, beta);
+      await createTask({ name: 'Gotowe', status_id: statusByName['Zakończone'] }, beta);
+      await createTask({ name: 'Po końcu projektu', end_date: day(70), status_id: statusByName['W toku'] }, beta);
+    });
+
+    afterAll(async () => {
+      await db.query('DELETE FROM project_tasks WHERE project_id = $1', [beta.id]);
+      await db.query('DELETE FROM project_members WHERE project_id = $1 AND user_id = $2', [beta.id, secondPm.id]);
+    });
+
+    test('a row carries progress_percent, the number the progress filter and sort use', async () => {
+      const rows = (await listProjects(pm, '?sort=name')).body.items;
+      expect(rows.map((row) => [row.name, row.progress_percent])).toEqual([
+        ['Alfa Wdrożenie', 50], ['Beta Serwis', 25], ['Listy Zadań', 0],
+      ]);
+      expect(rows[0]).not.toHaveProperty('first_manager_name');
+    });
+
+    test('by PM', async () => {
+      expect(await projectNames(pm, `?pm=${secondPm.id}`)).toEqual(['Beta Serwis']);
+      expect(await projectNames(pm, `?pm=${pm.id}`)).toEqual(['Alfa Wdrożenie', 'Beta Serwis', 'Listy Zadań']);
+      // A member who is not a PM of the project does not match.
+      expect(await projectNames(admin, `?pm=${worker.id}`)).toEqual([]);
+      expect(await overviewNames(pm, `?pm=${secondPm.id}`)).toEqual(['Beta Serwis']);
+      expect((await listProjects(pm, '?pm=adam')).status).toBe(400);
+    });
+
+    test('by the number of overdue and at-risk tasks', async () => {
+      expect(await projectNames(pm, '?overdue_min=1')).toEqual(['Alfa Wdrożenie']);
+      expect(await projectNames(pm, '?overdue_max=0')).toEqual(['Beta Serwis', 'Listy Zadań']);
+      expect(await projectNames(pm, '?overdue_min=2')).toEqual([]);
+      expect(await projectNames(pm, '?at_risk_min=2&at_risk_max=2')).toEqual(['Beta Serwis']);
+      expect(await projectNames(pm, '?at_risk_max=1')).toEqual(['Alfa Wdrożenie', 'Listy Zadań']);
+      expect(await overviewNames(pm, '?at_risk_min=1')).toEqual(['Beta Serwis']);
+      for (const queryString of ['?overdue_min=-1', '?overdue_max=many', '?at_risk_min=1.5', '?at_risk_max=-2']) {
+        expect((await listProjects(pm, queryString)).status).toBe(400);
+      }
+    });
+
+    test('by progress in percent; a project without tasks counts as 0', async () => {
+      expect(await projectNames(pm, '?progress_min=25&progress_max=25')).toEqual(['Beta Serwis']);
+      expect(await projectNames(pm, '?progress_min=26')).toEqual(['Alfa Wdrożenie']);
+      expect(await projectNames(pm, '?progress_max=0')).toEqual(['Listy Zadań']);
+      expect(await projectNames(pm, '?progress_min=0&progress_max=100')).toEqual(['Alfa Wdrożenie', 'Beta Serwis', 'Listy Zadań']);
+      expect(await overviewNames(pm, '?progress_min=50')).toEqual(['Alfa Wdrożenie']);
+      for (const queryString of ['?progress_min=101', '?progress_max=-1', '?progress_min=half', '?progress_max=12.5']) {
+        expect((await listProjects(pm, queryString)).status).toBe(400);
+      }
+    });
+
+    test('by delay reason — any of the listed ones', async () => {
+      expect(await projectNames(pm, '?delay_reason=end_passed')).toEqual(['Alfa Wdrożenie']);
+      expect(await projectNames(pm, '?delay_reason=task_after_end')).toEqual(['Beta Serwis']);
+      expect(await projectNames(pm, '?delay_reason=task_after_end,end_passed')).toEqual(['Alfa Wdrożenie', 'Beta Serwis']);
+      expect(await projectNames(pm, '?delay_reason=end_passed&delayed=false')).toEqual([]);
+      expect(await overviewNames(pm, '?delay_reason=task_after_end')).toEqual(['Beta Serwis']);
+      expect((await listProjects(pm, '?delay_reason=late')).status).toBe(400);
+      expect((await listProjects(pm, '?delay_reason=end_passed,late')).status).toBe(400);
+    });
+
+    test('sortable by PM, progress and the overdue and at-risk counts', async () => {
+      // Alphabetically first PM: Adam (Beta), Piotr (the other two, kept in name order).
+      expect(await projectNames(pm, '?sort=pm')).toEqual(['Beta Serwis', 'Alfa Wdrożenie', 'Listy Zadań']);
+      expect(await projectNames(pm, '?sort=pm&order=desc')).toEqual(['Alfa Wdrożenie', 'Listy Zadań', 'Beta Serwis']);
+      expect(await projectNames(pm, '?sort=progress')).toEqual(['Listy Zadań', 'Beta Serwis', 'Alfa Wdrożenie']);
+      expect(await projectNames(pm, '?sort=progress&order=desc')).toEqual(['Alfa Wdrożenie', 'Beta Serwis', 'Listy Zadań']);
+      expect(await projectNames(pm, '?sort=overdue&order=desc')).toEqual(['Alfa Wdrożenie', 'Beta Serwis', 'Listy Zadań']);
+      expect(await projectNames(pm, '?sort=at_risk&order=desc')).toEqual(['Beta Serwis', 'Alfa Wdrożenie', 'Listy Zadań']);
+      expect(await projectNames(pm, '?sort=at_risk')).toEqual(['Alfa Wdrożenie', 'Listy Zadań', 'Beta Serwis']);
+      expect(await overviewNames(pm, '?sort=progress&order=desc')).toEqual(['Alfa Wdrożenie', 'Beta Serwis', 'Listy Zadań']);
+    });
+
+    test('sortable by cost and revenue; projects whose finance the viewer cannot read go last', async () => {
+      const categoryId = (await setFinance(true)).body.cost_categories[0].id;
+      const projectIds = [alfa.id, beta.id, project.id];
+      await db.query('DELETE FROM project_cost_items WHERE project_id = ANY($1::uuid[])', [projectIds]);
+      await db.query('DELETE FROM project_revenue_items WHERE project_id = ANY($1::uuid[])', [projectIds]);
+      const post = (target, kind, body) => api('post', `/api/projects/${target.id}/finance/${kind}`, pm).send(body);
+      expect((await post(alfa, 'costs', { date: day(-5), amount: 500, category_id: categoryId })).status).toBe(201);
+      expect((await post(beta, 'costs', { date: day(-5), amount: 100, category_id: categoryId })).status).toBe(201);
+      expect((await post(beta, 'revenues', { date: day(-5), amount: 2000, status: 'invoiced' })).status).toBe(201);
+      expect((await post(project, 'revenues', { date: day(-5), amount: 300, status: 'paid' })).status).toBe(201);
+
+      expect(await projectNames(pm, '?sort=cost')).toEqual(['Listy Zadań', 'Beta Serwis', 'Alfa Wdrożenie']);
+      expect(await projectNames(pm, '?sort=cost&order=desc')).toEqual(['Alfa Wdrożenie', 'Beta Serwis', 'Listy Zadań']);
+      expect(await projectNames(admin, '?sort=revenue&order=desc')).toEqual(['Beta Serwis', 'Listy Zadań', 'Alfa Wdrożenie']);
+      expect(await overviewNames(pm, '?sort=revenue')).toEqual(['Alfa Wdrożenie', 'Listy Zadań', 'Beta Serwis']);
+      // The worker reads the finance of Beta only: it leads in both directions.
+      expect(await projectNames(worker, '?sort=cost')).toEqual(['Beta Serwis', 'Alfa Wdrożenie', 'Listy Zadań']);
+      expect(await projectNames(worker, '?sort=cost&order=desc')).toEqual(['Beta Serwis', 'Alfa Wdrożenie', 'Listy Zadań']);
+
+      await setFinance(false);
+      // Nobody reads finance now: the order falls back to the name.
+      expect(await projectNames(pm, '?sort=cost&order=desc')).toEqual(['Alfa Wdrożenie', 'Beta Serwis', 'Listy Zadań']);
+    });
+
+    test('can_filter_finance: finance is on and the caller reads the finance of some project', async () => {
+      const canFilter = async (user, url = '/api/projects') => (await api('get', url, user)).body.can_filter_finance;
+      const closedOnlyPm = await mkUser('lclosedpm', 'Celina');
+      await db.query(
+        `INSERT INTO project_members (project_id, user_id, tenant_id, role, access_level) VALUES ($1, $2, $3, 'pm', 'full')`,
+        [closed.id, closedOnlyPm.id, tenantId],
+      );
+
+      for (const user of [admin, pm, worker, external, closedOnlyPm]) expect(await canFilter(user)).toBe(false);
+      expect(await canFilter(pm, '/api/projects/portfolio/projects')).toBe(false);
+
+      await setFinance(true);
+      expect(await canFilter(admin)).toBe(true);
+      expect(await canFilter(pm)).toBe(true);
+      // Controller of Beta; plain participant elsewhere.
+      expect(await canFilter(worker)).toBe(true);
+      expect(await canFilter(external)).toBe(false);
+      // PM of a closed project only: nothing on the default list, but its finance is readable.
+      expect((await listProjects(closedOnlyPm)).body).toMatchObject({ total: 0, can_filter_finance: true });
+      expect(await canFilter(pm, '/api/projects/portfolio/projects')).toBe(true);
+      expect(await canFilter(worker, '/api/projects/portfolio/projects')).toBe(true);
+    });
+
+    test('people of the scope: members and task assignees, by name', async () => {
+      const peopleOf = (user) => api('get', '/api/projects/portfolio/people', user);
+      const names = (res) => res.body.people.map((person) => person.display_name);
+
+      const asPm = await peopleOf(pm);
+      expect(asPm.status).toBe(200);
+      expect(asPm.body).toMatchObject({ truncated: false, limit: 500 });
+      expect(names(asPm)).toEqual(['Adam Test', 'Anna Test', 'Piotr Test', 'Zenon Test']);
+      expect(asPm.body.people[0]).toEqual({ user_id: secondPm.id, display_name: 'Adam Test' });
+
+      // The worker controls Beta only; the external participant of another project is out of that scope.
+      expect(names(await peopleOf(worker))).toEqual(['Adam Test', 'Anna Test', 'Piotr Test']);
+      // The scope of the admin is every open project; the admin is a member of none.
+      expect(names(await peopleOf(admin))).toEqual(['Adam Test', 'Anna Test', 'Piotr Test', 'Zenon Test']);
+
+      // Someone assigned to a task without being a member still counts.
+      await db.query(
+        'INSERT INTO project_task_assignees (task_id, user_id, tenant_id) VALUES ($1, $2, $3)',
+        [atRiskTask.id, admin.id, tenantId],
+      );
+      expect(names(await peopleOf(worker))).toEqual(['Adam Test', 'Admin Test', 'Anna Test', 'Piotr Test']);
+
+      expect((await peopleOf(external)).status).toBe(403);
+    });
+
+    test('project options of the scope: every project with its dates, by key', async () => {
+      const optionsOf = (user) => api('get', '/api/projects/portfolio/project-options', user);
+
+      const asPm = await optionsOf(pm);
+      expect(asPm.status).toBe(200);
+      expect(asPm.body).toMatchObject({ truncated: false, limit: 500 });
+      const expectedKeys = [alfa, beta, project].map((option) => option.key).sort();
+      expect(asPm.body.projects.map((option) => option.key)).toEqual(expectedKeys);
+      expect(asPm.body.projects.find((option) => option.id === alfa.id)).toEqual({
+        id: alfa.id, key: alfa.key, name: 'Alfa Wdrożenie', start_date: day(-30), end_date: day(-3),
+      });
+      expect(asPm.body.projects.find((option) => option.id === project.id)).toMatchObject({ start_date: null, end_date: null });
+      // Closed projects are not in the scope.
+      expect(asPm.body.projects.map((option) => option.id)).not.toContain(closed.id);
+
+      expect((await optionsOf(worker)).body.projects.map((option) => option.name)).toEqual(['Beta Serwis']);
+      expect((await optionsOf(external)).status).toBe(403);
+    });
+
+    test('both lookups are cut at 500 entries and say so', async () => {
+      const { rows: bulkProjects } = await db.query(
+        `INSERT INTO projects (tenant_id, key, name)
+         SELECT $1, 'ZZ' || number, 'Masowy ' || number FROM generate_series(1000, 1500) AS number
+         RETURNING id`,
+        [tenantId],
+      );
+      await db.query(
+        `INSERT INTO users (email, first_name, last_name, is_active, tenant_id)
+         SELECT 'bulk' || number || $1, 'Masowy', 'Nr' || number, TRUE, $2 FROM generate_series(1000, 1500) AS number`,
+        [EMAIL_DOMAIN, tenantId],
+      );
+      await db.query(
+        `INSERT INTO project_members (project_id, user_id, tenant_id, role, access_level)
+         SELECT $1, id, $2, 'internal_participant', 'full' FROM users WHERE email LIKE $3`,
+        [bulkProjects[0].id, tenantId, `bulk%${EMAIL_DOMAIN}`],
+      );
+      try {
+        const options = (await api('get', '/api/projects/portfolio/project-options', admin)).body;
+        expect(options).toMatchObject({ truncated: true, limit: 500 });
+        expect(options.projects).toHaveLength(500);
+
+        const people = (await api('get', '/api/projects/portfolio/people', admin)).body;
+        expect(people).toMatchObject({ truncated: true, limit: 500 });
+        expect(people.people).toHaveLength(500);
+      } finally {
+        await db.query('DELETE FROM projects WHERE id = ANY($1::uuid[])', [bulkProjects.map((row) => row.id)]);
+        await db.query('DELETE FROM users WHERE email LIKE $1', [`bulk%${EMAIL_DOMAIN}`]);
+      }
+    });
   });
 });

@@ -7,14 +7,15 @@
 //   sorting — sort (a key of the list) + order (asc | desc, default asc);
 //   filters — one set for task lists, one for project lists (their meaning:
 //             services/projectTaskFilters.js, projectService.searchProjects).
-// A malformed value is a 400; an empty value is an unused filter.
+// A malformed value is a 400; an empty value is an unused filter. Booleans
+// arrive as the strings "true" / "false".
 
 const { query } = require('express-validator');
 const { STATUS_CATEGORIES } = require('../services/projectConfigService');
 const { TIMELINESS_VALUES } = require('../services/projectDeadlineService');
 const { UNASSIGNED } = require('../services/projectTaskFilters');
 const { MAX_PAGE_SIZE, SORT_KEYS: TASK_SORT_KEYS } = require('../services/projectTaskListService');
-const { PROJECT_SORT_KEYS, MY_ROLE_FILTERS } = require('../services/projectService');
+const { PROJECT_SORT_KEYS, MY_ROLE_FILTERS, DELAY_REASONS } = require('../services/projectService');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (value) => UUID_RE.test(value);
@@ -26,6 +27,8 @@ const commaList = (name, isValidItem) => optional(name).isString()
 const text = (name, maxLength) => optional(name).isString().trim().isLength({ max: maxLength });
 const dateOnly = (name) => optional(name).isISO8601({ strict: true }).isLength({ min: 10, max: 10 });
 const amount = (name) => optional(name).isFloat({ min: 0 }).toFloat();
+const count = (name) => optional(name).isInt({ min: 0 }).toInt();
+const percent = (name) => optional(name).isInt({ min: 0, max: 100 }).toInt();
 // Sanitised values are numbers; anything else was left out or empty.
 const numberOf = (value) => (typeof value === 'number' ? value : undefined);
 
@@ -100,6 +103,11 @@ const projectListRules = [
   optional('lead_id').isInt({ min: 1 }).toInt(),
   optional('partner_id').custom(isUuid),
   commaList('my_role', (value) => Object.hasOwn(MY_ROLE_FILTERS, value)),
+  optional('pm').custom(isUuid),
+  commaList('delay_reason', (value) => DELAY_REASONS.includes(value)),
+  count('overdue_min'), count('overdue_max'),
+  count('at_risk_min'), count('at_risk_max'),
+  percent('progress_min'), percent('progress_max'),
   amount('cost_min'), amount('cost_max'),
   amount('revenue_min'), amount('revenue_max'),
   ...pagingRules,
@@ -119,6 +127,14 @@ function readProjectFilters(req) {
     leadId: numberOf(params.lead_id),
     partnerId: params.partner_id || undefined,
     myRoles: splitList(params.my_role),
+    managerId: params.pm || undefined,
+    delayReasons: splitList(params.delay_reason),
+    overdueMin: numberOf(params.overdue_min),
+    overdueMax: numberOf(params.overdue_max),
+    atRiskMin: numberOf(params.at_risk_min),
+    atRiskMax: numberOf(params.at_risk_max),
+    progressMin: numberOf(params.progress_min),
+    progressMax: numberOf(params.progress_max),
     costMin: numberOf(params.cost_min),
     costMax: numberOf(params.cost_max),
     revenueMin: numberOf(params.revenue_min),
