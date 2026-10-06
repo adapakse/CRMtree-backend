@@ -20,6 +20,10 @@ function normalizePolishPhone(raw) {
   const digits = trimmed.replace(/\D/g, '');
   if (trimmed.startsWith('+')) return '+' + digits;
   if (digits.startsWith('00') && digits.length > 11) return '+' + digits.slice(2);
+  // Landlines are often stored with the national trunk prefix ("041 378 66 05").
+  // Without dropping that leading 0 the number becomes "+0413786605" and
+  // ip-pbx.eu rejects it with 400 on every poll.
+  if (digits.length === 10 && digits.startsWith('0')) return '+48' + digits.slice(1);
   if (digits.length === 9) return '+48' + digits;
   return '+' + digits;
 }
