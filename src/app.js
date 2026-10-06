@@ -33,6 +33,7 @@ const crmProspectsDashboardRoutes = require('./routes/crm-prospects-dashboard');
 const projectRoutes            = require('./routes/projects');
 const projectTaskRoutes        = require('./routes/project-tasks');
 const projectFinanceRoutes     = require('./routes/project-finance');
+const projectPortfolioRoutes   = require('./routes/project-portfolio');
 const adminProjectConfigRoutes = require('./routes/admin-project-config');
 const adminKsefRoutes          = require('./routes/admin-ksef');
 const ksefRoutes               = require('./routes/ksef');
@@ -232,6 +233,8 @@ app.use('/api/crm/consents',     crmConsentsRoutes);
 app.use('/api/crm/seo',          crmSeoRoutes);
 app.use('/api/crm/prospects-dashboard', crmProspectsDashboardRoutes);
 
+// Before the /:id routers, which would read "portfolio" as a project id.
+app.use('/api/projects/portfolio',   projectPortfolioRoutes);
 app.use('/api/projects/:id/tasks',   projectTaskRoutes);
 app.use('/api/projects/:id/finance', projectFinanceRoutes);
 app.use('/api/projects',             projectRoutes);

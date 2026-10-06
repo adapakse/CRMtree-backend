@@ -95,6 +95,43 @@
     "footerAutomatic": "Ta wiadomość została wygenerowana automatycznie przez system CRMtree.",
     "footerNoReply": "Nie odpowiadaj na tego maila — ta skrzynka nie jest monitorowana."
   },
+  "projectDeadlineSummary": {
+    "assignees": "osoby: {names}",
+    "daysOverdue": "{count, plural, one {# dzień po terminie} few {# dni po terminie} many {# dni po terminie} other {# dnia po terminie}}",
+    "delayedProjectsHeading": "Opóźnione projekty",
+    "dueOn": "termin: {date}",
+    "heading": "Zadania po terminie",
+    "intro": "Stan na {date}:",
+    "managedTasksHeading": "Zadania po terminie w Twoich projektach",
+    "newBadge": "nowe",
+    "ownTasksHeading": "Twoje zadania po terminie",
+    "reasonEndPassed": "Termin zakończenia projektu minął {date} ({days, plural, one {# dzień} few {# dni} many {# dni} other {# dnia}} temu), a niezakończonych zadań jest: {count}.",
+    "reasonTaskAfterEnd": "Niezakończone zadania z terminem po końcu projektu: {count}. Najpóźniejszy termin: {latestDate} ({days, plural, one {# dzień} few {# dni} many {# dni} other {# dnia}} po końcu projektu).",
+    "settingsHint": "Powiadomienia o terminach w projektach możesz wyłączyć w Moich ustawieniach.",
+    "subject": "[CRMtree] Zadania po terminie — {date}",
+    "unassigned": "nieprzypisane"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# dzień po końcu projektu} few {# dni po końcu projektu} many {# dni po końcu projektu} other {# dnia po końcu projektu}}",
+    "heading": "Projekt jest opóźniony",
+    "intro": "W projekcie, którego jesteś PM-em, niezakończone zadanie ma termin późniejszy niż data zakończenia projektu:",
+    "latestTaskDueDate": "Najpóźniejszy termin",
+    "openProject": "Otwórz projekt →",
+    "projectEndDate": "Koniec projektu",
+    "subject": "[CRMtree] Projekt opóźniony: {projectName}",
+    "tasksAfterEnd": "Zadania po końcu projektu"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Termin",
+    "heading": "Zmieniono termin zadania",
+    "intro": "Użytkownik <strong>{changedByName}</strong> zmienił termin zadania w projekcie, którego jesteś PM-em:",
+    "noDate": "brak",
+    "originalDueDate": "Termin pierwotny",
+    "reason": "Powód zmiany",
+    "slipEarlier": "{count, plural, one {# dzień wcześniej} few {# dni wcześniej} many {# dni wcześniej} other {# dnia wcześniej}}",
+    "slipLater": "{count, plural, one {# dzień później} few {# dni później} many {# dni później} other {# dnia później}}",
+    "subject": "[CRMtree] Zmiana terminu zadania: {taskLabel} {taskName}"
+  },
   "projectTaskAssigned": {
     "heading": "Przypisano Ci zadanie w projekcie",
     "intro": "Użytkownik <strong>{assignerName}</strong> przypisał Ci zadanie:",

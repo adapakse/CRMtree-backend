@@ -369,6 +369,104 @@ każdego usera tenanta, niezależnie od roli handlowej. Zobacz też `CRMtree-fro
   `Europe/Warsaw` (`REMINDER_LOCAL_TIME` w `projectTaskService.js`), frontend stawia zadanie
   w kalendarzu o tej samej godzinie.
 
+### Kontrola terminów (decyzje biznesowe, 2026-10-06) — nie cofaj bez pytania
+
+Wszystko poniżej jest **liczone przy odczycie, nigdy zapisywane jako status**. „Dziś” to data
+w strefie `Europe/Warsaw` (ta sama co przypomnienia). Reguły: nagłówek
+`projectDeadlineService.js`.
+
+- **Terminowość zadania** (`timeliness`): `overdue` — termin (`end_date`) przed dziś i kategoria
+  statusu inna niż `done`; `at_risk` — nie po terminie, kategoria `todo` i termin w oknie
+  dziś … dziś+N (włącznie); `on_time` — każde inne niezakończone zadanie z terminem. Zadanie
+  bez terminu i zadanie zakończone mają `null`. `days_overdue` tylko dla `overdue`.
+- **Próg N** ustawia admin tenanta (`PUT /api/admin/project-config/deadlines`,
+  `at_risk_threshold_days` 0–30, domyślnie 3). Leży w `app_settings` pod kluczem
+  `projects_at_risk_threshold_days`, tak jak przełącznik finansów; `GET /api/projects/config`
+  go zwraca.
+- **Zakończone po terminie** (`is_completed_late`): zadanie jest w statusie `done` i weszło do
+  niego po swoim terminie. Do tego służy `project_tasks.completed_at` — ustawiane przy wejściu
+  w status kategorii `done`, czyszczone przy wyjściu (także gdy admin zmieni kategorię statusu).
+  Brak `completed_at` na zakończonym zadaniu (nie dało się odtworzyć z historii) = nie „po
+  terminie”.
+- **`has_overdue_subtasks`**: któreś podzadanie (dowolnie głęboko) jest po terminie. To słabszy
+  znacznik — zadanie nadrzędne nie staje się przez to opóźnione. Uczestnik zewnętrzny widzi go
+  tylko dla podzadań przypisanych do siebie.
+- **Daty projektu:** opcjonalne `projects.start_date` / `end_date` (koniec ≥ początek), edytuje
+  PM i admin tenanta w otwartym projekcie (`PATCH /api/projects/:id`, audyt `project_updated`).
+  **Nigdy nie blokują dat zadań** — zadanie może kończyć się po końcu projektu.
+- **Opóźnienie projektu** (`is_delayed`, `delay_reasons`, `delay_details`): `task_after_end` —
+  niezakończone zadanie ma termin po końcu projektu; `end_passed` — koniec projektu minął,
+  a zostały niezakończone zadania. Bez daty końca projekt nigdy nie jest opóźniony; zamknięty
+  też nie. Zwracane na karcie projektu, liście projektów i listach projektów na karcie
+  leada/partnera.
+- **Termin pierwotny:** `project_tasks.original_end_date` = pierwszy termin, jaki zadanie
+  kiedykolwiek dostało. **Nigdy nie jest nadpisywany** — także po wyczyszczeniu terminu; zadanie
+  założone bez terminu dostaje go przy pierwszym ustawieniu. `slip_days` = termin − termin
+  pierwotny (`null`, gdy równe albo czegoś brak; ujemne przy przyspieszeniu). Śledzimy tylko
+  koniec, nie początek. Kto może zmieniać daty — bez zmian, bez akceptacji.
+- **Powód zmiany terminu:** `PATCH` zadania przyjmuje opcjonalne `end_date_change_reason`
+  (≤ 500 znaków); trafia do `audit_logs.metadata` i wraca w historii zadania jako
+  `end_date_change_reason`. Podany bez faktycznej zmiany terminu jest ignorowany.
+- **Widok międzyprojektowy** (`/api/projects/portfolio`): admin tenanta — wszystkie otwarte
+  projekty; każdy inny — otwarte projekty, w których jest PM-em albo kontrolerem; pozostali 403.
+  `GET /api/projects/config` zwraca `has_cross_project_view`. Zamknięte projekty nigdy tu nie
+  wchodzą.
+- **Maile** (`projectDeadlineNotificationService.js`), w języku **odbiorcy** jak każdy inny
+  mail:
+  - *zmiana terminu zadania* — od razu, do PM-ów projektu poza tym, który sam zmienił
+    (także pierwsze ustawienie i wyczyszczenie terminu);
+  - *projekt stał się opóźniony* — od razu, do wszystkich PM-ów, tylko gdy zmiana (termin
+    zadania, ponowne otwarcie zadania, nowe zadanie, data końca projektu) przełącza projekt
+    z „nieopóźniony” na opóźniony przez `task_after_end`; dopóki zostaje opóźniony, nic więcej
+    nie wychodzi. Sam `end_passed` trafia do podsumowania dziennego;
+  - *podsumowanie dzienne* — z joba przypomnień, od 09:00 `Europe/Warsaw`, **jeden mail na
+    osobę dziennie**: przypisany (także konto zewnętrzne) dostaje swoje zadania po terminie,
+    PM — zadania po terminie i opóźnione projekty swoich projektów; kto jest jednym i drugim,
+    dostaje obie części w jednym mailu. Zadania, które stały się opóźnione dziś (termin
+    wczoraj), idą pierwsze z oznaczeniem „nowe”. Admin tenanta nie jest dopisywany. Idempotencja:
+    wiersz w `project_deadline_digests` (osoba + dzień).
+  - **Wyłącznik jest per użytkownik, nie per projekt:** `users.project_deadline_notifications_enabled`
+    (domyślnie włączone), zmieniany w „Moje ustawienia” przez
+    `PUT /api/profile/project-deadline-notifications`, zwracany przez `/api/auth/me`. Wyłącza
+    wszystkie trzy maile we wszystkich projektach.
+  - Zamknięty projekt nie wysyła nic. Błąd wysyłki nigdy nie psuje żądania ani joba.
+
+### Listy modułu Projekty — stronicowanie, sortowanie, filtry (decyzja z 2026-10-06)
+
+**Każda lista jest stronicowana i filtrowana po stronie serwera.** Jedna konwencja
+(`middleware/project-list-query.js`): `page` (≥ 1), `page_size` (1–50, domyślnie 50),
+`sort` + `order` (`asc` | `desc`), odpowiedź `{ items, total, page, page_size }`. Błędna
+wartość = 400, pusta = filtr nieużyty.
+
+- **Listy zadań** — jedno zapytanie (`projectTaskListService.js`), trzy zakresy:
+  `GET /api/projects/:id/tasks/search` (zadania projektu), `GET /api/projects/my-tasks`
+  (moje zadania), `GET /api/projects/portfolio/tasks` (widok międzyprojektowy). Wiersze są
+  **płaskie** — przefiltrowana strona nie może być drzewem, więc zadanie niesie
+  `parent_task_id` / `parent_task_number` / `parent_task_name`.
+- **Oś czasu** potrzebuje całego przefiltrowanego zbioru: `GET /api/projects/:id/tasks/gantt`
+  i `GET /api/projects/portfolio/gantt` — bez stron, limit 500 zadań i flaga `truncated`,
+  te same filtry.
+- **Filtry zadań** (`projectTaskFilters.js`, te same nazwy wszędzie): `name`, `number`,
+  `project_ids`, `status_ids`, `status_category`, `priority_ids`, `type_ids`, `assignee`
+  (id albo `unassigned`; w „moich zadaniach” ignorowany), `start_from`/`start_to`,
+  `end_from`/`end_to`, `original_end_from`/`original_end_to`, `slip_min`/`slip_max`,
+  `cost_min`/`cost_max`, `timeliness`.
+- **Koszt zadania** w listach (`cost_total`, `cost_currency`) = suma WŁASNYCH pozycji kosztów
+  zadania (planowane + poniesione, bez podzadań), w walucie projektu — **bez przeliczania
+  między projektami**. Istnieje tylko dla osób, które czytają finanse danego projektu (admin,
+  PM, kontroler) i przy włączonych finansach; dla pozostałych pole jest `null`, a filtr kosztu
+  przepuszcza zadanie.
+- **Lista projektów** (`GET /api/projects`, `projectService.searchProjects`) — filtry:
+  `status`, `name` (nazwa albo prefiks), `start_from`/`start_to`, `end_from`/`end_to`,
+  `delayed`, `lead_id`, `partner_id`, `my_role` (`pm` | `controller` | `participant`),
+  `cost_min`/`cost_max` i `revenue_min`/`revenue_max` (kwoty rzeczywiste, te same co
+  w `finance`; ta sama reguła widoczności co koszt zadania); sortowanie: `name`, `key`,
+  `status`, `start_date`, `end_date`, `delay`. `GET /api/projects/portfolio/projects` to to samo
+  zapytanie zawężone do zakresu widoku (zawsze tylko otwarte).
+- **Zostały bez stron, celowo:** `GET /api/projects/:id/tasks` (całe drzewo dla niefiltrowanego
+  widoku projektu) i `GET /api/projects/assigned-tasks` (zasilanie kalendarza i dashboardu CRM
+  — potrzebują całego zbioru). Nie dodawaj do nich filtrów — do tego są listy stronicowane.
+
 ### Finanse projektu — etap 1 (decyzje Adama, 2026-10-05) — nie cofaj bez pytania
 
 Controlling projektu, nie księgowość: **kwoty netto, bez VAT, jedna waluta na projekt**.
@@ -545,7 +643,7 @@ tokenu wraca tylko raz) → faktury testowe wysyła się sesją online jako inny
 aplikacji. Lokalnie ustaw `KSEF_ENVIRONMENT=test` w `.env.local`. Testy Jest nie wołają
 prawdziwego KSeF (`src/__tests__/helpers/ksefMock.js` udaje API z prawdziwym RSA/AES).
 
-### Baza danych (migracje 0307–0311, finanse 0316–0317, KSeF 0319, faktury w Dokumentach 0320)
+### Baza danych (migracje 0307–0311, finanse 0316–0317, KSeF 0319, faktury w Dokumentach 0320, terminy 0321)
 
 `project_task_statuses`, `project_task_types`, `project_task_priorities`,
 `project_status_transitions`, `project_field_definitions`, `projects`, `project_members`,
@@ -571,11 +669,22 @@ Faktury w Dokumentach (0320): kolumny faktury na `documents` (lista w sekcji „
 Dokumenty”), `project_cost_items.document_id` / `document_linked_by` / `document_linked_at`,
 słownik `doc_payment_statuses` dla każdego tenanta i kod `invoice` dopisany do `doc_types`.
 
+Kontrola terminów (0321): `projects.start_date` / `end_date`,
+`project_tasks.original_end_date` / `completed_at`,
+`users.project_deadline_notifications_enabled`, tabela `project_deadline_digests`
+(`user_id`, `digest_date`). Migracja uzupełnia istniejące zadania z `audit_logs`: termin
+pierwotny = wartość sprzed pierwszej zapisanej zmiany terminu (inaczej termin bieżący),
+`completed_at` = ostatnie zapisane wejście w status `done` (inaczej `NULL`).
+
 ### Kluczowe pliki
 
 - `src/routes/projects.js` — projekty, członkowie, pola, powiązanie z CRM, czat projektu,
   `GET /assigned-tasks` (musi być zarejestrowane przed `/:id`).
-- `src/routes/project-tasks.js` — zadania, historia, czat zadania (`/api/projects/:id/tasks`).
+- `src/routes/project-tasks.js` — zadania, historia, czat zadania (`/api/projects/:id/tasks`),
+  w tym `/search`, `/gantt` i `/assignee-summary` (zarejestrowane przed `/:taskId`).
+- `src/routes/project-portfolio.js` (`/api/projects/portfolio`, montowane w `app.js` przed
+  trasami z `/:id`) — widok międzyprojektowy: `/tasks`, `/gantt`, `/projects`.
+- `src/middleware/project-list-query.js` — parametry stronicowania, sortowania i filtrów list.
 - `src/routes/project-finance.js` — finanse projektu (`/api/projects/:id/finance`):
   podsumowanie, plan, pozycje kosztów i przychodów, planowany koszt zadania.
 - `src/routes/admin-project-config.js` — konfiguracja admina tenanta, w tym przełącznik
@@ -594,16 +703,24 @@ słownik `doc_payment_statuses` dla każdego tenanta i kod `invoice` dopisany do
   ujawniać id), `requireProjectManager`, `requireOpenProject`, a dla finansów
   `requireFinanceEnabled`, `requireKsefAccess`, `loadFinanceAccess` i `requireFinance*` /
   `requireCost*`.
+- Terminy: `projectDeadlineService.js` (reguły i fragmenty SQL terminowości oraz opóźnienia
+  projektu), `projectDeadlineNotificationService.js` (maile), `projectTaskListService.js`
+  + `projectTaskFilters.js` (stronicowane listy zadań), `projectPortfolioService.js` (zakres
+  widoku międzyprojektowego).
 - `src/services/projectService.js`, `projectTaskService.js` (reguły uprawnień do zadań są
   opisane w nagłówku pliku), `projectConfigService.js`, `projectCrmLinkService.js`,
   `projectMessageService.js`, `projectFinanceService.js` (reguły uprawnień do finansów
   w nagłówku pliku), `projectFinanceCalculations.js`.
 - `GET /api/crm/leads/:id/projects` i `/api/crm/partners/:id/projects` — w trasach CRM.
 - Przypomnienia: trzeci blok w `src/services/crmReminderService.js`; maile
-  `sendProjectTaskAssigned` (od razu przy przypisaniu) i `sendProjectTaskReminder`.
+  `sendProjectTaskAssigned` (od razu przy przypisaniu) i `sendProjectTaskReminder`. Ten sam
+  job (`src/jobs/crm-reminders.js`) po przypomnieniach wysyła dzienne podsumowania terminów.
 - Historia zadania: `audit_logs` z `metadata.task_id` (akcje `project_task_created` /
   `project_task_updated`).
 - Testy: `src/__tests__/projects.test.js`, `project-tasks.test.js`,
+  `project-deadlines.test.js` (terminowość, daty i opóźnienie projektu, termin pierwotny,
+  filtry zadań, widok międzyprojektowy), `project-lists.test.js` (stronicowanie, sortowanie,
+  oś czasu, filtry listy projektów), `project-deadline-emails.test.js` (maile),
   `projects-crm-integration.test.js`, `project-finance.test.js`,
   `projectFinanceCalculations.test.js` (bez bazy), `ksef-sync.test.js` (klient, paczki,
   synchronizacja), `ksef-invoices.test.js` (trasy, uprawnienia, wiązanie),

@@ -532,7 +532,7 @@ router.get('/me', requireAuth, async (req, res, next) => {
       `SELECT u.id, u.email, u.first_name, u.last_name, u.display_name,
               u.is_admin, u.is_super_admin, u.tenant_id, u.crm_role, u.last_login_at,
               u.must_change_password, u.is_external, u.can_create_projects, u.can_view_ksef_invoices,
-              u.locale,
+              u.locale, u.project_deadline_notifications_enabled,
               (SELECT default_locale FROM tenants WHERE id = u.tenant_id) AS tenant_default_locale,
               json_agg(DISTINCT jsonb_build_object(
                 'group_id',          ugr.group_id,

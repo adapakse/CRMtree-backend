@@ -11,7 +11,7 @@ const { google } = require("googleapis");
 const path = require("path");
 const config = require("../config");
 const logger = require("./logger");
-const { translate, formatDate, formatDateTime, supportedOrDefault } = require("./i18n");
+const { translate, formatDate, formatDateOnly, formatDateTime, supportedOrDefault } = require("./i18n");
 
 // ─── Inicjalizacja klienta Gmail ─────────────────────────────────────────────
 
@@ -867,7 +867,214 @@ async function sendProjectTaskReminder({
   });
 }
 
+// ─── Project deadline mails (sent by projectDeadlineNotificationService) ─────
+
+const projectTaskUrl = (projectId, taskId) => `${BASE_URL}/projects/${projectId}?task=${taskId}`;
+const projectUrl = (projectId) => `${BASE_URL}/projects/${projectId}`;
+
+/**
+ * Somebody other than the receiving PM changed the end date of a task.
+ */
+async function sendProjectTaskEndDateChanged({
+  to,
+  locale,
+  recipientName,
+  changedByName,
+  projectId,
+  projectName,
+  taskId,
+  taskLabel,        // e.g. "WSC-12"
+  taskName,
+  previousEndDate,  // "YYYY-MM-DD" or null
+  newEndDate,       // "YYYY-MM-DD" or null
+  originalEndDate,  // "YYYY-MM-DD" or null
+  slipDays,         // new end date − original, in days; null when equal or unknown
+  reason,
+}) {
+  if (!to) return;
+
+  const t = emailTexts(locale);
+  const formatDay = (day) => (day ? formatDateOnly(locale, day) : t('projectEndDateChanged.noDate'));
+  const slip = slipDays
+    ? t(slipDays > 0 ? 'projectEndDateChanged.slipLater' : 'projectEndDateChanged.slipEarlier', { count: Math.abs(slipDays) })
+    : '';
+
+  await module.exports.sendMail({
+    to,
+    subject: t('projectEndDateChanged.subject', { taskLabel, taskName }),
+    html: template(locale, `
+      <h2>${t('projectEndDateChanged.heading')}</h2>
+      <p>${t('common.greeting', { name: escapeHtml(recipientName || '') })}</p>
+      <p>${t('projectEndDateChanged.intro', { changedByName: escapeHtml(changedByName) })}</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">${t('labels.project')}</span>
+          <span class="info-val">${escapeHtml(projectName)}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('labels.task')}</span>
+          <span class="info-val"><strong>${escapeHtml(taskLabel)} ${escapeHtml(taskName)}</strong></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('projectEndDateChanged.dueDateChange')}</span>
+          <span class="info-val">${formatDay(previousEndDate)} → ${formatDay(newEndDate)}</span>
+        </div>
+        ${originalEndDate ? `<div class="info-row">
+          <span class="info-label">${t('projectEndDateChanged.originalDueDate')}</span>
+          <span class="info-val">${formatDay(originalEndDate)}${slip ? ` (${slip})` : ''}</span>
+        </div>` : ''}
+        ${reason ? `<div class="info-row">
+          <span class="info-label">${t('projectEndDateChanged.reason')}</span>
+          <span class="info-val">${htmlText(reason)}</span>
+        </div>` : ''}
+      </div>
+      <a href="${projectTaskUrl(projectId, taskId)}" class="btn">${t('common.openTask')}</a>
+    `),
+  });
+}
+
+/**
+ * A change made the project delayed: a not-done task now ends after the project's end date.
+ */
+async function sendProjectDelayed({
+  to,
+  locale,
+  recipientName,
+  projectId,
+  projectName,
+  projectEndDate,
+  tasksAfterEndCount,
+  latestTaskEndDate,
+  daysAfterEnd,
+}) {
+  if (!to) return;
+
+  const t = emailTexts(locale);
+
+  await module.exports.sendMail({
+    to,
+    subject: t('projectDelayed.subject', { projectName }),
+    html: template(locale, `
+      <h2>${t('projectDelayed.heading')}</h2>
+      <p>${t('common.greeting', { name: escapeHtml(recipientName || '') })}</p>
+      <p>${t('projectDelayed.intro')}</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">${t('labels.project')}</span>
+          <span class="info-val"><strong>${escapeHtml(projectName)}</strong></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('projectDelayed.projectEndDate')}</span>
+          <span class="info-val">${formatDateOnly(locale, projectEndDate)}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('projectDelayed.tasksAfterEnd')}</span>
+          <span class="info-val">${tasksAfterEndCount}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('projectDelayed.latestTaskDueDate')}</span>
+          <span class="info-val">${formatDateOnly(locale, latestTaskEndDate)} (${t('projectDelayed.daysAfterEnd', { count: daysAfterEnd })})</span>
+        </div>
+      </div>
+      <a href="${projectUrl(projectId)}" class="btn">${t('projectDelayed.openProject')}</a>
+    `),
+  });
+}
+
+function deadlineSummaryTaskRow(t, locale, task, { showAssignees }) {
+  const details = [
+    t('projectDeadlineSummary.dueOn', { date: formatDateOnly(locale, task.end_date) }),
+    t('projectDeadlineSummary.daysOverdue', { count: task.days_overdue }),
+  ];
+  if (showAssignees) {
+    details.push(task.assignees.length
+      ? t('projectDeadlineSummary.assignees', {
+        names: escapeHtml(task.assignees.map((assignee) => assignee.display_name).join(', ')),
+      })
+      : t('projectDeadlineSummary.unassigned'));
+  }
+  const label = `${task.project.key}-${task.task_number}`;
+  return `<div style="padding:6px 0;border-bottom:1px solid #E4E4E7">
+    <a href="${projectTaskUrl(task.project.id, task.id)}" style="color:#18181B;font-weight:600;text-decoration:none">${escapeHtml(label)} ${escapeHtml(task.name)}</a>
+    ${task.is_new ? `<span class="badge badge-red">${t('projectDeadlineSummary.newBadge')}</span>` : ''}
+    <div style="color:#71717A;font-size:12px">${details.join(' · ')}</div>
+  </div>`;
+}
+
+function deadlineSummaryDelayReasons(t, locale, { project, delay }) {
+  const { delay_details: details } = delay;
+  const reasons = [];
+  if (delay.delay_reasons.includes('task_after_end')) {
+    reasons.push(t('projectDeadlineSummary.reasonTaskAfterEnd', {
+      count: details.tasks_after_end_count,
+      latestDate: formatDateOnly(locale, details.latest_task_end_date),
+      days: details.days_after_end,
+    }));
+  }
+  if (delay.delay_reasons.includes('end_passed')) {
+    const reason = t('projectDeadlineSummary.reasonEndPassed', {
+      date: formatDateOnly(locale, project.end_date),
+      days: details.days_past_end,
+      count: details.open_task_count,
+    });
+    // The end date passed today exactly when it was yesterday.
+    const isNew = details.days_past_end === 1;
+    reasons.push(isNew ? `${reason} <span class="badge badge-red">${t('projectDeadlineSummary.newBadge')}</span>` : reason);
+  }
+  return reasons;
+}
+
+/**
+ * Daily summary of overdue tasks and delayed projects, one mail per person:
+ * `ownTasks` — overdue tasks assigned to the recipient; `managedProjects` —
+ * for a PM, the projects they run that have overdue tasks or are delayed.
+ * Either part may be empty; tasks arrive with the ones that became overdue
+ * today first.
+ */
+async function sendProjectDeadlineSummary({ to, locale, recipientName, date, ownTasks, managedProjects }) {
+  if (!to) return;
+
+  const t = emailTexts(locale);
+  const formattedDate = formatDateOnly(locale, date);
+  const sectionHeading = (text) => `<h3 style="margin:20px 0 6px;font-size:15px;color:#18181B">${text}</h3>`;
+  const projectHeading = (project) => `<p style="margin:12px 0 2px"><a href="${projectUrl(project.id)}" style="color:#2F8F4D;font-weight:600;text-decoration:none">${escapeHtml(project.name)}</a></p>`;
+
+  const projectsWithOverdueTasks = managedProjects.filter((report) => report.overdueTasks.length);
+  const delayedProjects = managedProjects.filter((report) => report.delay);
+
+  const ownSection = ownTasks.length ? `
+      ${sectionHeading(t('projectDeadlineSummary.ownTasksHeading'))}
+      ${ownTasks.map((task) => deadlineSummaryTaskRow(t, locale, task, { showAssignees: false })).join('')}` : '';
+  const managedSection = projectsWithOverdueTasks.length ? `
+      ${sectionHeading(t('projectDeadlineSummary.managedTasksHeading'))}
+      ${projectsWithOverdueTasks.map(({ project, overdueTasks }) => `
+        ${projectHeading(project)}
+        ${overdueTasks.map((task) => deadlineSummaryTaskRow(t, locale, { ...task, project }, { showAssignees: true })).join('')}`).join('')}` : '';
+  const delayedSection = delayedProjects.length ? `
+      ${sectionHeading(t('projectDeadlineSummary.delayedProjectsHeading'))}
+      ${delayedProjects.map((report) => `
+        ${projectHeading(report.project)}
+        ${deadlineSummaryDelayReasons(t, locale, report).map((reason) => `<div style="color:#71717A;font-size:12px;padding:2px 0">${reason}</div>`).join('')}`).join('')}` : '';
+
+  await module.exports.sendMail({
+    to,
+    subject: t('projectDeadlineSummary.subject', { date: formattedDate }),
+    html: template(locale, `
+      <h2>${t('projectDeadlineSummary.heading')}</h2>
+      <p>${t('common.greeting', { name: escapeHtml(recipientName || '') })}</p>
+      <p>${t('projectDeadlineSummary.intro', { date: formattedDate })}</p>
+      ${ownSection}${managedSection}${delayedSection}
+      <p style="color:#71717A;font-size:12px;margin-top:20px">
+        ${t('projectDeadlineSummary.settingsHint')}
+      </p>
+    `),
+  });
+}
+
 module.exports = {
+  sendProjectTaskEndDateChanged,
+  sendProjectDelayed,
+  sendProjectDeadlineSummary,
   sendProjectTaskReminder,
   sendProjectTaskAssigned,
   sendMail,

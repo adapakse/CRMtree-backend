@@ -95,6 +95,43 @@
     "footerAutomatic": "Questo messaggio è stato generato automaticamente da CRMtree.",
     "footerNoReply": "Non rispondere a questa e-mail — questa casella non è monitorata."
   },
+  "projectDeadlineSummary": {
+    "assignees": "assegnata a: {names}",
+    "daysOverdue": "{count, plural, one {# giorno di ritardo} other {# giorni di ritardo}}",
+    "delayedProjectsHeading": "Progetti in ritardo",
+    "dueOn": "scadenza: {date}",
+    "heading": "Attività scadute",
+    "intro": "Situazione al {date}:",
+    "managedTasksHeading": "Attività scadute nei tuoi progetti",
+    "newBadge": "nuovo",
+    "ownTasksHeading": "Le tue attività scadute",
+    "reasonEndPassed": "La data di fine del progetto è passata il {date} ({days, plural, one {# giorno} other {# giorni}} fa) e le attività non completate sono: {count}.",
+    "reasonTaskAfterEnd": "Attività non completate con scadenza successiva alla fine del progetto: {count}. Scadenza più lontana: {latestDate} ({days, plural, one {# giorno} other {# giorni}} dopo la fine del progetto).",
+    "settingsHint": "Puoi disattivare le notifiche sulle scadenze dei progetti nella sezione «Le mie impostazioni».",
+    "subject": "[CRMtree] Attività scadute — {date}",
+    "unassigned": "non assegnata"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# giorno dopo la fine del progetto} other {# giorni dopo la fine del progetto}}",
+    "heading": "Il progetto è in ritardo",
+    "intro": "In un progetto di cui sei PM, un’attività non completata ha una scadenza successiva alla data di fine del progetto:",
+    "latestTaskDueDate": "Scadenza più lontana",
+    "openProject": "Apri progetto →",
+    "projectEndDate": "Fine del progetto",
+    "subject": "[CRMtree] Progetto in ritardo: {projectName}",
+    "tasksAfterEnd": "Attività dopo la fine del progetto"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Scadenza",
+    "heading": "Scadenza dell’attività modificata",
+    "intro": "<strong>{changedByName}</strong> ha modificato la scadenza di un’attività in un progetto di cui sei PM:",
+    "noDate": "nessuna",
+    "originalDueDate": "Scadenza originaria",
+    "reason": "Motivo della modifica",
+    "slipEarlier": "{count, plural, one {# giorno prima} other {# giorni prima}}",
+    "slipLater": "{count, plural, one {# giorno dopo} other {# giorni dopo}}",
+    "subject": "[CRMtree] Scadenza dell’attività modificata: {taskLabel} {taskName}"
+  },
   "projectTaskAssigned": {
     "heading": "Ti è stata assegnata un’attività in un progetto",
     "intro": "<strong>{assignerName}</strong> ti ha assegnato un’attività:",

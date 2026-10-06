@@ -95,6 +95,43 @@
     "footerAutomatic": "Diese Nachricht wurde automatisch von CRMtree erstellt.",
     "footerNoReply": "Bitte antworten Sie nicht auf diese E-Mail — dieses Postfach wird nicht überwacht."
   },
+  "projectDeadlineSummary": {
+    "assignees": "zugewiesen: {names}",
+    "daysOverdue": "{count, plural, one {# Tag überfällig} other {# Tage überfällig}}",
+    "delayedProjectsHeading": "Verzögerte Projekte",
+    "dueOn": "fällig: {date}",
+    "heading": "Überfällige Aufgaben",
+    "intro": "Stand vom {date}:",
+    "managedTasksHeading": "Überfällige Aufgaben in Ihren Projekten",
+    "newBadge": "neu",
+    "ownTasksHeading": "Ihre überfälligen Aufgaben",
+    "reasonEndPassed": "Das Enddatum des Projekts ist am {date} abgelaufen (vor {days, plural, one {# Tag} other {# Tagen}}), nicht abgeschlossene Aufgaben: {count}.",
+    "reasonTaskAfterEnd": "Nicht abgeschlossene Aufgaben mit Fälligkeitsdatum nach dem Projektende: {count}. Spätestes Fälligkeitsdatum: {latestDate} ({days, plural, one {# Tag} other {# Tage}} nach dem Projektende).",
+    "settingsHint": "Benachrichtigungen über Projekttermine können Sie unter „Meine Einstellungen“ deaktivieren.",
+    "subject": "[CRMtree] Überfällige Aufgaben — {date}",
+    "unassigned": "nicht zugewiesen"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# Tag nach dem Projektende} other {# Tage nach dem Projektende}}",
+    "heading": "Das Projekt ist verzögert",
+    "intro": "In einem Projekt, dessen PM Sie sind, liegt das Fälligkeitsdatum einer nicht abgeschlossenen Aufgabe nach dem Enddatum des Projekts:",
+    "latestTaskDueDate": "Spätestes Fälligkeitsdatum",
+    "openProject": "Projekt öffnen →",
+    "projectEndDate": "Projektende",
+    "subject": "[CRMtree] Projekt verzögert: {projectName}",
+    "tasksAfterEnd": "Aufgaben nach dem Projektende"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Fälligkeitsdatum",
+    "heading": "Fälligkeitsdatum der Aufgabe geändert",
+    "intro": "<strong>{changedByName}</strong> hat das Fälligkeitsdatum einer Aufgabe in einem Projekt geändert, dessen PM Sie sind:",
+    "noDate": "keines",
+    "originalDueDate": "Ursprüngliches Fälligkeitsdatum",
+    "reason": "Grund der Änderung",
+    "slipEarlier": "{count, plural, one {# Tag früher} other {# Tage früher}}",
+    "slipLater": "{count, plural, one {# Tag später} other {# Tage später}}",
+    "subject": "[CRMtree] Fälligkeitsdatum der Aufgabe geändert: {taskLabel} {taskName}"
+  },
   "projectTaskAssigned": {
     "heading": "Ihnen wurde eine Projektaufgabe zugewiesen",
     "intro": "<strong>{assignerName}</strong> hat Ihnen eine Aufgabe zugewiesen:",

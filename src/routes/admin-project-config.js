@@ -5,6 +5,7 @@
 // configuration is open to every project user via GET /api/projects/config.
 //
 // PUT   /api/admin/project-config/finance                           — switch project finance on / off
+// PUT   /api/admin/project-config/deadlines                         — "at risk" threshold in days
 // POST  /api/admin/project-config/dictionaries/:dictionary          — statuses | types | priorities |
 //                                                                     cost-categories (finance on only)
 // PATCH /api/admin/project-config/dictionaries/:dictionary/:id
@@ -41,7 +42,8 @@ function configMutation(area, mutate) {
         ipAddress: req.auditContext?.ipAddress,
         userAgent: req.auditContext?.userAgent,
       });
-      res.json(await projectConfigService.getConfig(req.tenantId));
+      // Same shape as GET /api/projects/config; the tenant admin always has the cross-project view.
+      res.json({ ...await projectConfigService.getConfig(req.tenantId), has_cross_project_view: true });
     } catch (err) {
       if (err.status) return res.status(err.status).json({ error: err.message });
       next(err);
@@ -55,6 +57,14 @@ router.put(
   validate,
   configMutation('finance', (req) =>
     projectConfigService.setFinanceEnabled(req.tenantId, req.body.is_enabled, req.user.id)),
+);
+
+router.put(
+  '/deadlines',
+  [body('at_risk_threshold_days').isInt({ min: 0, max: projectConfigService.MAX_AT_RISK_THRESHOLD_DAYS }).toInt()],
+  validate,
+  configMutation('deadlines', (req) =>
+    projectConfigService.setAtRiskThresholdDays(req.tenantId, req.body.at_risk_threshold_days, req.user.id)),
 );
 
 // The cost category dictionary belongs to project finance and follows its switch.

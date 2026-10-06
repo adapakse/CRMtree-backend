@@ -10,7 +10,8 @@
 // referencing them, so an old task still shows the status it was left in.
 //
 // The finance switch is an app_settings row; a tenant without the row has
-// project finance switched off.
+// project finance switched off. The "at risk" threshold of deadline control
+// is stored the same way; a tenant without the row uses the default.
 
 const db = require('../config/database');
 
@@ -22,6 +23,9 @@ const DICTIONARY_TABLES = {
   [COST_CATEGORIES]: 'project_cost_categories',
 };
 const FINANCE_SETTING_KEY = 'projects_finance_enabled';
+const AT_RISK_SETTING_KEY = 'projects_at_risk_threshold_days';
+const DEFAULT_AT_RISK_THRESHOLD_DAYS = 3;
+const MAX_AT_RISK_THRESHOLD_DAYS     = 30;
 
 const STATUS_CATEGORIES = ['todo', 'in_progress', 'done'];
 // The PM is absent on purpose: a PM may always move a task between any statuses.
@@ -145,6 +149,26 @@ async function setFinanceEnabled(tenantId, isEnabled, userId) {
   );
 }
 
+async function getAtRiskThresholdDays(tenantId) {
+  const { rows: [setting] } = await db.query(
+    'SELECT value FROM app_settings WHERE tenant_id = $1 AND key = $2', [tenantId, AT_RISK_SETTING_KEY],
+  );
+  const days = Number.parseInt(setting?.value, 10);
+  const isUsable = Number.isInteger(days) && days >= 0 && days <= MAX_AT_RISK_THRESHOLD_DAYS;
+  return isUsable ? days : DEFAULT_AT_RISK_THRESHOLD_DAYS;
+}
+
+async function setAtRiskThresholdDays(tenantId, days, userId) {
+  await db.query(
+    `INSERT INTO app_settings (tenant_id, key, value, label, description, value_type, category, updated_by, updated_at)
+     VALUES ($1, $2, $3, 'Projekty: próg zagrożenia terminu (dni)',
+             'Ile dni przed terminem nierozpoczęte zadanie jest oznaczane jako zagrożone', 'number', 'projects', $4, now())
+     ON CONFLICT (tenant_id, key) DO UPDATE
+       SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+    [tenantId, AT_RISK_SETTING_KEY, String(days), userId || null],
+  );
+}
+
 // Cost categories arrived after the other dictionaries, so tenants that already
 // have statuses still need their own first-use seeding.
 async function ensureDefaultCostCategories(tenantId) {
@@ -179,7 +203,9 @@ async function listCostCategories(tenantId) {
 
 async function getConfig(tenantId) {
   await ensureDefaults(tenantId);
-  const isFinanceOn = await isFinanceEnabled(tenantId);
+  const [isFinanceOn, atRiskThresholdDays] = await Promise.all([
+    isFinanceEnabled(tenantId), getAtRiskThresholdDays(tenantId),
+  ]);
 
   const [statuses, types, priorities, transitions, fieldDefinitions, costCategories] = await Promise.all([
     db.query(
@@ -208,6 +234,7 @@ async function getConfig(tenantId) {
     field_definitions: fieldDefinitions.rows,
     finance_enabled:   isFinanceOn,
     cost_categories:   costCategories,
+    at_risk_threshold_days: atRiskThresholdDays,
   };
 }
 
@@ -267,8 +294,19 @@ async function updateDictionaryItem(tenantId, dictionary, id, changes) {
       params,
     );
     if (!row) throw httpError(404, 'Nie znaleziono pozycji słownika');
+    if (dictionary === 'statuses' && changes.category !== undefined) await syncCompletionOfStatus(row);
     return row;
   } catch (err) { return rethrowDuplicateName(err); }
+}
+
+// Re-categorising a status moves every task in it into or out of "done" at once.
+async function syncCompletionOfStatus(status) {
+  await db.query(
+    `UPDATE project_tasks
+     SET completed_at = CASE WHEN $2 = 'done' THEN COALESCE(completed_at, now()) ELSE NULL END
+     WHERE status_id = $1`,
+    [status.id, status.category],
+  );
 }
 
 async function reorderDictionary(tenantId, dictionary, orderedIds) {
@@ -373,9 +411,14 @@ module.exports = {
   FIELD_TYPES,
   COST_CATEGORIES,
   FINANCE_SETTING_KEY,
+  AT_RISK_SETTING_KEY,
+  DEFAULT_AT_RISK_THRESHOLD_DAYS,
+  MAX_AT_RISK_THRESHOLD_DAYS,
   ensureDefaults,
   isFinanceEnabled,
   setFinanceEnabled,
+  getAtRiskThresholdDays,
+  setAtRiskThresholdDays,
   listCostCategories,
   getConfig,
   createDictionaryItem,

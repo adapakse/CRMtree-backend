@@ -95,6 +95,43 @@
     "footerAutomatic": "Это сообщение создано автоматически системой CRMtree.",
     "footerNoReply": "Не отвечайте на это письмо — этот почтовый ящик не просматривается."
   },
+  "projectDeadlineSummary": {
+    "assignees": "исполнители: {names}",
+    "daysOverdue": "{count, plural, one {просрочено на # день} few {просрочено на # дня} many {просрочено на # дней} other {просрочено на # дня}}",
+    "delayedProjectsHeading": "Задерживающиеся проекты",
+    "dueOn": "срок: {date}",
+    "heading": "Просроченные задачи",
+    "intro": "По состоянию на {date}:",
+    "managedTasksHeading": "Просроченные задачи в ваших проектах",
+    "newBadge": "новое",
+    "ownTasksHeading": "Ваши просроченные задачи",
+    "reasonEndPassed": "Срок окончания проекта истёк {date} ({days, plural, one {# день} few {# дня} many {# дней} other {# дня}} назад), а незавершённых задач: {count}.",
+    "reasonTaskAfterEnd": "Незавершённые задачи со сроком после окончания проекта: {count}. Самый поздний срок: {latestDate} ({days, plural, one {# день} few {# дня} many {# дней} other {# дня}} после окончания проекта).",
+    "settingsHint": "Уведомления о сроках в проектах можно отключить в разделе «Мои настройки».",
+    "subject": "[CRMtree] Просроченные задачи — {date}",
+    "unassigned": "не назначена"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# день после окончания проекта} few {# дня после окончания проекта} many {# дней после окончания проекта} other {# дня после окончания проекта}}",
+    "heading": "Проект задерживается",
+    "intro": "В проекте, в котором вы являетесь PM, срок незавершённой задачи позже даты окончания проекта:",
+    "latestTaskDueDate": "Самый поздний срок",
+    "openProject": "Открыть проект →",
+    "projectEndDate": "Окончание проекта",
+    "subject": "[CRMtree] Проект задерживается: {projectName}",
+    "tasksAfterEnd": "Задачи после окончания проекта"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Срок",
+    "heading": "Срок задачи изменён",
+    "intro": "Пользователем <strong>{changedByName}</strong> изменён срок задачи в проекте, в котором вы являетесь PM:",
+    "noDate": "нет",
+    "originalDueDate": "Первоначальный срок",
+    "reason": "Причина изменения",
+    "slipEarlier": "{count, plural, one {на # день раньше} few {на # дня раньше} many {на # дней раньше} other {на # дня раньше}}",
+    "slipLater": "{count, plural, one {на # день позже} few {на # дня позже} many {на # дней позже} other {на # дня позже}}",
+    "subject": "[CRMtree] Изменён срок задачи: {taskLabel} {taskName}"
+  },
   "projectTaskAssigned": {
     "heading": "Вам назначена задача в проекте",
     "intro": "Пользователем <strong>{assignerName}</strong> вам назначена задача:",

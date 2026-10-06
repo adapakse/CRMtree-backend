@@ -125,19 +125,19 @@ describe('creating and seeing projects', () => {
     const project = await createProject(creator);
 
     const list = await api('get', '/api/projects', outsider);
-    expect(list.body.projects).toHaveLength(0);
+    expect(list.body.items).toHaveLength(0);
     expect(list.body.can_create).toBe(false);
     expect((await api('get', `/api/projects/${project.id}`, outsider)).status).toBe(404);
 
     const adminList = await api('get', '/api/projects', admin);
-    expect(adminList.body.projects.map((p) => p.id)).toContain(project.id);
+    expect(adminList.body.items.map((p) => p.id)).toContain(project.id);
     expect((await api('get', `/api/projects/${project.id}`, admin)).body.can_manage).toBe(true);
   });
 
   test('a project is invisible from another tenant', async () => {
     const project = await createProject(creator);
     expect((await api('get', `/api/projects/${project.id}`, otherTenantAdmin)).status).toBe(404);
-    expect((await api('get', '/api/projects', otherTenantAdmin)).body.projects).toHaveLength(0);
+    expect((await api('get', '/api/projects', otherTenantAdmin)).body.items).toHaveLength(0);
   });
 
   test('the module is refused when the feature is switched off', async () => {
@@ -171,7 +171,7 @@ describe('members', () => {
     expect(controller.body.find((m) => m.user_id === outsider.id).access_level).toBe('read');
 
     const employeeView = await api('get', '/api/projects', employee);
-    expect(employeeView.body.projects.map((p) => p.id)).toEqual([project.id]);
+    expect(employeeView.body.items.map((p) => p.id)).toEqual([project.id]);
   });
 
   test('a participant cannot manage members', async () => {
@@ -214,8 +214,8 @@ describe('closing', () => {
     const project = await createProject(creator);
     expect((await api('post', `/api/projects/${project.id}/close`, creator)).body.status).toBe('closed');
 
-    expect((await api('get', '/api/projects', creator)).body.projects).toHaveLength(0);
-    expect((await api('get', '/api/projects?status=closed', creator)).body.projects).toHaveLength(1);
+    expect((await api('get', '/api/projects', creator)).body.items).toHaveLength(0);
+    expect((await api('get', '/api/projects?status=closed', creator)).body.items).toHaveLength(1);
     expect((await api('patch', `/api/projects/${project.id}`, creator).send({ name: 'Nowa' })).status).toBe(409);
 
     expect((await api('post', `/api/projects/${project.id}/reopen`, creator)).body.status).toBe('open');

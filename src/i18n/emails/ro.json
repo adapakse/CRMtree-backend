@@ -95,6 +95,43 @@
     "footerAutomatic": "Acest mesaj a fost generat automat de sistemul CRMtree.",
     "footerNoReply": "Nu răspundeți la acest e-mail — această căsuță poștală nu este monitorizată."
   },
+  "projectDeadlineSummary": {
+    "assignees": "responsabili: {names}",
+    "daysOverdue": "{count, plural, one {# zi întârziere} few {# zile întârziere} other {# de zile întârziere}}",
+    "delayedProjectsHeading": "Proiecte întârziate",
+    "dueOn": "termen: {date}",
+    "heading": "Sarcini cu termen depășit",
+    "intro": "Situația la {date}:",
+    "managedTasksHeading": "Sarcini cu termen depășit în proiectele dumneavoastră",
+    "newBadge": "nou",
+    "ownTasksHeading": "Sarcinile dumneavoastră cu termen depășit",
+    "reasonEndPassed": "Data de încheiere a proiectului a trecut la {date} (acum {days, plural, one {# zi} few {# zile} other {# de zile}}), iar numărul sarcinilor nefinalizate este: {count}.",
+    "reasonTaskAfterEnd": "Sarcini nefinalizate cu termen după încheierea proiectului: {count}. Cel mai îndepărtat termen: {latestDate} ({days, plural, one {# zi} few {# zile} other {# de zile}} după încheierea proiectului).",
+    "settingsHint": "Notificările privind termenele din proiecte pot fi dezactivate în „Setările mele”.",
+    "subject": "[CRMtree] Sarcini cu termen depășit — {date}",
+    "unassigned": "neatribuită"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# zi după încheierea proiectului} few {# zile după încheierea proiectului} other {# de zile după încheierea proiectului}}",
+    "heading": "Proiectul este întârziat",
+    "intro": "Într-un proiect în care sunteți PM, o sarcină nefinalizată are termenul ulterior datei de încheiere a proiectului:",
+    "latestTaskDueDate": "Cel mai îndepărtat termen",
+    "openProject": "Deschidere proiect →",
+    "projectEndDate": "Încheierea proiectului",
+    "subject": "[CRMtree] Proiect întârziat: {projectName}",
+    "tasksAfterEnd": "Sarcini după încheierea proiectului"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Termen",
+    "heading": "Termenul sarcinii a fost modificat",
+    "intro": "<strong>{changedByName}</strong> a modificat termenul unei sarcini într-un proiect în care sunteți PM:",
+    "noDate": "fără",
+    "originalDueDate": "Termen inițial",
+    "reason": "Motivul modificării",
+    "slipEarlier": "{count, plural, one {# zi mai devreme} few {# zile mai devreme} other {# de zile mai devreme}}",
+    "slipLater": "{count, plural, one {# zi mai târziu} few {# zile mai târziu} other {# de zile mai târziu}}",
+    "subject": "[CRMtree] Termenul sarcinii a fost modificat: {taskLabel} {taskName}"
+  },
   "projectTaskAssigned": {
     "heading": "Vi s-a atribuit o sarcină în proiect",
     "intro": "<strong>{assignerName}</strong> v-a atribuit o sarcină:",

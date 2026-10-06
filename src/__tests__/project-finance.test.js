@@ -198,7 +198,7 @@ describe('tenant switch', () => {
 
       expect((await api('get', `/api/projects/${project.id}`, pm)).body.finance).toBeNull();
       const list = await api('get', '/api/projects', pm);
-      expect(list.body.projects[0].finance).toBeNull();
+      expect(list.body.items[0].finance).toBeNull();
       const card = await api('get', `/api/crm/leads/${leadId}/projects`, accountOwner);
       expect(card.body[0].finance).toBeNull();
     } finally {
@@ -770,7 +770,7 @@ describe('permissions', () => {
       margin: { planned: { amount: 400, percent: 40 }, actual: { amount: 300, percent: 60 } },
     };
     const financeInList = async (user) =>
-      (await api('get', '/api/projects', user)).body.projects.find((listed) => listed.id === project.id).finance;
+      (await api('get', '/api/projects', user)).body.items.find((listed) => listed.id === project.id).finance;
 
     expect(await financeInList(pm)).toEqual(totals);
     expect(await financeInList(admin)).toEqual(totals);

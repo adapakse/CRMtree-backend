@@ -95,6 +95,43 @@
     "footerAutomatic": "This message was generated automatically by CRMtree.",
     "footerNoReply": "Do not reply to this e-mail — this mailbox is not monitored."
   },
+  "projectDeadlineSummary": {
+    "assignees": "assigned to: {names}",
+    "daysOverdue": "{count, plural, one {# day overdue} other {# days overdue}}",
+    "delayedProjectsHeading": "Delayed projects",
+    "dueOn": "due: {date}",
+    "heading": "Overdue tasks",
+    "intro": "As of {date}:",
+    "managedTasksHeading": "Overdue tasks in your projects",
+    "newBadge": "new",
+    "ownTasksHeading": "Your overdue tasks",
+    "reasonEndPassed": "The project end date passed on {date} ({days, plural, one {# day} other {# days}} ago) and unfinished tasks remain: {count}.",
+    "reasonTaskAfterEnd": "Unfinished tasks due after the project end: {count}. Latest due date: {latestDate} ({days, plural, one {# day} other {# days}} after the project end).",
+    "settingsHint": "You can switch project deadline notifications off in My settings.",
+    "subject": "[CRMtree] Overdue tasks — {date}",
+    "unassigned": "unassigned"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# day after the project end} other {# days after the project end}}",
+    "heading": "The project is delayed",
+    "intro": "In a project you manage, an unfinished task is due after the project end date:",
+    "latestTaskDueDate": "Latest due date",
+    "openProject": "Open project →",
+    "projectEndDate": "Project end date",
+    "subject": "[CRMtree] Project delayed: {projectName}",
+    "tasksAfterEnd": "Tasks after the project end"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Due date",
+    "heading": "Task due date changed",
+    "intro": "<strong>{changedByName}</strong> has changed the due date of a task in a project you manage:",
+    "noDate": "none",
+    "originalDueDate": "Original due date",
+    "reason": "Reason for the change",
+    "slipEarlier": "{count, plural, one {# day earlier} other {# days earlier}}",
+    "slipLater": "{count, plural, one {# day later} other {# days later}}",
+    "subject": "[CRMtree] Task due date changed: {taskLabel} {taskName}"
+  },
   "projectTaskAssigned": {
     "heading": "A project task has been assigned to you",
     "intro": "<strong>{assignerName}</strong> has assigned a task to you:",

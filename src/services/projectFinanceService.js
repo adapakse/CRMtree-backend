@@ -125,6 +125,12 @@ function resolveAccess({ membership, canManage, settings }) {
   return { canRead, canWrite, canAddOwnCosts };
 }
 
+// Whether task lists may show (and filter by) the cost of this project's tasks.
+async function canReadTaskCosts({ tenantId, membership, canManage }) {
+  return resolveAccess({ membership, canManage, settings: {} }).canRead
+    && projectConfigService.isFinanceEnabled(tenantId);
+}
+
 // What the project card tells the frontend about finance; null when the
 // caller has nothing to do with it (or the tenant switch is off).
 async function describeAccess({ tenantId, project, membership, canManage }) {
@@ -747,6 +753,7 @@ module.exports = {
   REVENUE_STATUSES,
   getSettings,
   resolveAccess,
+  canReadTaskCosts,
   describeAccess,
   loadTotalsByProject,
   loadTotalsForList,

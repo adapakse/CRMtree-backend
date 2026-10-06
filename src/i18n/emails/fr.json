@@ -95,6 +95,43 @@
     "footerAutomatic": "Ce message a été généré automatiquement par CRMtree.",
     "footerNoReply": "Ne répondez pas à cet e-mail — cette boîte de réception n’est pas surveillée."
   },
+  "projectDeadlineSummary": {
+    "assignees": "assignée à : {names}",
+    "daysOverdue": "{count, plural, one {# jour de retard} other {# jours de retard}}",
+    "delayedProjectsHeading": "Projets en retard",
+    "dueOn": "échéance : {date}",
+    "heading": "Tâches en retard",
+    "intro": "Situation au {date} :",
+    "managedTasksHeading": "Tâches en retard dans vos projets",
+    "newBadge": "nouveau",
+    "ownTasksHeading": "Vos tâches en retard",
+    "reasonEndPassed": "La date de fin du projet est dépassée depuis le {date} (il y a {days, plural, one {# jour} other {# jours}}) et le nombre de tâches non terminées est de : {count}.",
+    "reasonTaskAfterEnd": "Tâches non terminées dont l’échéance est postérieure à la fin du projet : {count}. Échéance la plus tardive : {latestDate} ({days, plural, one {# jour} other {# jours}} après la fin du projet).",
+    "settingsHint": "Vous pouvez désactiver les notifications sur les échéances des projets dans « Mes paramètres ».",
+    "subject": "[CRMtree] Tâches en retard — {date}",
+    "unassigned": "non assignée"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# jour après la fin du projet} other {# jours après la fin du projet}}",
+    "heading": "Le projet est en retard",
+    "intro": "Dans un projet dont vous êtes PM, une tâche non terminée a une échéance postérieure à la date de fin du projet :",
+    "latestTaskDueDate": "Échéance la plus tardive",
+    "openProject": "Ouvrir le projet →",
+    "projectEndDate": "Fin du projet",
+    "subject": "[CRMtree] Projet en retard : {projectName}",
+    "tasksAfterEnd": "Tâches après la fin du projet"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Échéance",
+    "heading": "Échéance de la tâche modifiée",
+    "intro": "<strong>{changedByName}</strong> a modifié l’échéance d’une tâche dans un projet dont vous êtes PM :",
+    "noDate": "aucune",
+    "originalDueDate": "Échéance initiale",
+    "reason": "Motif de la modification",
+    "slipEarlier": "{count, plural, one {# jour plus tôt} other {# jours plus tôt}}",
+    "slipLater": "{count, plural, one {# jour plus tard} other {# jours plus tard}}",
+    "subject": "[CRMtree] Échéance de la tâche modifiée : {taskLabel} {taskName}"
+  },
   "projectTaskAssigned": {
     "heading": "Une tâche de projet vous a été assignée",
     "intro": "<strong>{assignerName}</strong> vous a assigné une tâche :",

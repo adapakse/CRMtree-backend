@@ -95,6 +95,43 @@
     "footerAutomatic": "Este mensaje ha sido generado automáticamente por el sistema CRMtree.",
     "footerNoReply": "No respondas a este correo — este buzón no se supervisa."
   },
+  "projectDeadlineSummary": {
+    "assignees": "asignada a: {names}",
+    "daysOverdue": "{count, plural, one {# día de retraso} other {# días de retraso}}",
+    "delayedProjectsHeading": "Proyectos retrasados",
+    "dueOn": "fecha límite: {date}",
+    "heading": "Tareas vencidas",
+    "intro": "Situación a {date}:",
+    "managedTasksHeading": "Tareas vencidas en tus proyectos",
+    "newBadge": "nuevo",
+    "ownTasksHeading": "Tus tareas vencidas",
+    "reasonEndPassed": "La fecha de fin del proyecto pasó el {date} (hace {days, plural, one {# día} other {# días}}) y las tareas sin finalizar son: {count}.",
+    "reasonTaskAfterEnd": "Tareas sin finalizar con fecha límite posterior al fin del proyecto: {count}. Fecha límite más tardía: {latestDate} ({days, plural, one {# día} other {# días}} después del fin del proyecto).",
+    "settingsHint": "Puedes desactivar las notificaciones sobre fechas límite de los proyectos en «Mi configuración».",
+    "subject": "[CRMtree] Tareas vencidas — {date}",
+    "unassigned": "sin asignar"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# día después del fin del proyecto} other {# días después del fin del proyecto}}",
+    "heading": "El proyecto está retrasado",
+    "intro": "En un proyecto del que eres PM, una tarea sin finalizar tiene una fecha límite posterior a la fecha de fin del proyecto:",
+    "latestTaskDueDate": "Fecha límite más tardía",
+    "openProject": "Abrir proyecto →",
+    "projectEndDate": "Fin del proyecto",
+    "subject": "[CRMtree] Proyecto retrasado: {projectName}",
+    "tasksAfterEnd": "Tareas posteriores al fin del proyecto"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Fecha límite",
+    "heading": "Fecha límite de la tarea modificada",
+    "intro": "<strong>{changedByName}</strong> ha cambiado la fecha límite de una tarea en un proyecto del que eres PM:",
+    "noDate": "ninguna",
+    "originalDueDate": "Fecha límite original",
+    "reason": "Motivo del cambio",
+    "slipEarlier": "{count, plural, one {# día antes} other {# días antes}}",
+    "slipLater": "{count, plural, one {# día después} other {# días después}}",
+    "subject": "[CRMtree] Cambio de fecha límite de la tarea: {taskLabel} {taskName}"
+  },
   "projectTaskAssigned": {
     "heading": "Se te ha asignado una tarea en un proyecto",
     "intro": "<strong>{assignerName}</strong> te ha asignado una tarea:",

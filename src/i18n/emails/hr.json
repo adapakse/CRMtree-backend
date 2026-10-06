@@ -95,6 +95,43 @@
     "footerAutomatic": "Ovu je poruku automatski generirao sustav CRMtree.",
     "footerNoReply": "Ne odgovarajte na ovu poruku — ovaj se sandučić ne nadzire."
   },
+  "projectDeadlineSummary": {
+    "assignees": "osobe: {names}",
+    "daysOverdue": "{count, plural, one {# dan kašnjenja} few {# dana kašnjenja} other {# dana kašnjenja}}",
+    "delayedProjectsHeading": "Projekti koji kasne",
+    "dueOn": "rok: {date}",
+    "heading": "Zadaci s isteklim rokom",
+    "intro": "Stanje na dan {date}:",
+    "managedTasksHeading": "Zadaci s isteklim rokom u vašim projektima",
+    "newBadge": "novo",
+    "ownTasksHeading": "Vaši zadaci s isteklim rokom",
+    "reasonEndPassed": "Rok završetka projekta istekao je {date} (prije {days, plural, one {# dan} few {# dana} other {# dana}}), a broj nedovršenih zadataka je: {count}.",
+    "reasonTaskAfterEnd": "Nedovršeni zadaci s rokom nakon završetka projekta: {count}. Najkasniji rok: {latestDate} ({days, plural, one {# dan} few {# dana} other {# dana}} nakon završetka projekta).",
+    "settingsHint": "Obavijesti o rokovima u projektima možete isključiti u odjeljku „Moje postavke”.",
+    "subject": "[CRMtree] Zadaci s isteklim rokom — {date}",
+    "unassigned": "nedodijeljen"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# dan nakon završetka projekta} few {# dana nakon završetka projekta} other {# dana nakon završetka projekta}}",
+    "heading": "Projekt kasni",
+    "intro": "U projektu u kojem ste PM nedovršeni zadatak ima rok kasniji od datuma završetka projekta:",
+    "latestTaskDueDate": "Najkasniji rok",
+    "openProject": "Otvori projekt →",
+    "projectEndDate": "Završetak projekta",
+    "subject": "[CRMtree] Projekt kasni: {projectName}",
+    "tasksAfterEnd": "Zadaci nakon završetka projekta"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Rok",
+    "heading": "Rok zadatka je promijenjen",
+    "intro": "Korisnik <strong>{changedByName}</strong> promijenio je rok zadatka u projektu u kojem ste PM:",
+    "noDate": "nema",
+    "originalDueDate": "Izvorni rok",
+    "reason": "Razlog promjene",
+    "slipEarlier": "{count, plural, one {# dan ranije} few {# dana ranije} other {# dana ranije}}",
+    "slipLater": "{count, plural, one {# dan kasnije} few {# dana kasnije} other {# dana kasnije}}",
+    "subject": "[CRMtree] Promjena roka zadatka: {taskLabel} {taskName}"
+  },
   "projectTaskAssigned": {
     "heading": "Dodijeljen vam je zadatak u projektu",
     "intro": "<strong>{assignerName}</strong> dodjeljuje vam zadatak:",

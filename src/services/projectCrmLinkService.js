@@ -12,6 +12,7 @@
 const db = require('../config/database');
 const projectConfigService = require('./projectConfigService');
 const projectFinanceService = require('./projectFinanceService');
+const projectDeadlineService = require('./projectDeadlineService');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -78,8 +79,10 @@ async function moveLeadProjectsToPartner({ tenantId, leadId, partnerId }) {
   );
 }
 
-const TASK_SUMMARY_COLUMNS = `
+// `deadlinePlaceholders` — see projectDeadlineService.taskDeadlineColumns.
+const taskSummaryColumns = (deadlinePlaceholders) => `
   t.id, t.task_number, t.name, t.start_date, t.end_date, t.parent_task_id,
+  ${projectDeadlineService.taskDeadlineColumns(deadlinePlaceholders)},
   s.id AS status_id, s.name AS status_name, s.color AS status_color, s.category AS status_category,
   pr.name AS priority_name, pr.color AS priority_color,
   COALESCE((
@@ -94,10 +97,10 @@ const TASK_SUMMARY_COLUMNS = `
 // `can_open` tells the card whether the viewer may enter the project itself
 // (a member or the tenant admin); everyone else only sees this summary.
 // `finance` holds the project's totals, or null while the tenant has project
-// finance switched off.
+// finance switched off. Every project also says whether it is delayed.
 async function listLinkedProjects({ tenantId, viewer, leadId = null, partnerId = null }) {
   const { rows: projects } = await db.query(
-    `SELECT p.id, p.key, p.name, p.status, p.created_at, p.closed_at,
+    `SELECT p.id, p.key, p.name, p.status, p.created_at, p.closed_at, p.start_date, p.end_date,
             ($5::boolean OR EXISTS (
               SELECT 1 FROM project_members m WHERE m.project_id = p.id AND m.user_id = $4
             )) AS can_open
@@ -109,22 +112,26 @@ async function listLinkedProjects({ tenantId, viewer, leadId = null, partnerId =
   );
   if (!projects.length) return [];
 
+  const projectIds = projects.map((project) => project.id);
+  const today = projectDeadlineService.todayInWarsaw();
   const { rows: tasks } = await db.query(
-    `SELECT t.project_id, ${TASK_SUMMARY_COLUMNS}
+    `SELECT t.project_id, ${taskSummaryColumns({ today: '$2' })}
      FROM project_tasks t
      JOIN project_task_statuses s ON s.id = t.status_id
      LEFT JOIN project_task_priorities pr ON pr.id = t.priority_id
      WHERE t.project_id = ANY($1::uuid[])
      ORDER BY t.task_number`,
-    [projects.map((project) => project.id)],
+    [projectIds, today],
   );
+  const delays = await projectDeadlineService.loadProjectDelays(projectIds, today);
   // Whoever sees the lead or partner card sees the finance totals of its
   // projects, member or not — totals only, never the items.
   const financeByProject = await projectConfigService.isFinanceEnabled(tenantId)
-    ? await projectFinanceService.loadTotalsByProject(projects.map((project) => project.id))
+    ? await projectFinanceService.loadTotalsByProject(projectIds)
     : new Map();
   return projects.map((project) => ({
     ...project,
+    ...delays.get(project.id),
     tasks: tasks.filter((task) => task.project_id === project.id),
     finance: financeByProject.get(project.id) ?? null,
   }));
@@ -134,11 +141,15 @@ async function listLinkedProjects({ tenantId, viewer, leadId = null, partnerId =
 // A viewer sees their own tasks everywhere; another person's tasks only in
 // projects the viewer is a member of (the tenant admin: in every project).
 // An external participant never sees tasks other than their own.
+//
+// Unpaged on purpose: this is the feed of the CRM calendar, the dashboard and
+// "my tasks" widgets, which need the whole set. The filterable, paged list of
+// one's own tasks is projectTaskListService (GET /api/projects/my-tasks).
 async function listAssignedTasks({ tenantId, viewer, assigneeIds, includeDone = false }) {
   const { rows } = await db.query(
     `SELECT p.id AS project_id, p.key AS project_key, p.name AS project_name,
             t.reminder_type, t.reminder_at, t.updated_at,
-            ${TASK_SUMMARY_COLUMNS}
+            ${taskSummaryColumns({ today: '$6', onlyAssignedTo: '$7' })}
      FROM project_tasks t
      JOIN projects p ON p.id = t.project_id
      JOIN project_task_statuses s ON s.id = t.status_id
@@ -156,7 +167,8 @@ async function listAssignedTasks({ tenantId, viewer, assigneeIds, includeDone = 
          OR (viewer_membership.user_id IS NOT NULL AND viewer_membership.role <> 'external_participant')
        )
      ORDER BY t.end_date NULLS LAST, p.key, t.task_number`,
-    [tenantId, viewer.id, assigneeIds, includeDone, Boolean(viewer.is_admin)],
+    [tenantId, viewer.id, assigneeIds, includeDone, Boolean(viewer.is_admin),
+     projectDeadlineService.todayInWarsaw(), viewer.is_external ? viewer.id : null],
   );
   return rows;
 }
