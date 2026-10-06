@@ -143,6 +143,20 @@ module.exports = {
     ),
   },
 
+  // ─── Yandex Mail ──────────────────────────────────────────────────────────
+  // OAuth2 per-user. Yandex has no public mail REST API — reading and sending go
+  // over IMAP/SMTP with XOAUTH2 — but a single set of endpoints serves every
+  // regional mailbox (@yandex.by, @yandex.ru, @yandex.com), so unlike Zoho there
+  // is no per-account data centre to resolve.
+  yandex: {
+    clientId:     optional("YANDEX_CLIENT_ID"),
+    clientSecret: optional("YANDEX_CLIENT_SECRET"),
+    redirectUri:  optional(
+      "YANDEX_REDIRECT_URI",
+      "http://localhost:3001/api/crm/yandex/oauth/callback",
+    ),
+  },
+
   signus: {
     baseUrl: optional("SIGNUS_API_BASE_URL", "https://api.signus.eu/v1"),
     apiKey: optional("SIGNUS_API_KEY"),

@@ -928,7 +928,7 @@ router.delete('/:id/email-providers/:provider',
 );
 
 // ── PUT /:id/active-provider — choose the tenant's single active email provider ───
-// Body: { provider: 'gmail' | 'outlook' | 'zoho' | null }. null/omitted = "none".
+// Body: { provider: 'gmail' | 'outlook' | 'zoho' | 'yandex' | null }. null/omitted = "none".
 // Refuses to activate a provider that has no saved, enabled configuration —
 // this is the only place active_email_provider is ever written.
 router.put('/:id/active-provider',

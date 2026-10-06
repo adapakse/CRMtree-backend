@@ -26,6 +26,10 @@ const REQUIRED_CONFIG_FIELDS = {
   // account outside one organization.
   outlook: ['client_id', 'client_secret', 'redirect_uri'],
   zoho:    ['client_id', 'client_secret', 'redirect_uri'],
+  // Yandex serves every regional mailbox (@yandex.by, @yandex.ru, @yandex.com)
+  // from one set of endpoints, so there is no data centre or region field to
+  // collect — unlike Zoho, where the DC is resolved per account at OAuth time.
+  yandex:  ['client_id', 'client_secret', 'redirect_uri'],
 };
 
 // Fields stored as real columns on tenant_email_providers; anything else is
