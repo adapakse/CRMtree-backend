@@ -24,6 +24,7 @@ const crypto   = require("crypto");
 const { pool } = require("../config/database");
 const config   = require("../config");
 const { decrypt } = require("../utils/encrypt");
+const yandexDemo = require("./yandexDemo");
 const {
   ProviderNotConfiguredError,
   IncompleteProviderConfigError,
@@ -130,9 +131,28 @@ function parseOAuthState(state) {
   return userIdStr;
 }
 
+// ── Demo mode (client_id = "demo", see services/yandexDemo.js) ───────────────
+async function isDemoUser(userId) {
+  try {
+    const creds = await getEffectiveCreds(userId);
+    return yandexDemo.isDemoClientId(creds.clientId);
+  } catch (_) {
+    return false;
+  }
+}
+
 // ── OAuth2 authorization URL ─────────────────────────────────────────────────
 async function getAuthUrl(userId) {
   const creds = await getEffectiveCreds(userId);
+
+  // Demo: there is no Yandex consent screen to send the user to — connect the
+  // synthetic mailbox right away and land on the same callback page a real
+  // connection ends on.
+  if (yandexDemo.isDemoClientId(creds.clientId)) {
+    await yandexDemo.connectDemoMailbox(userId, creds.tenantId);
+    return `${config.frontendUrl}/crm/yandex/callback?status=connected`;
+  }
+
   const params = new URLSearchParams({
     client_id:     creds.clientId,
     response_type: "code",
@@ -295,7 +315,8 @@ async function disconnect(userId) {
     "SELECT access_token FROM user_yandex_tokens WHERE user_id = $1",
     [userId],
   );
-  if (rows.length && rows[0].access_token) {
+  // A demo mailbox was never issued by Yandex — nothing to revoke there.
+  if (rows.length && rows[0].access_token && !(await isDemoUser(userId))) {
     try {
       const creds = await getEffectiveCreds(userId);
       await fetch(OAUTH_REVOKE_URL, {
@@ -331,6 +352,7 @@ module.exports = {
   exchangeCodeAndSave,
   getStatus,
   disconnect,
+  isDemoUser,
   getTokenRow,
   sendEmail,
   getThread,

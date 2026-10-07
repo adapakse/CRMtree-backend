@@ -31,11 +31,13 @@ const db = require('../config/database');
 const gmailRouter   = require('./crm-gmail');
 const outlookRouter = require('./crm-outlook');
 const zohoRouter    = require('./crm-zoho');
+const yandexRouter  = require('./crm-yandex');
 
 const PROVIDER_HANDLERS = {
   gmail:   gmailRouter.handlers,
   outlook: outlookRouter.handlers,
   zoho:    zohoRouter.handlers,
+  yandex:  yandexRouter.handlers,
 };
 
 let upload = null;
