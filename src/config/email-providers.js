@@ -13,7 +13,7 @@
 //
 // No other JS file needs to change its list of provider keys — but the DATABASE
 // does. Four CHECK constraints repeat the list and reject an unknown provider
-// with 23514 (see migration 0317, which widened them for 'yandex'):
+// with 23514 (see migration 0325, which widened them for 'yandex'):
 //   tenant_email_providers.provider          — saving a tenant's credentials
 //   tenants.active_email_provider            — activating the provider
 //   crm_lead_activities.email_provider       — storing received/sent mail

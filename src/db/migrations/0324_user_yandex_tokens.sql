@@ -1,4 +1,4 @@
--- 0316_user_yandex_tokens.sql
+-- 0324_user_yandex_tokens.sql
 -- Per-user Yandex Mail OAuth2 tokens.
 --
 -- Unlike Zoho there is no accounts_server/api_domain column: Yandex has a single

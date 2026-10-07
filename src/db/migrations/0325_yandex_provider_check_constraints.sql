@@ -1,9 +1,9 @@
--- 0317_yandex_provider_check_constraints.sql
+-- 0325_yandex_provider_check_constraints.sql
 --
 -- Dopuszcza 'yandex' w czterech CHECK constraintach, ktore trzymaja liste
 -- dostawcow poczty na poziomie bazy.
 --
--- Dlaczego osobna migracja, a nie czesc 0316: rejestr w config/email-providers.js
+-- Dlaczego osobna migracja, a nie czesc 0324: rejestr w config/email-providers.js
 -- opisuje siebie jako "the ONE place that lists provider keys" i stwierdza, ze
 -- dodanie providera nie wymaga zmian w innych plikach. To nieprawda — poza
 -- rejestrem liste powtarzaja jeszcze te constrainty, i bez ich rozszerzenia
