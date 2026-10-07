@@ -320,6 +320,7 @@ router.get('/activities',
   [
     query('offset').optional().isInt({ min: 0 }).toInt(),
     query('limit').optional().isInt({ min: 1, max: 50 }).toInt(),
+    query('assigned_to').optional().isUUID(),
   ],
   validate,
   async (req, res, next) => {
@@ -336,6 +337,10 @@ router.get('/activities',
       const $limit  = `$${raParams.length}`;
       raParams.push(offset);
       const $offset = `$${raParams.length}`;
+      // The mobile dashboard narrows the feed to one salesperson; the scope
+      // above still decides what may be seen at all.
+      raParams.push(req.query.assigned_to || null);
+      const $owner = `$${raParams.length}`;
 
       const { rows } = await db.query(`
         SELECT uid, type, title, status, source_type, source_id, source_name,
@@ -344,7 +349,8 @@ router.get('/activities',
           SELECT 'la_' || a.id::text AS uid, COALESCE(a.type,'note') AS type,
                  a.title, a.status, 'lead' AS source_type,
                  l.id::text AS source_id, l.company AS source_name,
-                 a.activity_at, a.updated_at, au.display_name AS assigned_to_name
+                 a.activity_at, a.updated_at, au.display_name AS assigned_to_name,
+                 COALESCE(a.assigned_to, l.assigned_to) AS owner_id
           FROM crm_lead_activities a
           JOIN crm_leads l ON l.id = a.lead_id
           LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, l.assigned_to) AND au.tenant_id = $1
@@ -353,7 +359,8 @@ router.get('/activities',
           SELECT 'la_' || a.id::text AS uid, 'email' AS type,
                  a.title, a.status, 'lead' AS source_type,
                  l.id::text AS source_id, l.company AS source_name,
-                 a.activity_at, a.updated_at, NULL::text AS assigned_to_name
+                 a.activity_at, a.updated_at, NULL::text AS assigned_to_name,
+                 COALESCE(a.assigned_to, l.assigned_to) AS owner_id
           FROM crm_lead_activities a
           JOIN crm_leads l ON l.id = a.lead_id
           WHERE a.tenant_id = $1 AND a.type = 'email' AND a.is_read = false ${raLeads}
@@ -361,7 +368,8 @@ router.get('/activities',
           SELECT 'pa_' || a.id::text AS uid, COALESCE(a.type,'note') AS type,
                  a.title, a.status, 'partner' AS source_type,
                  p.id::text AS source_id, p.company AS source_name,
-                 a.activity_at, a.updated_at, au.display_name AS assigned_to_name
+                 a.activity_at, a.updated_at, au.display_name AS assigned_to_name,
+                 COALESCE(a.assigned_to, p.manager_id) AS owner_id
           FROM crm_partner_activities a
           JOIN crm_partners p ON p.id = a.partner_id
           LEFT JOIN users au ON au.id = COALESCE(a.assigned_to, p.manager_id) AND au.tenant_id = $1
@@ -370,7 +378,8 @@ router.get('/activities',
           SELECT 'pa_' || a.id::text AS uid, 'email' AS type,
                  a.title, a.status, 'partner' AS source_type,
                  p.id::text AS source_id, p.company AS source_name,
-                 a.activity_at, a.updated_at, NULL::text AS assigned_to_name
+                 a.activity_at, a.updated_at, NULL::text AS assigned_to_name,
+                 COALESCE(a.assigned_to, p.manager_id) AS owner_id
           FROM crm_partner_activities a
           JOIN crm_partners p ON p.id = a.partner_id
           WHERE a.tenant_id = $1 AND a.type = 'email' AND a.is_read = false ${raPartners}
@@ -379,7 +388,7 @@ router.get('/activities',
                  t.title, 'closed' AS status, 'onboarding' AS source_type,
                  p.id::text AS source_id, p.company AS source_name,
                  t.done_at AS activity_at, COALESCE(t.updated_at, t.created_at) AS updated_at,
-                 au.display_name AS assigned_to_name
+                 au.display_name AS assigned_to_name, t.assigned_to AS owner_id
           FROM crm_onboarding_tasks t
           JOIN crm_partners p ON p.id = t.partner_id
           LEFT JOIN users au ON au.id = t.assigned_to AND au.tenant_id = $1
@@ -389,11 +398,12 @@ router.get('/activities',
                  COALESCE(wt.message, d.name) AS title, 'closed' AS status, 'document' AS source_type,
                  d.id::text AS source_id, d.name AS source_name,
                  wt.completed_at AS activity_at, wt.updated_at,
-                 NULL::text AS assigned_to_name
+                 NULL::text AS assigned_to_name, wt.assigned_to AS owner_id
           FROM workflow_tasks wt
           JOIN documents d ON d.id = wt.document_id
           WHERE wt.task_status = 'completed' AND wt.assigned_to = ${raUserId}
         ) sub
+        WHERE (${$owner}::uuid IS NULL OR owner_id = ${$owner}::uuid)
         ORDER BY updated_at DESC NULLS LAST
         LIMIT ${$limit} OFFSET ${$offset}
       `, raParams);

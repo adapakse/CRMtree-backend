@@ -361,4 +361,29 @@ describe("agenda", () => {
     expect(missing.status).toBe(400);
     expectDocumented(missing, "get", "/crm/mobile/today");
   });
+
+  test("GET /crm/mobile/dashboard and its 400", async () => {
+    const now = Date.now();
+    const res = await request(app).get("/api/crm/mobile/dashboard").set(auth)
+      .query({
+        week_start: new Date(now - 3 * 86400000).toISOString(),
+        week_end: new Date(now + 4 * 86400000).toISOString(),
+        month_start: new Date(now - 15 * 86400000).toISOString(),
+        month_end: new Date(now + 15 * 86400000).toISOString(),
+        period_end: new Date(now + 86400000).toISOString(),
+        period_days: 30,
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.chart.points).toHaveLength(30);
+    expectDocumented(res, "get", "/crm/mobile/dashboard");
+
+    const feed = await request(app).get("/api/crm/dashboard/activities?limit=5").set(auth);
+    expect(feed.status).toBe(200);
+    expect(feed.body.length).toBeGreaterThan(0);
+    expectDocumented(feed, "get", "/crm/dashboard/activities");
+
+    const missing = await request(app).get("/api/crm/mobile/dashboard").set(auth);
+    expect(missing.status).toBe(400);
+    expectDocumented(missing, "get", "/crm/mobile/dashboard");
+  });
 });
