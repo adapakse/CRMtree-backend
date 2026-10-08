@@ -391,7 +391,7 @@ describe("agenda", () => {
       ask.mockResolvedValueOnce(JSON.stringify({
         summary: "Zadanie: import danych.",
         question: null,
-        intent: { name: "Import danych", description: null, startDate: null, endDate: "2026-10-16", typeNumber: 1, priorityNumber: null, assigneeNumbers: [1] },
+        intent: { name: "Import danych", description: null, startDate: "2026-10-12", endDate: null, durationDays: 5, typeNumber: 1, priorityNumber: null, assigneeNumbers: [1] },
       }));
       const task = await request(app).post("/api/assistant/project-task").set(auth)
         .send({ ...conversation, types: [{ id: "t1", name: "Bug" }], members: [{ id: "m1", name: "Anna" }] });

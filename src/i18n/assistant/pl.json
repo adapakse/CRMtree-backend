@@ -8,6 +8,7 @@
     "when": "Na kiedy?"
   },
   "projectTask": {
-    "name": "Czego ma dotyczyć zadanie?"
+    "name": "Czego ma dotyczyć zadanie?",
+    "start": "Kiedy zadanie ma się zacząć?"
   }
 }

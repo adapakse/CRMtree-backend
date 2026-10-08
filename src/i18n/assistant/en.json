@@ -8,6 +8,7 @@
     "when": "When is it due?"
   },
   "projectTask": {
-    "name": "What is the task about?"
+    "name": "What is the task about?",
+    "start": "When should the task start?"
   }
 }

@@ -8,6 +8,7 @@
     "when": "Per quando?"
   },
   "projectTask": {
-    "name": "Di cosa tratta l’attività?"
+    "name": "Di cosa tratta l’attività?",
+    "start": "Quando deve iniziare l’attività?"
   }
 }

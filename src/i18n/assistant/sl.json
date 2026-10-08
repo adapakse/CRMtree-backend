@@ -8,6 +8,7 @@
     "when": "Do kdaj?"
   },
   "projectTask": {
-    "name": "Za kaj gre pri nalogi?"
+    "name": "Za kaj gre pri nalogi?",
+    "start": "Kdaj naj se naloga začne?"
   }
 }

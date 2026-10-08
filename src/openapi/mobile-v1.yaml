@@ -319,7 +319,9 @@ paths:
       description: |
         Same conversation as /assistant/activity. The app sends the project's
         task types, priorities and members; `intent` names them by their ids.
-        Only the task's name is essential.
+        Essential: the task's name and the day it starts. When the person says
+        how long the task takes instead of a due day, `end_date` is worked
+        out from the start (the first day counts).
       requestBody:
         required: true
         content:

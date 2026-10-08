@@ -201,34 +201,58 @@ describe("POST /api/assistant/project-task", () => {
   const taskSays = (intent, summary = "Zrozumiałem.") => askSpy.mockResolvedValueOnce(JSON.stringify({
     summary,
     question: null,
-    intent: { name: null, description: null, startDate: null, endDate: null, typeNumber: null, priorityNumber: null, assigneeNumbers: [], ...intent },
+    intent: { name: null, description: null, startDate: null, endDate: null, durationDays: null, typeNumber: null, priorityNumber: null, assigneeNumbers: [], ...intent },
   }));
 
   test("list items picked by number come back as their ids", async () => {
-    taskSays({ name: "Poprawić logowanie", endDate: "2026-10-16", typeNumber: 1, priorityNumber: 1, assigneeNumbers: [2, 2, 7] });
+    taskSays({ name: "Poprawić logowanie", startDate: "2026-10-12", endDate: "2026-10-16", typeNumber: 1, priorityNumber: 1, assigneeNumbers: [2, 2, 7] });
     const res = await askTask();
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       reply: "Zrozumiałem.",
       complete: true,
       intent: {
-        name: "Poprawić logowanie", description: null, start_date: null, end_date: "2026-10-16",
+        name: "Poprawić logowanie", description: null, start_date: "2026-10-12", end_date: "2026-10-16",
         type_id: "type-bug", priority_id: "prio-high", assignee_ids: ["member-jan"],
       },
     });
     expect(askSpy.mock.calls[0][0].system).toContain("1: Bug\n2: Feature");
   });
 
-  test("without a name it asks what the task is; a start after the due date is dropped", async () => {
+  test("asks what the task is, then when it starts; a start after the due date is dropped", async () => {
     taskSays({});
     expect((await askTask()).body).toMatchObject({ complete: false, reply: "Zrozumiałem. Czego ma dotyczyć zadanie?" });
 
+    taskSays({ name: "Import" });
+    expect((await askTask()).body).toMatchObject({ complete: false, reply: "Zrozumiałem. Kiedy zadanie ma się zacząć?" });
+
     taskSays({ name: "Import", startDate: "2026-10-20", endDate: "2026-10-16" });
-    expect((await askTask()).body.intent).toMatchObject({ start_date: null, end_date: "2026-10-16" });
+    const reversed = await askTask();
+    expect(reversed.body.intent).toMatchObject({ start_date: null, end_date: "2026-10-16" });
+    expect(reversed.body.complete).toBe(false);
+  });
+
+  test("a start and a duration give the due date; the first day counts", async () => {
+    taskSays({ name: "Import", startDate: "2026-10-09", durationDays: 5 });
+    const fiveDays = await askTask();
+    expect(fiveDays.body.complete).toBe(true);
+    expect(fiveDays.body.intent).toMatchObject({ start_date: "2026-10-09", end_date: "2026-10-13" });
+
+    // Over the end of a month, and a one-day task ends the day it starts.
+    taskSays({ name: "Import", startDate: "2026-10-30", durationDays: 4 });
+    expect((await askTask()).body.intent.end_date).toBe("2026-11-02");
+    taskSays({ name: "Import", startDate: "2026-10-09", durationDays: 1 });
+    expect((await askTask()).body.intent.end_date).toBe("2026-10-09");
+
+    // A due day the person named wins; a nonsense duration is ignored.
+    taskSays({ name: "Import", startDate: "2026-10-09", endDate: "2026-10-20", durationDays: 3 });
+    expect((await askTask()).body.intent.end_date).toBe("2026-10-20");
+    taskSays({ name: "Import", startDate: "2026-10-09", durationDays: 0 });
+    expect((await askTask()).body.intent.end_date).toBeNull();
   });
 
   test("works without the lists, and rejects a malformed one", async () => {
-    taskSays({ name: "Import", typeNumber: 1 });
+    taskSays({ name: "Import", startDate: "2026-10-09", typeNumber: 1 });
     const bare = await askTask({ types: undefined, priorities: undefined, members: undefined });
     expect(bare.body.intent).toMatchObject({ name: "Import", type_id: null });
 

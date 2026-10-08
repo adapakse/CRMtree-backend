@@ -8,6 +8,7 @@
     "when": "Do kada?"
   },
   "projectTask": {
-    "name": "O čemu je zadatak?"
+    "name": "O čemu je zadatak?",
+    "start": "Kada zadatak treba započeti?"
   }
 }

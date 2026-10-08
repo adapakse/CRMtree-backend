@@ -8,6 +8,7 @@
     "when": "Până când?"
   },
   "projectTask": {
-    "name": "Despre ce este sarcina?"
+    "name": "Despre ce este sarcina?",
+    "start": "Când trebuie să înceapă sarcina?"
   }
 }
