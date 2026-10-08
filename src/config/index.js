@@ -216,6 +216,14 @@ module.exports = {
   push: {
     firebaseServiceAccountJson: optional("FIREBASE_SERVICE_ACCOUNT_JSON", ""),
   },
+  // The form assistants of the mobile app (services/assistant). Without
+  // these the assistant endpoints answer 503 and the app keeps its forms.
+  azureOpenAi: {
+    endpoint: optional("AZURE_OPENAI_ENDPOINT", ""),
+    apiKey: optional("AZURE_OPENAI_API_KEY", ""),
+    deployment: optional("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1-mini"),
+    apiVersion: optional("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+  },
   mobile: {
     minVersionAndroid: optional("MOBILE_MIN_VERSION_ANDROID", "0.0.0"),
     minVersionIos: optional("MOBILE_MIN_VERSION_IOS", "0.0.0"),

@@ -1,0 +1,13 @@
+{
+  "activity": {
+    "body": "Ce să notez?",
+    "company": "Despre ce companie este vorba?",
+    "companyNotFound": "Nu am găsit nicio companie numită „{name}”. Spuneți-i numele altfel.",
+    "reminder": "Să setez un memento și, dacă da, cu cât timp înainte?",
+    "title": "Despre ce este vorba?",
+    "when": "Până când?"
+  },
+  "projectTask": {
+    "name": "Despre ce este sarcina?"
+  }
+}
