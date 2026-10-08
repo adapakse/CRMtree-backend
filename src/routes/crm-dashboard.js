@@ -9,12 +9,16 @@ const db = require('../config/database');
 const { requireAuth }                  = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, loadCrmScope, crmScope } = require('../middleware/crm-rbac');
+const leadStageSvc = require('../services/leadStageService');
 
 router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope, crmScope);
 
 // GET /api/crm/dashboard — pipeline leads
 router.get('/', async (req, res, next) => {
   try {
+    // Kolejność etapów i kod archiwum są konfigurowalne per tenant.
+    const stageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+
     const params = [req.tenantId];
     const scopeLeads = req.scopeFilter('l', 'assigned_to', params);
     const userId = req.user.id;
@@ -25,6 +29,9 @@ router.get('/', async (req, res, next) => {
     raParams.push(req.user.id);
     const raUserId = `$${raParams.length}`;
 
+    const sPipeline = leadStageSvc.stageRefs(params, stageConfig);
+    const sRecent   = leadStageSvc.stageRefs(params, stageConfig);
+
     const [pipeline, recentLeads, recentActivities] = await Promise.all([
       db.query(`
         SELECT stage,
@@ -32,13 +39,11 @@ router.get('/', async (req, res, next) => {
           COALESCE(SUM(value_pln),0)                        AS total_value,
           COALESCE(SUM(value_pln * probability / 100.0), 0) AS weighted_value
         FROM crm_leads l
-        WHERE l.tenant_id = $1 AND converted_at IS NULL AND NOT hold_active AND stage != 'archived' ${scopeLeads}
+        WHERE l.tenant_id = $1 AND converted_at IS NULL AND NOT hold_active
+          AND stage IS DISTINCT FROM ${sPipeline.archived()} ${scopeLeads}
         GROUP BY stage
-        ORDER BY CASE stage
-          WHEN 'new' THEN 1 WHEN 'qualification' THEN 2 WHEN 'presentation' THEN 3
-          WHEN 'offer' THEN 4 WHEN 'negotiation' THEN 5
-          WHEN 'closed_won' THEN 6 WHEN 'closed_lost' THEN 7 END
-      `, params),
+        ORDER BY array_position(${sPipeline.order()}, stage), stage
+      `, [...params, ...sPipeline.values]),
 
       db.query(`
         SELECT l.id, l.company, l.stage, l.value_pln, l.hot, l.updated_at,
@@ -46,9 +51,10 @@ router.get('/', async (req, res, next) => {
                u.display_name AS assigned_to_name
         FROM crm_leads l
         LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
-        WHERE l.tenant_id = $1 AND l.converted_at IS NULL AND l.stage != 'archived' ${scopeLeads}
+        WHERE l.tenant_id = $1 AND l.converted_at IS NULL
+          AND l.stage IS DISTINCT FROM ${sRecent.archived()} ${scopeLeads}
         ORDER BY l.updated_at DESC LIMIT 10
-      `, params),
+      `, [...params, ...sRecent.values]),
 
       db.query(`
         SELECT 'la_' || a.id::text AS uid, COALESCE(a.type,'note') AS type,

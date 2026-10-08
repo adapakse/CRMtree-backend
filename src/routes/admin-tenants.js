@@ -38,6 +38,7 @@ const { clearTrainingModeCache } = require('../utils/trainingMode');
 const { isSlugAllowed } = require('../config/tenantHost');
 const whatsappService = require('../services/whatsappService');
 const tenantIcpConfigService = require('../services/tenantIcpConfigService');
+const leadStageService = require('../services/leadStageService');
 const enrichSvc = require('../services/prospectEnrichmentService');
 const onboardingSurveyService = require('../services/onboardingSurveyService');
 
@@ -184,6 +185,11 @@ router.post('/',
         sourceTenantId: goldId,
         actorUserId: req.user.id,
       });
+
+      // ── Etapy leada: ten sam wzorzec co ICP wyżej — kopia z gold, inaczej
+      // wbudowany lejek. Nazwy etapów (np. „Wygrana") są konfigurowalne, więc
+      // nowy tenant ma dziedziczyć te, które gold już ma u siebie.
+      await leadStageService.seedStagesForTenant(client, tenant.id, { sourceTenantId: goldId });
 
       await client.query('COMMIT');
       logger.info('Super admin created tenant', {

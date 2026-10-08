@@ -14,6 +14,7 @@ const { requireAuth } = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, loadCrmScope } = require('../middleware/crm-rbac');
 const salesMetrics = require('../services/crmSalesMetricsService');
+const leadStageSvc = require('../services/leadStageService');
 
 router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope);
 
@@ -57,15 +58,21 @@ async function loadMonthKpis({ tenantId, userId, monthStart, monthEnd }) {
   const year = midMonth.getUTCFullYear();
   const month = midMonth.getUTCMonth();
 
+  // Etapy są konfigurowalne per tenant — ekran mobilny czyta te same kody co raport.
+  const stageConfig = await leadStageSvc.getStageConfig(tenantId);
+  const kpiParams = [tenantId, userId, monthStart, monthEnd];
+  const s = leadStageSvc.stageRefs(kpiParams, stageConfig);
+
   const [leads, budget] = await Promise.all([
     db.query(`
       SELECT
-        COUNT(*) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active)::int AS active_leads,
-        COALESCE(ROUND(SUM(${valuePln}) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active)), 0)::float AS pipeline_value_pln,
-        COALESCE(ROUND(SUM(${valuePln}) FILTER (WHERE l.stage = 'closed_won' AND l.updated_at >= $3 AND l.updated_at < $4)), 0)::float AS month_won_value_pln
+        COUNT(*) FILTER (WHERE l.stage = ANY(${s.pipeline()}) AND NOT l.hold_active)::int AS active_leads,
+        COALESCE(ROUND(SUM(${valuePln}) FILTER (WHERE l.stage = ANY(${s.pipeline()}) AND NOT l.hold_active)), 0)::float AS pipeline_value_pln,
+        COALESCE(ROUND(SUM(${valuePln}) FILTER (WHERE l.stage = ${s.won()} AND l.updated_at >= $3 AND l.updated_at < $4)), 0)::float AS month_won_value_pln
         FROM crm_leads l
-       WHERE l.tenant_id = $1 AND l.assigned_to = $2 AND l.stage <> 'archived'`,
-      [tenantId, userId, monthStart, monthEnd]),
+       WHERE l.tenant_id = $1 AND l.assigned_to = $2
+         AND l.stage IS DISTINCT FROM ${s.archived()}`,
+      [...kpiParams, ...s.values]),
     salesMetrics.plannedBudgetTotal({
       tenantId, userId, year,
       dateFrom: new Date(year, month, 1),
@@ -100,6 +107,9 @@ router.get('/today',
 
       const { month_start: monthStart, month_end: monthEnd } = req.query;
 
+      // Kod etapu archiwum jest konfigurowalny (nazwę tenant może zmienić).
+      const attentionStageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+
       const [leadToday, partnerToday, leadOverdue, partnerOverdue, attention, kpis] = await Promise.all([
         db.query(agendaQuery({ ...LEAD_AGENDA, ...today }), [...base, ...dayBounds]),
         db.query(agendaQuery({ ...PARTNER_AGENDA, ...today }), [...base, ...dayBounds]),
@@ -122,11 +132,12 @@ router.get('/today',
                        AND c2.status = 'answered' AND c2.started_at > c.started_at
                   ))::int AS missed_call_count
               FROM crm_leads l
-             WHERE l.tenant_id = $1 AND l.assigned_to = ANY($2::uuid[]) AND l.stage <> 'archived'
+             WHERE l.tenant_id = $1 AND l.assigned_to = ANY($2::uuid[])
+               AND l.stage IS DISTINCT FROM $3::text
           ) waiting
           WHERE new_email_count + unread_sms_count + unread_whatsapp_count + missed_call_count > 0
           ORDER BY updated_at DESC
-          LIMIT ${ATTENTION_LIMIT}`, [req.tenantId, ownerIds]),
+          LIMIT ${ATTENTION_LIMIT}`, [req.tenantId, ownerIds, attentionStageConfig.archivedKey]),
         loadMonthKpis({ tenantId: req.tenantId, userId: req.user.id, monthStart, monthEnd }),
       ]);
 
@@ -143,7 +154,6 @@ router.get('/today',
 );
 
 const DASHBOARD_PERIOD_DAYS = [7, 30, 90];
-const FUNNEL_STAGES = ['new', 'qualification', 'presentation', 'offer', 'negotiation'];
 const DAY_MS = 86400000;
 
 // Whose leads the dashboard counts: everyone the person may see (their own
@@ -186,12 +196,30 @@ router.get('/dashboard',
       const periodDays = Number(req.query.period_days);
       const rates = await salesMetrics.loadExchangeRates();
       const valuePln = salesMetrics.leadValuePlnSql(rates);
-      const mine = "l.tenant_id = $1 AND ($2::uuid[] IS NULL OR l.assigned_to = ANY($2::uuid[])) AND l.stage <> 'archived'";
+
+      // Etapy są konfigurowalne per tenant, więc lejek, „aktywne" i „wygrane"
+      // czytamy z jego konfiguracji. Każde zapytanie ma własną instancję
+      // stageRefs i własną bazę parametrów (patrz leadStageService.stageRefs).
+      const stageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+      const funnelStages = stageConfig.stages.filter(s => s.active && s.kind === 'open').map(s => s.key);
+
       const base = [req.tenantId, ownerIds];
+      const kpiParams = [...base, req.query.week_start, req.query.week_end, req.query.month_start, req.query.month_end];
+      const sKpi = leadStageSvc.stageRefs(kpiParams, stageConfig);
       const thisWeek = 'l.created_at >= $3 AND l.created_at < $4';
       const previousWeek = "l.created_at >= $3::timestamptz - INTERVAL '7 days' AND l.created_at < $3";
-      const active = "l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active";
-      const wonInMonth = "l.stage = 'closed_won' AND l.updated_at >= $5 AND l.updated_at < $6";
+      const active = `l.stage = ANY(${sKpi.pipeline()}) AND NOT l.hold_active`;
+      const wonInMonth = `l.stage = ${sKpi.won()} AND l.updated_at >= $5 AND l.updated_at < $6`;
+      const mineKpi = `l.tenant_id = $1 AND ($2::uuid[] IS NULL OR l.assigned_to = ANY($2::uuid[])) AND l.stage IS DISTINCT FROM ${sKpi.archived()}`;
+
+      const funnelParams = [...base, funnelStages];
+      const sFunnel = leadStageSvc.stageRefs(funnelParams, stageConfig);
+      const mineFunnel = `l.tenant_id = $1 AND ($2::uuid[] IS NULL OR l.assigned_to = ANY($2::uuid[])) AND l.stage IS DISTINCT FROM ${sFunnel.archived()}`;
+
+      const wonParams = [...base, req.query.period_end,
+        new Date(new Date(req.query.period_end).getTime() - 2 * periodDays * DAY_MS).toISOString()];
+      const sWon = leadStageSvc.stageRefs(wonParams, stageConfig);
+      const mineWon = `l.tenant_id = $1 AND ($2::uuid[] IS NULL OR l.assigned_to = ANY($2::uuid[])) AND l.stage IS DISTINCT FROM ${sWon.archived()}`;
 
       const [kpis, funnel, won] = await Promise.all([
         db.query(`
@@ -205,25 +233,24 @@ router.get('/dashboard',
             COUNT(*) FILTER (WHERE ${wonInMonth})::int                                      AS month_won_count,
             COALESCE(ROUND(SUM(${valuePln}) FILTER (WHERE ${wonInMonth})), 0)::float        AS month_won_value_pln
             FROM crm_leads l
-           WHERE ${mine}`,
-          [...base, req.query.week_start, req.query.week_end, req.query.month_start, req.query.month_end]),
+           WHERE ${mineKpi}`,
+          [...kpiParams, ...sKpi.values]),
         db.query(`
           SELECT l.stage, COUNT(*)::int AS count, COALESCE(ROUND(SUM(${valuePln})), 0)::float AS value_pln
             FROM crm_leads l
-           WHERE ${mine} AND l.stage = ANY($3::text[]) AND NOT l.hold_active AND l.converted_at IS NULL
+           WHERE ${mineFunnel} AND l.stage = ANY($3::text[]) AND NOT l.hold_active AND l.converted_at IS NULL
            GROUP BY l.stage`,
-          [...base, FUNNEL_STAGES]),
+          [...funnelParams, ...sFunnel.values]),
         // Whole days back from the end of the period; twice the period, so
         // the one before it can be compared.
         db.query(`
           SELECT FLOOR(EXTRACT(EPOCH FROM ($3::timestamptz - l.updated_at)) / 86400)::int AS days_back,
                  COALESCE(ROUND(SUM(${valuePln})), 0)::float AS value_pln
             FROM crm_leads l
-           WHERE ${mine} AND l.stage = 'closed_won'
+           WHERE ${mineWon} AND l.stage = ${sWon.won()}
              AND l.updated_at < $3 AND l.updated_at >= $4
            GROUP BY 1`,
-          [...base, req.query.period_end,
-            new Date(new Date(req.query.period_end).getTime() - 2 * periodDays * DAY_MS).toISOString()]),
+          [...wonParams, ...sWon.values]),
       ]);
 
       const funnelByStage = new Map(funnel.rows.map((row) => [row.stage, row]));
@@ -241,7 +268,7 @@ router.get('/dashboard',
 
       res.json({
         kpis: kpis.rows[0],
-        funnel: FUNNEL_STAGES.map((stage) => ({
+        funnel: funnelStages.map((stage) => ({
           stage,
           count: funnelByStage.get(stage)?.count || 0,
           value_pln: funnelByStage.get(stage)?.value_pln || 0,
