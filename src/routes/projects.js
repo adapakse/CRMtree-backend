@@ -140,9 +140,13 @@ router.get('/', projectListRules, validate, async (req, res, next) => {
       projectFinanceService.loadTotalsForList({ tenantId: req.tenantId, user: req.user, projects: page.items }),
       projectFinanceService.canReadAnyProjectFinance({ tenantId: req.tenantId, user: req.user, isFinanceEnabled }),
     ]);
+    const items = page.items.map((project) => ({ ...project, finance: financeByProject.get(project.id) ?? null }));
     res.json({
       ...page,
-      items: page.items.map((project) => ({ ...project, finance: financeByProject.get(project.id) ?? null })),
+      items,
+      // The released mobile app still reads the list from `projects` (the name
+      // before paging was added). Drop the alias once the app reads `items`.
+      projects: items,
       can_create: Boolean(req.user.is_admin || req.user.can_create_projects),
       can_filter_finance: canFilterFinance,
     });
