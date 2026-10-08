@@ -406,7 +406,7 @@ describe('daily overdue summary', () => {
     expect(mails().map((mail) => mail.to).sort()).toEqual(emailsOf(external, polishPm));
   });
 
-  test('lists the delayed projects of a PM with the reason, marking an end date that passed today', async () => {
+  test('reports a project whose end date has just passed to its PMs, once', async () => {
     await db.query('DELETE FROM project_tasks WHERE project_id = $1', [project.id]);
     await createTask({ name: 'Bez terminu' });
     await createTask({ name: 'Daleko', end_date: day(6) });
@@ -425,11 +425,10 @@ describe('daily overdue summary', () => {
     expect(polish.html).toContain('Opóźnione projekty');
     expect(polish.html).toContain(`Termin zakończenia projektu minął ${polishDate(day(-1))} (1 dzień temu), a niezakończonych zadań jest: 2.`);
 
-    // A day later the end date is old news: reported, no longer marked as new.
+    // A delayed project is reported once: a day later, with nothing overdue, nobody is written to.
     sendMailSpy.mockClear();
-    await runAt(afternoonOf(day(1)));
-    expect(mailsTo(pm)[0].html).toContain('(2 days ago)');
-    expect(mailsTo(pm)[0].html).not.toContain('badge-red">new<');
+    expect(await runAt(afternoonOf(day(1)))).toEqual({ sentCount: 0 });
+    expect(mailsTo(pm)).toHaveLength(0);
   });
 
   test('a closed project sends nothing', async () => {

@@ -423,7 +423,9 @@ w strefie `Europe/Warsaw` (ta sama co przypomnienia). Reguły: nagłówek
   - *projekt stał się opóźniony* — od razu, do wszystkich PM-ów, tylko gdy zmiana (termin
     zadania, ponowne otwarcie zadania, nowe zadanie, data końca projektu) przełącza projekt
     z „nieopóźniony” na opóźniony przez `task_after_end`; dopóki zostaje opóźniony, nic więcej
-    nie wychodzi. Sam `end_passed` trafia do podsumowania dziennego;
+    nie wychodzi. Sam `end_passed` trafia do podsumowania dziennego — **tylko raz**, w dniu po
+    dacie końca projektu (decyzja Adama z 2026-10-08: opóźniony projekt zgłaszamy raz, nie
+    codziennie);
   - *podsumowanie dzienne* — z joba przypomnień, od 09:00 `Europe/Warsaw`, **jeden mail na
     osobę dziennie**: przypisany (także konto zewnętrzne) dostaje swoje zadania po terminie,
     PM — zadania po terminie i opóźnione projekty swoich projektów; kto jest jednym i drugim,

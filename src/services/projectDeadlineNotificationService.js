@@ -129,13 +129,17 @@ async function loadOverdueTasks({ today, tenantId }) {
   return rows;
 }
 
-async function loadDatedOpenProjects({ tenantId }) {
+// A delayed project is reported once, not every day it stays delayed: a delay
+// caused by a task dated after the project's end is mailed at once when it
+// happens, so the summary only has to cover projects whose end date passed
+// yesterday with work still open.
+async function loadProjectsWhoseEndJustPassed({ today, tenantId }) {
   const { rows } = await db.query(
     `SELECT p.id FROM projects p
-     WHERE p.status = 'open' AND p.end_date IS NOT NULL
-       AND ($1::uuid IS NULL OR p.tenant_id = $1::uuid)
+     WHERE p.status = 'open' AND p.end_date = $1::date - 1
+       AND ($2::uuid IS NULL OR p.tenant_id = $2::uuid)
        AND ${PROJECTS_MODULE_ON}`,
-    [tenantId],
+    [today, tenantId],
   );
   return rows.map((row) => row.id);
 }
@@ -144,7 +148,9 @@ async function loadDatedOpenProjects({ tenantId }) {
 // { ownTasks: [task], managedProjects: [{ project, overdueTasks, delay }] }.
 async function buildSummaries({ today, tenantId }) {
   const overdueTasks = await loadOverdueTasks({ today, tenantId });
-  const delays = await projectDeadlineService.loadProjectDelays(await loadDatedOpenProjects({ tenantId }), today);
+  const delays = await projectDeadlineService.loadProjectDelays(
+    await loadProjectsWhoseEndJustPassed({ today, tenantId }), today,
+  );
   const delayedProjectIds = [...delays].filter(([, delay]) => delay.is_delayed).map(([projectId]) => projectId);
   const projectIds = [...new Set([...overdueTasks.map((task) => task.project_id), ...delayedProjectIds])];
   if (!projectIds.length) return new Map();
