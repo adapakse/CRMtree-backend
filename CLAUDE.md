@@ -669,7 +669,7 @@ tokenu wraca tylko raz) → faktury testowe wysyła się sesją online jako inny
 aplikacji. Lokalnie ustaw `KSEF_ENVIRONMENT=test` w `.env.local`. Testy Jest nie wołają
 prawdziwego KSeF (`src/__tests__/helpers/ksefMock.js` udaje API z prawdziwym RSA/AES).
 
-### Baza danych (migracje 0307–0311, finanse 0316–0317, KSeF 0319, faktury w Dokumentach 0320, terminy 0321)
+### Baza danych (migracje 0307–0311, finanse 0316–0317, KSeF 0319, faktury w Dokumentach 0320, terminy 0326)
 
 `project_task_statuses`, `project_task_types`, `project_task_priorities`,
 `project_status_transitions`, `project_field_definitions`, `projects`, `project_members`,
@@ -695,7 +695,7 @@ Faktury w Dokumentach (0320): kolumny faktury na `documents` (lista w sekcji „
 Dokumenty”), `project_cost_items.document_id` / `document_linked_by` / `document_linked_at`,
 słownik `doc_payment_statuses` dla każdego tenanta i kod `invoice` dopisany do `doc_types`.
 
-Kontrola terminów (0321): `projects.start_date` / `end_date`,
+Kontrola terminów (0326): `projects.start_date` / `end_date`,
 `project_tasks.original_end_date` / `completed_at`,
 `users.project_deadline_notifications_enabled`, tabela `project_deadline_digests`
 (`user_id`, `digest_date`). Migracja uzupełnia istniejące zadania z `audit_logs`: termin

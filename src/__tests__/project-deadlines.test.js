@@ -634,9 +634,9 @@ describe('original end date and slip', () => {
     expect(tooLong.status).toBe(400);
   });
 
-  describe('back-fill of existing tasks (migration 0321)', () => {
+  describe('back-fill of existing tasks (migration 0326)', () => {
     const migration = fs.readFileSync(
-      path.join(__dirname, '..', 'db', 'migrations', '0321_project_deadlines.sql'), 'utf8',
+      path.join(__dirname, '..', 'db', 'migrations', '0326_project_deadlines.sql'), 'utf8',
     );
     const backfillSql = migration.slice(migration.indexOf('-- >>> backfill'), migration.indexOf('-- <<< backfill'));
 
