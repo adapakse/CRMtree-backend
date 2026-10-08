@@ -3,10 +3,12 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
+const { param, body } = require("express-validator");
 const { requireAuth, requireAdmin } = require("../middleware/auth");
-const { injectAuditContext } = require("../middleware/errorHandler");
+const { injectAuditContext, validate } = require("../middleware/errorHandler");
 const { clearTrainingModeCache } = require("../utils/trainingMode");
 const { SUPPORTED_LOCALES } = require("../config/locales");
+const leadStageService = require("../services/leadStageService");
 
 // ─── GET /api/admin/settings ──────────────────────────────────────────────────
 // Returns all settings as a flat key→value object.
@@ -34,7 +36,13 @@ router.get("/", requireAuth, async (req, res, next) => {
             : row.value;
     }
 
-    res.json({ settings: flat, meta: rows });
+    // Etapy leada jadą w tej samej odpowiedzi, a nie osobnym endpointem, bo
+    // frontend woła /admin/settings raz przy starcie dla KAŻDEGO użytkownika
+    // (AppSettingsService) — a nazwy etapów są potrzebne na kanbanie, liście
+    // leadów, w raportach i na dashboardach, nie tylko w panelu admina.
+    const leadStages = await leadStageService.listStages(req.tenantId);
+
+    res.json({ settings: flat, meta: rows, lead_stages: leadStages });
   } catch (err) {
     next(err);
   }
@@ -130,6 +138,152 @@ router.put(
   },
 );
 
+
+// ─── /api/admin/settings/lead-stages ─────────────────────────────────────────
+// Konfiguracja etapów leada tenanta. Celowo BRAK :tenantId w URL — zawsze
+// req.tenantId z JWT, więc admin tenanta nie ma jak zaadresować cudzego
+// tenanta (ten sam wzorzec co trasy ICP w admin-prospects.js).
+//
+// Odczyt dla każdego zalogowanego: nazwy etapów są potrzebne na każdym ekranie
+// CRM. Każda mutacja wymaga requireAdmin — przestawienie kolejności zmienia
+// dozwolone przejścia między etapami, więc to nie jest kosmetyka.
+// Reguły (co wolno zmienić, czego nie i dlaczego): leadStageService.js.
+
+// requireAdmin, bo to endpoint panelu edycji — aplikacja czyta etapy z payloadu
+// GET /admin/settings (dostępnego każdemu), nie stąd.
+//
+// Materializacja przed odczytem jest tu konieczna, nie kosmetyczna: tenant bez
+// wierszy (utworzony przed migracją 0326 albo poza trasą tworzenia tenanta)
+// dostawał listę z fallbacku w kodzie, gdzie `id` jest NULL — panel pokazywał
+// etapy, a każda próba ich edycji leciała na /lead-stages/null i wracała 400.
+// Leniwe tworzenie domyślnych wartości przy pierwszym użyciu to ten sam wzorzec
+// co projectConfigService.ensureDefaults.
+router.get("/lead-stages", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    await leadStageService.materializeDefaults(req.tenantId);
+    const [stages, leadCounts] = await Promise.all([
+      leadStageService.listStages(req.tenantId),
+      leadStageService.countLeadsPerStage(req.tenantId),
+    ]);
+    res.json({
+      // delete_target_key: na który etap przejdą leady, gdy admin usunie ten etap.
+      // Liczone po stronie serwera, żeby pytanie „usunąć?" w panelu pokazywało
+      // dokładnie to, co faktycznie zrobi deleteStage — jedna reguła, nie dwie.
+      stages: stages.map(s => ({
+        ...s,
+        lead_count: leadCounts[s.key] ?? 0,
+        delete_target_key: leadStageService.resolveDeleteTarget(stages, s),
+      })),
+      max_open_stages: leadStageService.MAX_OPEN_STAGES,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/lead-stages",
+  requireAuth, requireAdmin, injectAuditContext,
+  [
+    body("label").isString().trim().notEmpty().isLength({ max: 80 }),
+    body("probability").optional({ nullable: true }).isInt({ min: 0, max: 100 }).toInt(),
+    body("color").optional({ nullable: true }).matches(/^#[0-9a-fA-F]{6}$/),
+    body("sort_order").optional({ nullable: true }).isInt({ min: 1 }).toInt(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const stage = await leadStageService.addStage(req.tenantId, {
+        label: req.body.label,
+        probability: req.body.probability,
+        color: req.body.color,
+        sortOrder: req.body.sort_order,
+      });
+      if (req.auditLog) await req.auditLog("settings_updated", null, null, { lead_stage_added: stage.key });
+      res.status(201).json({ stage });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+// PUT przed PATCH/DELETE /:id nie koliduje (inna metoda), ale trzymamy go wyżej
+// dla czytelności — "order" nie jest id etapu.
+router.put("/lead-stages/order",
+  requireAuth, requireAdmin, injectAuditContext,
+  [
+    body("ordered_ids").isArray({ min: 1 }),
+    body("ordered_ids.*").isUUID(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const stages = await leadStageService.reorderStages(req.tenantId, req.body.ordered_ids);
+      if (req.auditLog) await req.auditLog("settings_updated", null, null, { lead_stages_reordered: true });
+      res.json({ stages });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+router.patch("/lead-stages/:id",
+  requireAuth, requireAdmin, injectAuditContext,
+  [
+    param("id").isUUID(),
+    // Pusta nazwa to nie błąd — oznacza powrót do wbudowanego tłumaczenia.
+    body("label").optional({ nullable: true }).isString().trim().isLength({ max: 80 }),
+    body("probability").optional({ nullable: true }).isInt({ min: 0, max: 100 }).toInt(),
+    body("color").optional({ nullable: true }).matches(/^#[0-9a-fA-F]{6}$/),
+    body("active").optional().isBoolean().toBoolean(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const patch = {};
+      for (const field of ["label", "probability", "color", "active"]) {
+        if (field in req.body) patch[field] = req.body[field];
+      }
+      const stage = await leadStageService.updateStage(req.tenantId, req.params.id, patch);
+      if (req.auditLog) {
+        await req.auditLog("settings_updated", null, null, {
+          lead_stage_updated: stage.key, fields: Object.keys(patch),
+        });
+      }
+      res.json({ stage });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+// Usunięcie etapu z leadami wymaga wskazania etapu docelowego — leady przechodzą
+// na niego w tej samej transakcji (patrz leadStageService.deleteStage). Bez tego
+// admin musiałby ręcznie przeklikać każdego leada, żeby usunąć jeden etap.
+router.delete("/lead-stages/:id",
+  requireAuth, requireAdmin, injectAuditContext,
+  [
+    param("id").isUUID(),
+    body("move_leads_to").optional({ nullable: true }).isString().trim().notEmpty(),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const result = await leadStageService.deleteStage(req.tenantId, req.params.id, {
+        moveLeadsTo: req.body?.move_leads_to ?? null,
+      });
+      if (req.auditLog) {
+        await req.auditLog("settings_updated", null, null, {
+          lead_stage_deleted: result.key,
+          moved_leads: result.movedLeads,
+          moved_to: result.movedTo,
+        });
+      }
+      res.json({ deleted: true, ...result });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
 
 // ─── POST /api/admin/settings/tooltips ───────────────────────────────────────
 // Upsert tooltip (create or update). Admin only.
