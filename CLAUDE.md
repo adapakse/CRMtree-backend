@@ -445,6 +445,12 @@ w strefie `Europe/Warsaw` (ta sama co przypomnienia). Reguły: nagłówek
 `sort` + `order` (`asc` | `desc`), odpowiedź `{ items, total, page, page_size }`. Błędna
 wartość = 400, pusta = filtr nieużyty.
 
+- **Zgodność z aplikacją mobilną:** `GET /api/projects` zwraca tę samą stronę także pod starą
+  nazwą `projects` (alias `items`), bo wydana aplikacja mobilna czyta listę z tego pola.
+  Usuń alias dopiero, gdy aplikacja przejdzie na `items` i stronicowanie. Specyfikacja
+  `mobile-v1.yaml` nie opisuje tras Projektów, a aplikacja z nich korzysta — przed zmianą
+  kształtu którejkolwiek odpowiedzi `/api/projects*` sprawdź `crmtree-mobile`
+  (`lib/features/projects/data/projects_repository.dart`), nie samą specyfikację.
 - **Listy zadań** — jedno zapytanie (`projectTaskListService.js`), trzy zakresy:
   `GET /api/projects/:id/tasks/search` (zadania projektu), `GET /api/projects/my-tasks`
   (moje zadania), `GET /api/projects/portfolio/tasks` (widok międzyprojektowy). Wiersze są
@@ -671,6 +677,12 @@ prawdziwego KSeF (`src/__tests__/helpers/ksefMock.js` udaje API z prawdziwym RSA
 
 ### Baza danych (migracje 0307–0311, finanse 0316–0317, KSeF 0319, faktury w Dokumentach 0320, terminy 0326)
 
+Numer 0326 noszą dwa pliki (`0326_project_deadlines.sql` i `0326_tenant_lead_stages.sql` z
+innej, równoległej zmiany). To nieszkodliwe — migracje są śledzone po nazwie pliku i nie zależą
+od siebie — ale przed dodaniem migracji zawsze zrób `git fetch` i sprawdź numery na
+`origin/develop`: przy kilku sesjach pracujących naraz numer „następny wolny” szybko się
+dezaktualizuje.
+
 `project_task_statuses`, `project_task_types`, `project_task_priorities`,
 `project_status_transitions`, `project_field_definitions`, `projects`, `project_members`,
 `project_fields`, `project_tasks`, `project_task_assignees`, `project_messages`. Kolumny na
@@ -754,12 +766,25 @@ pierwotny = wartość sprzed pierwszej zapisanej zmiany terminu (inaczej termin 
   `invoice-documents.test.js` (typ „Faktura”, rejestracja z KSeF, dokument ↔ koszt),
   `invoiceVisualisationPdf.test.js` (bez bazy).
 
-### Poza zakresem pierwszej wersji
+### Aplikacja mobilna (decyzje Adama, 2026-10-08)
 
-Załączniki, aplikacja mobilna (kontrakt `mobile-v1.yaml` nie zawiera Projektów), zależności
-między zadaniami, licznik nieprzeczytanych wiadomości, edycja i usuwanie wiadomości czatu.
-W finansach: VAT, wiele walut w jednym projekcie. W KSeF: faktury korygujące, faktury
-sprzedaży jako przychód, integracja z płatnościami.
+Aplikacja `crmtree-mobile` ma moduł Projekty (lista, karta projektu, zadania, czat) i dostaje
+kontrolę terminów oraz finanse projektu. Opis dla sesji mobilnej:
+`crmtree-frontend/docs/mobile-handoff-project-deadlines-finance.md`. Ustalenia, które wiążą też
+backend:
+
+- telefon ma **pełny zestaw filtrów** z list webowych i doładowuje kolejne strony przy
+  przewijaniu (te same trasy i parametry co web);
+- **Gantt jest budowany także w telefonie** (`/tasks/gantt`, `/portfolio/gantt`);
+- **powiadomień push o terminach nie ma** — wystarczają maile; nie dodawaj ich bez pytania;
+- **finanse w telefonie są tylko do odczytu** (bez dodawania i edycji kosztów), a **KSeF jest
+  wyłącznie w webie**.
+
+### Poza zakresem
+
+Załączniki, zależności między zadaniami, licznik nieprzeczytanych wiadomości, edycja i usuwanie
+wiadomości czatu. W finansach: VAT, wiele walut w jednym projekcie. W KSeF: faktury korygujące,
+faktury sprzedaży jako przychód, integracja z płatnościami.
 
 ---
 
@@ -844,9 +869,19 @@ Aplikacja jest tłumaczona na 10 języków (`pl, en, de, it, es, fr, ro, ru, sl,
 - Odbiorca spoza CRMtree (sam adres e-mail): język domyślny tenanta, gdy tenant jest znany, inaczej
   polski. Dziś każdy mail trafia do użytkownika CRMtree.
 
+### Komunikaty API — tylko po angielsku (decyzja Adama, 2026-10-05)
+
+Komunikaty zwracane przez API (`res.status(...).json({ error })`, komunikaty walidacji) **nie
+są tłumaczone na 10 języków — piszemy je wyłącznie po angielsku.** Nie buduj dla nich katalogu
+tłumaczeń. Nowe trasy (finanse projektu, KSeF, faktury w Dokumentach, kontrola terminów) są już
+po angielsku; starsze moduły mają jeszcze ok. 840 polskich komunikatów w ponad 50 plikach.
+Ich zamiana na angielskie to osobna, szeroka zmiana — uzgodnij termin z Adamem (inne sesje
+pracują w tych samych plikach) i popraw razem z nią testy, które sprawdzają polskie brzmienie.
+Frontend nie powinien pokazywać komunikatu API wprost tam, gdzie może dać własny, przetłumaczony.
+
 ### Co jest nadal po polsku
 
-- Komunikaty błędów API (`res.status(...).json({ error })`) i wpisy logów.
+- Starsze komunikaty błędów API (patrz wyżej) i wpisy logów.
 - Faktura rozliczeniowa PDF (`invoicePdfService.js`). Wizualizacja faktury KSeF jest tłumaczona.
 - Treści zapisywane w bazie przez backend, np. tytuł i opis automatycznego zadania churn
   (`Churn: <partner> [Krytyczne]` w `crm-churn.js` i `jobs/daily-scores.js`) — trafiają do maila
@@ -859,10 +894,11 @@ Aplikacja jest tłumaczona na 10 języków (`pl, en, de, it, es, fr, ro, ru, sl,
 ### Language
 - **All code must be written in English**: variable names, function names, class names,
   constant names, and inline comments.
-- Polish is only acceptable in user-facing API error messages and log descriptions
-  directed at end users.
-- API messages are written in English (decision of 2026-10-05); older Polish messages are
-  being converted separately.
+- API messages (errors and validation messages returned in responses) are written in English
+  only — decision of 2026-10-05, see "Komunikaty API — tylko po angielsku". Older modules still
+  return Polish messages; do not add new Polish ones.
+- User-facing texts that ARE translated (e-mails, the KSeF invoice PDF) live in
+  `src/i18n/<scope>/<lang>.json`, never as literals in code.
 
 ### Naming conventions
 - Use descriptive, self-explanatory names — a reader should understand intent without
