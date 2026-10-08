@@ -24,11 +24,17 @@ DB: PostgreSQL lokalny, baza `crmtree`, user `postgres`, hasło w `.env.local`
 - `Dockerfile` — `CMD ["node", "src/server.js"]`
 
 ## Git workflow
-- Branch roboczy: `develop`
-- Push TYLKO do `develop`: `git push crmtree develop`
-- Merge do `master` robi Adam ręcznie po testach (master = deploy na Azure)
-- Remote `crmtree` = GitHub (`git@github-crmtree:adapakse/CRMtree-backend.git`)
-- Remote `origin` = martwy (stary projekt), ignoruj komunikaty o rozbieżności
+- Remote `origin` = GitHub (`git@github-crmtree:adapakse/CRMtree-backend.git`) — jedyny i
+  właściwy remote; osobnego remote `crmtree` nie ma.
+- Branch roboczy: `develop`. Push na `develop` uruchamia `deploy-int.yml`: migracje na bazie
+  INT, potem wdrożenie `crmtree-backend-int`. Większą zmianę rób na gałęzi
+  `feature/<opisowa-nazwa>` i scalaj do `develop` po przejściu testów.
+- **W tym repozytorium pracuje równolegle kilka sesji.** Przed pushem zawsze `git fetch` i
+  scal `origin/develop`, potem `npm run migrate` i pełne testy. Commituj tylko swoje pliki.
+  Do większej zmiany użyj osobnego worktree (`git worktree add ../crmtree-backend-<temat>`),
+  żeby nie przełączać gałęzi w katalogu, w którym pracuje inna sesja.
+- Numer migracji bierz po `git fetch` z `origin/develop`, nie z lokalnego katalogu.
+- Merge do `master` robi Adam ręcznie po testach (master = deploy produkcyjny na Azure).
 
 ## Deploy (CI/CD)
 - GitHub Actions workflow: `.github/workflows/deploy.yml`
