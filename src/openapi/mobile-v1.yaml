@@ -1482,10 +1482,19 @@ components:
         language: { type: string, enum: [pl, en, de, it, es, fr, ro, ru, sl, hr] }
         type: { type: string, enum: [note, call, task, meeting] }
         needs_company: { type: boolean, default: false, description: Recognise the company by name (assistant opened outside a card) }
+        source_type: { type: string, enum: [lead, partner], description: 'The card the assistant was opened in; with source_id it lets a meeting''s participants be matched with that company''s contacts' }
+        source_id: { type: string, maxLength: 64 }
+
+    AssistantParticipant:
+      type: object
+      required: [name, email]
+      properties:
+        name: { type: string }
+        email: { type: string }
 
     ActivityAssistantResponse:
       type: object
-      required: [reply, complete, intent, companies]
+      required: [reply, complete, intent, participants, unknown_participants, companies]
       properties:
         reply: { type: string, description: 'What the assistant understood, and a question when something essential is missing' }
         complete: { type: boolean, description: Enough is known to open the form }
@@ -1502,16 +1511,29 @@ components:
             assigned_to: { type: string, nullable: true, description: User id of the person named to do it }
             assigned_to_name: { type: string, nullable: true }
             company_name: { type: string, nullable: true, description: The company as the person said it; only with needs_company }
+        participants:
+          description: 'People named for a meeting, matched by first name and surname with the contacts of the card''s company and the team; empty with needs_company (see companies)'
+          type: array
+          items: { $ref: '#/components/schemas/AssistantParticipant' }
+        unknown_participants:
+          description: Names that fit nobody, or more than one person
+          type: array
+          items: { type: string }
         companies:
           description: Leads and partners matching company_name; empty without needs_company
           type: array
           items:
             type: object
-            required: [source_type, source_id, name]
+            required: [source_type, source_id, name, participants, unknown_participants]
             properties:
               source_type: { type: string, enum: [lead, partner] }
               source_id: { type: string }
               name: { type: string }
+              participants:
+                description: The people named, matched with this company's contacts and the team
+                type: array
+                items: { $ref: '#/components/schemas/AssistantParticipant' }
+              unknown_participants: { type: array, items: { type: string } }
 
     ProjectTaskAssistantRequest:
       type: object

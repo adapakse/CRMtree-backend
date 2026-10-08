@@ -15,7 +15,7 @@ const { crmAuth, loadCrmScope, crmScope, requireFeature } = require('../middlewa
 const { SUPPORTED_LOCALES } = require('../config/locales');
 const { translate } = require('../utils/i18n');
 const { assistantClient, parseAnswer } = require('../services/assistant/assistantClient');
-const { ACTIVITY_TYPES, ACTIVITY_INTENT_SCHEMA, activitySystemPrompt, activityReply } = require('../services/assistant/activityIntent');
+const { ACTIVITY_TYPES, ACTIVITY_INTENT_SCHEMA, activitySystemPrompt, activityReply, matchParticipants } = require('../services/assistant/activityIntent');
 const { PROJECT_TASK_INTENT_SCHEMA, projectTaskSystemPrompt, projectTaskReply } = require('../services/assistant/projectTaskIntent');
 
 const MAX_MESSAGES = 40;
@@ -76,12 +76,34 @@ async function findCompanies(req, name) {
   return matches.length || firstWord === name || firstWord.length < 3 ? matches : search(firstWord);
 }
 
+// The people of a lead or partner who can be invited to a meeting: its main
+// contact and its additional contacts. Empty when the person may not see
+// the record.
+async function contactsOf(req, sourceType, sourceId) {
+  const isLead = sourceType === 'lead';
+  const params = [req.tenantId, String(sourceId)];
+  const scope = req.scopeFilter('r', isLead ? 'assigned_to' : 'manager_id', params);
+  const { rows } = await db.query(`
+    SELECT r.contact_name AS name, r.email
+      FROM ${isLead ? 'crm_leads' : 'crm_partners'} r
+     WHERE r.tenant_id = $1 AND r.id::text = $2 ${scope}
+    UNION ALL
+    SELECT c.contact_name AS name, c.email
+      FROM ${isLead ? 'crm_lead_contacts' : 'crm_partner_contacts'} c
+      JOIN ${isLead ? 'crm_leads' : 'crm_partners'} r ON r.id = c.${isLead ? 'lead_id' : 'partner_id'}
+     WHERE r.tenant_id = $1 AND r.id::text = $2 ${scope}`, params);
+  return rows.filter((row) => row.name && row.email);
+}
+
 // ── POST /api/assistant/activity ──────────────────────────────────
 // A note, call, task or meeting in the person's own words. With
 // `needs_company` (the assistant opened from the start screen, outside any
 // card) the company is recognised by name: `companies` lists the leads and
 // partners that match, and the app makes the person pick when there are
-// several.
+// several. For a meeting the people named are matched by first name and
+// surname with the company's contacts and the team: inside a card
+// (`source_type` + `source_id`) into `participants`, otherwise into each
+// entry of `companies`.
 router.post('/activity',
   crmAuth, loadCrmScope, crmScope,
   [
@@ -89,6 +111,8 @@ router.post('/activity',
     body('now').matches(/^\d{2}:\d{2}$/),
     body('type').isIn(ACTIVITY_TYPES),
     body('needs_company').optional().isBoolean().toBoolean(),
+    body('source_type').optional().isIn(['lead', 'partner']),
+    body('source_id').optional().isString().isLength({ min: 1, max: 64 }),
   ],
   validate,
   async (req, res, next) => {
@@ -96,31 +120,50 @@ router.post('/activity',
       const { today, now, language, type } = req.body;
       const needsCompany = req.body.needs_company === true;
       const { rows: users } = await db.query(`
-        SELECT id, COALESCE(NULLIF(display_name, ''), email) AS name
+        SELECT id, COALESCE(NULLIF(display_name, ''), email) AS name, email
           FROM users
          WHERE is_active = true AND tenant_id = $1
            AND (crm_role IN ('salesperson', 'sales_manager') OR is_admin = true)
          ORDER BY display_name
          LIMIT ${MAX_OPTIONS}`, [req.tenantId]);
 
+      const invitesPeople = type === 'meeting';
+      const contacts = invitesPeople && !needsCompany && req.body.source_type && req.body.source_id
+        ? await contactsOf(req, req.body.source_type, req.body.source_id)
+        : [];
+
       const content = await assistantClient.ask({
         name: 'activity_intent',
         schema: ACTIVITY_INTENT_SCHEMA,
-        system: activitySystemPrompt({ type, today, now, language, users, needsCompany }),
+        system: activitySystemPrompt({ type, today, now, language, users, contacts, needsCompany }),
         messages: conversationOf(req),
       });
       const answer = parseAnswer(content);
       const result = activityReply(answer, { type, language, users, needsCompany });
 
+      const { participant_names: participantNames, ...intent } = result.intent;
       let companies = [];
-      if (needsCompany && result.intent.company_name) {
-        companies = await findCompanies(req, result.intent.company_name);
+      if (needsCompany && intent.company_name) {
+        companies = await findCompanies(req, intent.company_name);
         if (!companies.length) {
           result.complete = false;
-          result.reply = translate(language, 'assistant.activity.companyNotFound', { name: result.intent.company_name });
+          result.reply = translate(language, 'assistant.activity.companyNotFound', { name: intent.company_name });
         }
+        // Which contacts the names mean depends on the company.
+        companies = await Promise.all(companies.map(async (company) => ({
+          ...company,
+          ...matchParticipants(participantNames, {
+            contacts: invitesPeople && participantNames.length ? await contactsOf(req, company.source_type, company.source_id) : [],
+            colleagues: users,
+          }),
+        })));
       }
-      res.json({ ...result, companies });
+      res.json({
+        ...result,
+        intent,
+        ...matchParticipants(needsCompany ? [] : participantNames, { contacts, colleagues: users }),
+        companies,
+      });
     } catch (err) { next(err); }
   },
 );

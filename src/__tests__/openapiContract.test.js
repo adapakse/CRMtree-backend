@@ -380,7 +380,7 @@ describe("agenda", () => {
         question: null,
         intent: {
           title: "Telefon", body: null, activityAt: "2026-10-09T10:00", meetingLocation: null,
-          reminder: "1h_before", priority: "important", assigneeNumber: 1, companyName: "Contract",
+          reminder: "1h_before", priority: "important", assigneeNumber: 1, participantNames: ["Nikt Taki"], companyName: "Contract",
         },
       }));
       const activity = await request(app).post("/api/assistant/activity").set(auth)

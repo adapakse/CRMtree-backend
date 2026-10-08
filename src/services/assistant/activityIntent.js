@@ -15,11 +15,13 @@ const ACTIVITY_TYPES = ['note', 'call', 'task', 'meeting'];
 const REMINDERS = ['none', '30m_before', '1h_before', 'at_due', '1d_before', '2d_before', '3d_before'];
 const PRIORITIES = ['asap', 'important', 'medium', 'low'];
 const CALENDAR_DAYS = 42;
+const MAX_PARTICIPANTS = 20;
 
 const isDated = (type) => type === 'task' || type === 'meeting';
 
-function activitySystemPrompt({ type, today, now, language, users, needsCompany }) {
+function activitySystemPrompt({ type, today, now, language, users, contacts = [], needsCompany }) {
   const dated = isDated(type);
+  const contactNames = contacts.map((contact) => contact.name).filter(Boolean);
   return `You help a salesperson add a ${type} to a company's card in the CRMtree CRM. From the conversation, work out the ${type}. You do not save anything yourself; the app opens its form filled in with what you return, and the salesperson checks it there.
 
 Today is ${today} (${weekday(today)}), the time is ${now}. Reply in ${LANGUAGE_NAMES[language]}, whatever language the salesperson writes in.
@@ -29,7 +31,10 @@ ${calendar(today, CALENDAR_DAYS)}
 
 People in the company, as "number: name":
 ${numberedList(users)}
-
+${type === 'meeting' && contactNames.length ? `
+Contact people at the customer:
+${contactNames.join('\n')}
+` : ''}
 How to fill the ${type}:
 - Return the whole ${type} understood so far on every turn, not only what changed.
 - body: what the salesperson wants written down, in their own words, cleaned up into full sentences. Never add facts they did not say.
@@ -41,6 +46,9 @@ ${dated
 ${type === 'meeting' ? '- meetingLocation: where the meeting is, when said ("u klienta", "Teams", an address); otherwise null.' : '- meetingLocation: always null.'}
 ${type === 'task' ? '- priority: "asap" for urgent, "important", "medium" or "low" when the salesperson says how important it is; otherwise null. Do not ask about it.' : '- priority: always null.'}
 - assigneeNumber: the number of the person from the list who is to do it, when the salesperson names someone else than themselves; otherwise null. Do not ask about it.
+${type === 'meeting'
+    ? '- participantNames: everyone the salesperson says the meeting is with — people at the customer and colleagues from the company alike — each as first name and surname in their basic (nominative) form, without titles like "pan", "pani", "Mr" or "Dr" ("z panią Ewą Nowak, Piotrem i Kacprem" → ["Ewa Nowak", "Piotr", "Kacper"]). When the person is on one of the lists above, write the name exactly as it is there. Being invited does not make someone the assignee. An empty list when nobody was named. Do not ask about it.'
+    : '- participantNames: always an empty list.'}
 ${needsCompany
     ? '- companyName: the name of the company (lead or customer) this is about, as said, without legal forms like "sp. z o.o.". Null when no company was named.'
     : '- companyName: always null; the company is already known.'}
@@ -72,7 +80,7 @@ const ACTIVITY_INTENT_SCHEMA = {
     intent: {
       type: 'object',
       additionalProperties: false,
-      required: ['title', 'body', 'activityAt', 'meetingLocation', 'reminder', 'priority', 'assigneeNumber', 'companyName'],
+      required: ['title', 'body', 'activityAt', 'meetingLocation', 'reminder', 'priority', 'assigneeNumber', 'participantNames', 'companyName'],
       properties: {
         title: nullableString,
         body: nullableString,
@@ -81,6 +89,7 @@ const ACTIVITY_INTENT_SCHEMA = {
         reminder: { type: ['string', 'null'], enum: [...REMINDERS, null] },
         priority: { type: ['string', 'null'], enum: [...PRIORITIES, null] },
         assigneeNumber: { type: ['integer', 'null'] },
+        participantNames: { type: 'array', items: { type: 'string' } },
         companyName: nullableString,
       },
     },
@@ -103,8 +112,56 @@ function sanitize(intent, { type, users, needsCompany }) {
     priority: type === 'task' && PRIORITIES.includes(intent.priority) ? intent.priority : null,
     assigned_to: assignee?.id ?? null,
     assigned_to_name: assignee?.name ?? null,
+    participant_names: type === 'meeting' && Array.isArray(intent.participantNames)
+      ? [...new Set(intent.participantNames.map(trimmedOrNull).filter(Boolean))].slice(0, MAX_PARTICIPANTS)
+      : [],
     company_name: needsCompany ? trimmedOrNull(intent.companyName) : null,
   };
+}
+
+const COURTESY_TITLES = new Set(['pan', 'pani', 'mr', 'mrs', 'ms', 'dr', 'herr', 'frau', 'sig', 'sr', 'sra', 'm', 'mme']);
+
+// "Łukasz Żółć" and "lukasz zolc" are the same person to a matcher.
+function nameTokens(name) {
+  return String(name)
+    .toLowerCase()
+    .replace(/ł/g, 'l')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token && !COURTESY_TITLES.has(token));
+}
+
+/**
+ * Finds the people the salesperson named among those who can be invited.
+ * A person matches when every word said is a word of their name, so "Ewa"
+ * finds "Ewa Nowak" and "Nowak Ewa" finds her too. `contacts` (the
+ * customer's people) are looked at before `colleagues`; a name that fits
+ * several people of the same group is left unmatched rather than guessed.
+ * Returns the matches as { name, email } and the names nobody fits.
+ */
+function matchParticipants(names, { contacts = [], colleagues = [] }) {
+  const invitable = (people) => people
+    .filter((person) => person.email && person.name)
+    .map((person) => ({ ...person, tokens: new Set(nameTokens(person.name)) }));
+  const groups = [invitable(contacts), invitable(colleagues)];
+  const participants = [];
+  const unknown = [];
+  for (const name of names) {
+    const said = nameTokens(name);
+    const fits = (person) => said.length > 0 && said.every((token) => person.tokens.has(token));
+    const candidates = groups.map((people) => people.filter(fits)).find((found) => found.length > 0) ?? [];
+    const emails = new Set(candidates.map((person) => person.email.toLowerCase()));
+    if (emails.size === 1) {
+      const [person] = candidates;
+      if (!participants.some((added) => added.email.toLowerCase() === person.email.toLowerCase())) {
+        participants.push({ name: person.name, email: person.email });
+      }
+    } else {
+      unknown.push(name);
+    }
+  }
+  return { participants, unknown_participants: unknown };
 }
 
 /** What the form cannot be opened without, in the order to ask. */
@@ -142,5 +199,6 @@ module.exports = {
   ACTIVITY_INTENT_SCHEMA,
   activitySystemPrompt,
   activityReply,
+  matchParticipants,
   missingFromActivity,
 };
