@@ -25,7 +25,10 @@ function isTrainingThreadId(threadId) {
   return typeof threadId === 'string' && threadId.startsWith(TRAINING_THREAD_PREFIX);
 }
 
-async function buildTrainingThreadResponse({ table, idCol, idVal, threadId, tenantId, currentUserId }) {
+async function buildTrainingThreadResponse({
+  table, idCol, idVal, threadId, tenantId, currentUserId,
+  counterpartyLabel = 'Klient (symulacja szkoleniowa)',
+}) {
   const { rows } = await pool.query(
     `SELECT id, title, body, gmail_message_id, created_by, mailbox_user_id, activity_at
      FROM ${table}
@@ -46,8 +49,8 @@ async function buildTrainingThreadResponse({ table, idCol, idVal, threadId, tena
     id:          r.gmail_message_id,
     threadId,
     subject:     r.title || '',
-    from:        r.created_by ? '' : 'Klient (symulacja szkoleniowa)',
-    to:          r.created_by ? 'Klient (symulacja szkoleniowa)' : '',
+    from:        r.created_by ? '' : counterpartyLabel,
+    to:          r.created_by ? counterpartyLabel : '',
     date:        (r.activity_at ? new Date(r.activity_at) : new Date()).toISOString(),
     snippet:     r.body || '',
     body:        r.body || '',

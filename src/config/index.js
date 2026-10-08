@@ -143,6 +143,20 @@ module.exports = {
     ),
   },
 
+  // ─── Yandex Mail ──────────────────────────────────────────────────────────
+  // OAuth2 per-user. Yandex has no public mail REST API — reading and sending go
+  // over IMAP/SMTP with XOAUTH2 — but a single set of endpoints serves every
+  // regional mailbox (@yandex.by, @yandex.ru, @yandex.com), so unlike Zoho there
+  // is no per-account data centre to resolve.
+  yandex: {
+    clientId:     optional("YANDEX_CLIENT_ID"),
+    clientSecret: optional("YANDEX_CLIENT_SECRET"),
+    redirectUri:  optional(
+      "YANDEX_REDIRECT_URI",
+      "http://localhost:3001/api/crm/yandex/oauth/callback",
+    ),
+  },
+
   signus: {
     baseUrl: optional("SIGNUS_API_BASE_URL", "https://api.signus.eu/v1"),
     apiKey: optional("SIGNUS_API_KEY"),
@@ -201,6 +215,14 @@ module.exports = {
   // backend simply does not push.
   push: {
     firebaseServiceAccountJson: optional("FIREBASE_SERVICE_ACCOUNT_JSON", ""),
+  },
+  // The form assistants of the mobile app (services/assistant). Without
+  // these the assistant endpoints answer 503 and the app keeps its forms.
+  azureOpenAi: {
+    endpoint: optional("AZURE_OPENAI_ENDPOINT", ""),
+    apiKey: optional("AZURE_OPENAI_API_KEY", ""),
+    deployment: optional("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1-mini"),
+    apiVersion: optional("AZURE_OPENAI_API_VERSION", "2024-10-21"),
   },
   mobile: {
     minVersionAndroid: optional("MOBILE_MIN_VERSION_ANDROID", "0.0.0"),

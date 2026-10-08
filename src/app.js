@@ -41,6 +41,7 @@ const profileRoutes       = require('./routes/profile');
 const crmGmail 		  = require('./routes/crm-gmail');
 const crmOutlook      = require('./routes/crm-outlook');
 const crmZoho         = require('./routes/crm-zoho');
+const crmYandex       = require('./routes/crm-yandex');
 const crmEmail        = require('./routes/crm-email');
 const crmWhatsapp     = require('./routes/crm-whatsapp');
 const pbxRoutes       = require('./routes/pbx');
@@ -55,6 +56,7 @@ const openapiRoutes = require('./routes/openapi');
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
 const crmMobileRoutes = require('./routes/crm-mobile');
+const assistantRoutes = require('./routes/assistant');
 const crmPartnersRoutes     = require('./routes/crm-partners');
 const crmGroupsRoutes       = require('./routes/crm-groups');
 const crmSubstitutionsRoutes = require('./routes/crm-substitutions');
@@ -205,6 +207,7 @@ app.use('/api/profile',         profileRoutes);
 app.use('/api/crm/gmail',   crmGmail);
 app.use('/api/crm/outlook', crmOutlook);
 app.use('/api/crm/zoho',    crmZoho);
+app.use('/api/crm/yandex',  crmYandex);
 app.use('/api/crm/email',   crmEmail);
 app.use('/api/crm/whatsapp', crmWhatsapp);
 app.use('/api/pbx',          pbxRoutes);
@@ -218,6 +221,7 @@ app.use('/api/documents/:documentId/attachments', attachmentRoutes);
 
 // ── CRM API Routes ────────────────────────────────────────── ★ DODANE
 app.use('/api/crm/mobile',       crmMobileRoutes);
+app.use('/api/assistant',        assistantRoutes);
 app.use('/api/crm/leads',        crmLeadsRoutes);
 app.use('/api/crm/partners',     crmPartnersRoutes);
 app.use('/api/crm/groups',       crmGroupsRoutes);

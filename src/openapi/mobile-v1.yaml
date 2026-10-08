@@ -34,6 +34,7 @@ tags:
   - name: partners
   - name: activities
   - name: agenda
+  - name: assistant
 security:
   - bearerAuth: []
 
@@ -280,6 +281,109 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+
+  /assistant/activity:
+    post:
+      tags: [assistant]
+      operationId: askActivityAssistant
+      summary: Turns what the person said into the fields of the new-activity form
+      description: |
+        Nothing is saved: the app opens its own form filled in with `intent`.
+        The app sends the whole conversation on every turn and gets the whole
+        activity understood so far. `complete` is false while something
+        essential is missing (for a task or meeting: what, when and whether to
+        remind; for a note or call: the content); `reply` then ends with a
+        question. With `needs_company` the company is recognised by name and
+        `companies` lists the matching leads and partners the user may see.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivityAssistantRequest' }
+      responses:
+        '200':
+          description: What the assistant understood
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActivityAssistantResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+
+  /assistant/project-task:
+    post:
+      tags: [assistant]
+      operationId: askProjectTaskAssistant
+      summary: Turns what the person said into the fields of the new project task form
+      description: |
+        Same conversation as /assistant/activity. The app sends the project's
+        task types, priorities and members; `intent` names them by their ids.
+        Only the task's name is essential.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectTaskAssistantRequest' }
+      responses:
+        '200':
+          description: What the assistant understood
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectTaskAssistantResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+
+  /crm/mobile/dashboard:
+    get:
+      tags: [agenda]
+      operationId: getDashboard
+      summary: The sales dashboard — figures, the funnel and the sales chart
+      description: |
+        Counts the leads the user may see: their own for a salesperson, the
+        team for a manager, the whole company for an admin. Values are in PLN
+        at today's rates. A lead on hold is not in the pipeline; a lead is won
+        on the day it was last changed in the "won" stage. The app sends the
+        bounds of its local week, month and chart period.
+      parameters:
+        - { name: week_start, in: query, required: true, schema: { type: string, format: date-time }, description: 'Start of the phone''s local week; the week before it is the comparison' }
+        - { name: week_end, in: query, required: true, schema: { type: string, format: date-time }, description: Start of the next local week (exclusive) }
+        - { name: month_start, in: query, required: true, schema: { type: string, format: date-time } }
+        - { name: month_end, in: query, required: true, schema: { type: string, format: date-time }, description: Start of the next local month (exclusive) }
+        - { name: period_end, in: query, required: true, schema: { type: string, format: date-time }, description: 'End of the chart period (exclusive): the start of the phone''s tomorrow' }
+        - { name: period_days, in: query, required: true, schema: { type: integer, enum: [7, 30, 90] } }
+        - { name: assigned_to, in: query, schema: { type: string, format: uuid }, description: 'One salesperson, for a manager; 403 when outside the user''s scope' }
+      responses:
+        '200':
+          description: The dashboard
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /crm/dashboard/activities:
+    get:
+      tags: [agenda]
+      operationId: listRecentActivities
+      summary: What happened lately on the leads and partners the user may see, newest first
+      parameters:
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+        - { name: assigned_to, in: query, schema: { type: string, format: uuid }, description: Only what belongs to this salesperson }
+      responses:
+        '200':
+          description: One page of the feed
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RecentActivity' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
 
   /crm/leads:
     get:
@@ -1346,6 +1450,152 @@ components:
         unread_sms_count: { type: integer }
         unread_whatsapp_count: { type: integer }
         missed_call_count: { type: integer }
+
+    AssistantMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string, minLength: 1, maxLength: 2000 }
+
+    AssistantOption:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 255 }
+
+    ActivityAssistantRequest:
+      type: object
+      required: [messages, today, now, language, type]
+      properties:
+        messages:
+          description: The conversation so far, oldest first
+          type: array
+          minItems: 1
+          maxItems: 40
+          items: { $ref: '#/components/schemas/AssistantMessage' }
+        today: { type: string, format: date, description: 'The phone''s local date, for "tomorrow" and the like' }
+        now: { type: string, pattern: '^\d{2}:\d{2}$', description: 'The phone''s local time, for "in two hours"' }
+        language: { type: string, enum: [pl, en, de, it, es, fr, ro, ru, sl, hr] }
+        type: { type: string, enum: [note, call, task, meeting] }
+        needs_company: { type: boolean, default: false, description: Recognise the company by name (assistant opened outside a card) }
+
+    ActivityAssistantResponse:
+      type: object
+      required: [reply, complete, intent, companies]
+      properties:
+        reply: { type: string, description: 'What the assistant understood, and a question when something essential is missing' }
+        complete: { type: boolean, description: Enough is known to open the form }
+        intent:
+          type: object
+          required: [title, body, activity_at, meeting_location, reminder, priority, assigned_to, assigned_to_name, company_name]
+          properties:
+            title: { type: string, nullable: true, description: Only for a task or meeting }
+            body: { type: string, nullable: true }
+            activity_at: { type: string, nullable: true, description: 'Local date and time, YYYY-MM-DDTHH:MM; only for a task or meeting' }
+            meeting_location: { type: string, nullable: true }
+            reminder: { type: string, nullable: true, enum: [none, 30m_before, 1h_before, at_due, 1d_before, 2d_before, 3d_before, null], description: '"none" means the person wants no reminder; null that it was not said' }
+            priority: { type: string, nullable: true, enum: [asap, important, medium, low, null] }
+            assigned_to: { type: string, nullable: true, description: User id of the person named to do it }
+            assigned_to_name: { type: string, nullable: true }
+            company_name: { type: string, nullable: true, description: The company as the person said it; only with needs_company }
+        companies:
+          description: Leads and partners matching company_name; empty without needs_company
+          type: array
+          items:
+            type: object
+            required: [source_type, source_id, name]
+            properties:
+              source_type: { type: string, enum: [lead, partner] }
+              source_id: { type: string }
+              name: { type: string }
+
+    ProjectTaskAssistantRequest:
+      type: object
+      required: [messages, today, language]
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 40
+          items: { $ref: '#/components/schemas/AssistantMessage' }
+        today: { type: string, format: date }
+        language: { type: string, enum: [pl, en, de, it, es, fr, ro, ru, sl, hr] }
+        types: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/AssistantOption' } }
+        priorities: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/AssistantOption' } }
+        members: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/AssistantOption' } }
+
+    ProjectTaskAssistantResponse:
+      type: object
+      required: [reply, complete, intent]
+      properties:
+        reply: { type: string }
+        complete: { type: boolean }
+        intent:
+          type: object
+          required: [name, description, start_date, end_date, type_id, priority_id, assignee_ids]
+          properties:
+            name: { type: string, nullable: true }
+            description: { type: string, nullable: true }
+            start_date: { type: string, format: date, nullable: true }
+            end_date: { type: string, format: date, nullable: true }
+            type_id: { type: string, nullable: true, description: One of the types sent in the request }
+            priority_id: { type: string, nullable: true }
+            assignee_ids: { type: array, items: { type: string } }
+
+    DashboardResponse:
+      type: object
+      required: [kpis, funnel, chart]
+      properties:
+        kpis:
+          type: object
+          required: [new_leads, new_leads_previous, new_leads_value_pln, new_leads_value_previous_pln, active_leads, pipeline_value_pln, month_won_count, month_won_value_pln]
+          properties:
+            new_leads: { type: integer, description: Leads created in the week }
+            new_leads_previous: { type: integer, description: Leads created in the week before }
+            new_leads_value_pln: { type: number }
+            new_leads_value_previous_pln: { type: number }
+            active_leads: { type: integer, description: 'Leads past "new", not closed and not on hold' }
+            pipeline_value_pln: { type: number, description: Value of those leads in whole PLN }
+            month_won_count: { type: integer }
+            month_won_value_pln: { type: number }
+        funnel:
+          description: 'Open stages in funnel order, each present even when empty; leads on hold are left out'
+          type: array
+          items:
+            type: object
+            required: [stage, count, value_pln]
+            properties:
+              stage: { type: string, enum: [new, qualification, presentation, offer, negotiation] }
+              count: { type: integer }
+              value_pln: { type: number }
+        chart:
+          type: object
+          required: [period_days, total_pln, previous_total_pln, points]
+          properties:
+            period_days: { type: integer }
+            total_pln: { type: number, description: Value won in the period }
+            previous_total_pln: { type: number, description: Value won in the period of the same length before it }
+            points:
+              description: 'Value won so far, one number per day of the period, oldest first'
+              type: array
+              items: { type: number }
+
+    RecentActivity:
+      type: object
+      required: [uid, type, source_type, source_id]
+      properties:
+        uid: { type: string, description: Unique across all sources }
+        type: { type: string, description: 'note, call, meeting, task, email, …' }
+        title: { type: string, nullable: true }
+        status: { type: string, nullable: true }
+        source_type: { type: string, enum: [lead, partner, onboarding, document] }
+        source_id: { type: string, description: 'Lead id, partner id (also for onboarding) or document id' }
+        source_name: { type: string, nullable: true }
+        activity_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time, nullable: true }
+        assigned_to_name: { type: string, nullable: true }
 
     TodayKpis:
       type: object
