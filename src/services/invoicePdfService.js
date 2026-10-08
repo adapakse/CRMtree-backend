@@ -20,19 +20,12 @@
 // explicitly deferred (2026-08-03 notes) — only the visual style of this
 // template is borrowed, not actual KSeF submission.
 //
-// Polish diacritics: PDFKit's 14 standard fonts (Helvetica etc.) only cover
-// WinAnsiEncoding (~CP1252, Western European) — Polish letters (ą ć ę ł ń ó
-// ś ź ż) live in Latin-2/CP1250 territory and have no glyph in those fonts,
-// so PDFKit silently drops or mis-renders them. Fix: embed a real Unicode
-// TrueType font (DejaVu Sans, via the `dejavu-fonts-ttf` package — bundled
-// font files, no other deps, permissive license) instead of a standard-14
-// font name.
+// The Unicode font (Polish diacritics) and the ligature fix come with the
+// document from utils/pdfDocument.js.
 
 const path = require('path');
-const PDFDocument = require('pdfkit');
+const { createPdfDocument } = require('../utils/pdfDocument');
 
-const FONT_REGULAR = require.resolve('dejavu-fonts-ttf/ttf/DejaVuSans.ttf');
-const FONT_BOLD    = require.resolve('dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf');
 const LOGO_PATH    = path.join(__dirname, '..', 'assets', 'crmtree-logo-reverse.png');
 
 const CYCLE_LABEL  = { monthly: 'Miesięczny', annual: 'Roczny' };
@@ -151,36 +144,8 @@ function amountInWords(amount, currency) {
 
 function generateInvoicePdfBuffer({ invoice, plan }) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 40, size: 'A4' });
-    const chunks = [];
-    doc.on('data', (c) => chunks.push(c));
-    doc.on('end', () => resolve(Buffer.concat(chunks)));
-    doc.on('error', reject);
-
-    doc.registerFont('Regular', FONT_REGULAR);
-    doc.registerFont('Bold', FONT_BOLD);
-    doc.font('Regular');
-
-    // DejaVu Sans substitutes "fi"/"fl"/"ffi" runs with a single ligature
-    // glyph by default. Visually fine, but PDFKit doesn't emit a correct
-    // ToUnicode mapping for that glyph, so the embedded text layer silently
-    // drops the second letter ("konfigurowana" → "konfgurowana") — invisible
-    // on screen, but breaks copy/paste, search and text extraction. Only the
-    // `{ tag: false }` object form actually disables a default-on feature —
-    // an array like `['-liga']` just adds a literal, meaningless tag.
-    // Wrapped once here so every .text()/.heightOfString() call gets it
-    // automatically, instead of relying on per-call discipline.
-    const NO_LIGATURES = { liga: false, clig: false, calt: false };
-    function withNoLigatures(options) {
-      return { ...options, features: { ...NO_LIGATURES, ...(options && options.features) } };
-    }
-    const rawText = doc.text.bind(doc);
-    doc.text = (text, x, y, options) => {
-      if (typeof x === 'object' && x !== null) return rawText(text, withNoLigatures(x));
-      return rawText(text, x, y, withNoLigatures(options));
-    };
-    const rawHeightOfString = doc.heightOfString.bind(doc);
-    doc.heightOfString = (text, options) => rawHeightOfString(text, withNoLigatures(options));
+    const { doc, finished } = createPdfDocument({ margin: 40, size: 'A4' });
+    finished.then(resolve, reject);
 
     const left         = doc.page.margins.left;
     const right        = doc.page.width - doc.page.margins.right;

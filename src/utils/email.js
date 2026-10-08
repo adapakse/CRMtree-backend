@@ -11,6 +11,7 @@ const { google } = require("googleapis");
 const path = require("path");
 const config = require("../config");
 const logger = require("./logger");
+const { translate, formatDate, formatDateOnly, formatDateTime, supportedOrDefault } = require("./i18n");
 
 // ─── Inicjalizacja klienta Gmail ─────────────────────────────────────────────
 
@@ -138,9 +139,17 @@ async function sendMail({ to, subject, html, text }) {
   }
 }
 
-// ─── Szablony wiadomości ──────────────────────────────────────────────────────
+// ─── Message templates ───────────────────────────────────────────────────────
+//
+// Every text comes from src/i18n/emails/<lang>.json. Each send* function takes
+// the `locale` of its recipient (see resolveLocale in config/locales.js); a
+// missing or unsupported locale gives the Polish mail.
 
 const BASE_URL = config.frontendUrl;
+
+function emailTexts(locale) {
+  return (key, params) => translate(locale, `emails.${key}`, params);
+}
 
 /**
  * Escape user-entered text before inserting it into email HTML.
@@ -159,12 +168,68 @@ function htmlText(value) {
   return escapeHtml(value).replace(/\r?\n/g, "<br>");
 }
 
+// Values stored in the database → key of their label in the translation files.
+// A value missing here is printed as it is.
+const DOCUMENT_TASK_BADGES = {
+  read: "badge-blue",
+  edit: "badge-orange",
+  approve: "badge-purple",
+  sign: "badge-purple",
+};
+
+const DOCUMENT_STATUSES = {
+  new: { key: "new", badge: "badge-blue" },
+  being_edited: { key: "beingEdited", badge: "badge-orange" },
+  being_signed: { key: "beingSigned", badge: "badge-purple" },
+  being_approved: { key: "beingApproved", badge: "badge-purple" },
+  signed: { key: "signed", badge: "badge-green" },
+  completed: { key: "completed", badge: "badge-green" },
+  hold: { key: "hold", badge: "badge-orange" },
+  rejected: { key: "rejected", badge: "badge-red" },
+};
+
+const ACTIVITY_TYPE_KEYS = {
+  call: "call",
+  email: "email",
+  meeting: "meeting",
+  note: "note",
+  doc_sent: "docSent",
+  training: "training",
+  qbr: "qbr",
+  opportunity: "opportunity",
+};
+
+// Only the reminder mail labels "task"; the assignment mail has always printed that type raw.
+const REMINDER_ACTIVITY_TYPE_KEYS = { ...ACTIVITY_TYPE_KEYS, task: "task" };
+
+const ABSENCE_REASON_KEYS = {
+  vacation: "vacation",
+  sick_leave: "sickLeave",
+  other: "other",
+};
+
+const REMINDER_DAYS_BEFORE = { "1d_before": 1, "2d_before": 2, "3d_before": 3 };
+
+function activityTypeLabel(t, keysByType, activityType) {
+  const key = keysByType[activityType];
+  return key ? t(`activityTypes.${key}`) : activityType;
+}
+
+// CRM activities and project tasks word the "on the due date" reminder differently.
+function reminderLabel(t, reminderType, atDueKey) {
+  if (reminderType === "at_due") return t(`reminderTypes.${atDueKey}`);
+  if (reminderType === "custom") return t("reminderTypes.custom");
+  const days = REMINDER_DAYS_BEFORE[reminderType];
+  return days ? t("reminderTypes.daysBefore", { count: days }) : "";
+}
+
 /**
- * Bazowy wrapper HTML z brandingiem CRMtree
+ * Shared HTML layout with the CRMtree branding.
  */
-function template(content) {
+function template(locale, content) {
+  const t = emailTexts(locale);
   return `<!DOCTYPE html>
-<html lang="pl">
+<html lang="${supportedOrDefault(locale)}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -203,148 +268,134 @@ function template(content) {
     </div>
     <div class="body">${content}</div>
     <div class="footer">
-      Ta wiadomość została wygenerowana automatycznie przez system CRMtree.<br>
-      Nie odpowiadaj na tego maila — ta skrzynka nie jest monitorowana.
+      ${t("layout.footerAutomatic")}<br>
+      ${t("layout.footerNoReply")}
     </div>
   </div>
 </body>
 </html>`;
 }
 
-// ─── Gotowe szablony zdarzeń ──────────────────────────────────────────────────
+// ─── Event mails ─────────────────────────────────────────────────────────────
+// All of them send through module.exports.sendMail so tests can spy on it.
 
 /**
- * Zadanie workflow przypisane do użytkownika
+ * A document workflow task was assigned to the user.
  */
 async function sendTaskAssigned({
   to,
+  locale,
   assigneeName,
   taskType,
   documentName,
   docNumber,
   assignerName,
   dueDate,
-  documentId,
 }) {
-  const taskLabels = {
-    read: { label: "Do przeczytania", badge: "badge-blue" },
-    edit: { label: "Do edycji", badge: "badge-orange" },
-    approve: { label: "Do akceptacji", badge: "badge-purple" },
-    sign: { label: "Do podpisania", badge: "badge-purple" },
-  };
-  const task = taskLabels[taskType] || { label: taskType, badge: "badge-blue" };
+  const t = emailTexts(locale);
+  const taskBadge = DOCUMENT_TASK_BADGES[taskType] || "badge-blue";
+  const taskTypeLabel = DOCUMENT_TASK_BADGES[taskType] ? t(`documentTaskTypes.${taskType}`) : taskType;
   const url = `${BASE_URL}/documents`;
 
-  await sendMail({
+  await module.exports.sendMail({
     to,
-    subject: `[CRMtree] Nowe zadanie: ${documentName}`,
-    html: template(`
-      <h2>Masz nowe zadanie do wykonania</h2>
-      <p>Cześć ${assigneeName},</p>
-      <p>Użytkownik <strong>${assignerName}</strong> przypisał Ci zadanie dotyczące dokumentu:</p>
+    subject: t("taskAssigned.subject", { documentName }),
+    html: template(locale, `
+      <h2>${t("taskAssigned.heading")}</h2>
+      <p>${t("common.greeting", { name: assigneeName })}</p>
+      <p>${t("taskAssigned.intro", { assignerName })}</p>
       <div class="info-box">
         <div class="info-row">
-          <span class="info-label">Dokument</span>
+          <span class="info-label">${t("labels.document")}</span>
           <span class="info-val">${documentName}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Numer</span>
+          <span class="info-label">${t("labels.number")}</span>
           <span class="info-val">${docNumber}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Typ zadania</span>
-          <span class="info-val"><span class="badge ${task.badge}">${task.label}</span></span>
+          <span class="info-label">${t("labels.taskType")}</span>
+          <span class="info-val"><span class="badge ${taskBadge}">${taskTypeLabel}</span></span>
         </div>
         ${
           dueDate
             ? `<div class="info-row">
-          <span class="info-label">Termin</span>
-          <span class="info-val">${new Date(dueDate).toLocaleDateString("pl-PL")}</span>
+          <span class="info-label">${t("labels.dueDate")}</span>
+          <span class="info-val">${formatDate(locale, dueDate, {})}</span>
         </div>`
             : ""
         }
         <div class="info-row">
-          <span class="info-label">Zlecający</span>
+          <span class="info-label">${t("labels.assigner")}</span>
           <span class="info-val">${assignerName}</span>
         </div>
       </div>
-      <a href="${url}" class="btn">Otwórz dokument →</a>
+      <a href="${url}" class="btn">${t("common.openDocument")}</a>
     `),
   });
 }
 
 /**
- * Zmiana statusu dokumentu
+ * The status of a document changed.
  */
 async function sendDocumentStatusChanged({
   to,
+  locale,
   recipientName,
   documentName,
   docNumber,
   oldStatus,
   newStatus,
   changedByName,
-  documentId,
 }) {
-  const statusLabels = {
-    new: { label: "Nowy", badge: "badge-blue" },
-    being_edited: { label: "W edycji", badge: "badge-orange" },
-    being_signed: { label: "Do podpisania", badge: "badge-purple" },
-    being_approved: { label: "Do akceptacji", badge: "badge-purple" },
-    signed: { label: "Podpisany", badge: "badge-green" },
-    completed: { label: "Zakończony", badge: "badge-green" },
-    hold: { label: "Wstrzymany", badge: "badge-orange" },
-    rejected: { label: "Odrzucony", badge: "badge-red" },
-  };
-  const nStatus = statusLabels[newStatus] || {
-    label: newStatus,
-    badge: "badge-blue",
-  };
-  const oStatus = statusLabels[oldStatus] || {
-    label: oldStatus,
-    badge: "badge-blue",
+  const t = emailTexts(locale);
+  const statusBadge = (status) => {
+    const known = DOCUMENT_STATUSES[status];
+    const label = known ? t(`documentStatuses.${known.key}`) : status;
+    return `<span class="badge ${known ? known.badge : "badge-blue"}">${label}</span>`;
   };
   const url = `${BASE_URL}/documents`;
 
-  await sendMail({
+  await module.exports.sendMail({
     to,
-    subject: `[CRMtree] Status dokumentu zmieniony: ${documentName}`,
-    html: template(`
-      <h2>Status dokumentu został zmieniony</h2>
-      <p>Cześć ${recipientName},</p>
-      <p>Dokument, do którego masz dostęp, zmienił status:</p>
+    subject: t("documentStatusChanged.subject", { documentName }),
+    html: template(locale, `
+      <h2>${t("documentStatusChanged.heading")}</h2>
+      <p>${t("common.greeting", { name: recipientName })}</p>
+      <p>${t("documentStatusChanged.intro")}</p>
       <div class="info-box">
         <div class="info-row">
-          <span class="info-label">Dokument</span>
+          <span class="info-label">${t("labels.document")}</span>
           <span class="info-val">${documentName}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Numer</span>
+          <span class="info-label">${t("labels.number")}</span>
           <span class="info-val">${docNumber}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Poprzedni status</span>
-          <span class="info-val"><span class="badge ${oStatus.badge}">${oStatus.label}</span></span>
+          <span class="info-label">${t("documentStatusChanged.previousStatus")}</span>
+          <span class="info-val">${statusBadge(oldStatus)}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Nowy status</span>
-          <span class="info-val"><span class="badge ${nStatus.badge}">${nStatus.label}</span></span>
+          <span class="info-label">${t("documentStatusChanged.newStatus")}</span>
+          <span class="info-val">${statusBadge(newStatus)}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Zmienił</span>
+          <span class="info-label">${t("documentStatusChanged.changedBy")}</span>
           <span class="info-val">${changedByName}</span>
         </div>
       </div>
-      <a href="${url}" class="btn">Otwórz dokument →</a>
+      <a href="${url}" class="btn">${t("common.openDocument")}</a>
     `),
   });
 }
 
 /**
- * Zadanie workflow ukończone (powiadomienie dla właściciela dokumentu)
+ * A workflow task was completed (notification for the document owner).
  */
 async function sendTaskCompleted({
   to,
+  locale,
   ownerName,
   taskType,
   documentName,
@@ -352,168 +403,171 @@ async function sendTaskCompleted({
   completedByName,
   comment,
 }) {
-  const taskLabels = {
-    read: "przeczytał",
-    edit: "edytował",
-    approve: "zaakceptował",
-    sign: "podpisał",
-  };
-  const action = taskLabels[taskType] || "wykonał zadanie dla";
+  const t = emailTexts(locale);
+  const introKey = DOCUMENT_TASK_BADGES[taskType] ? taskType : "other";
   const url = `${BASE_URL}/documents`;
 
-  await sendMail({
+  await module.exports.sendMail({
     to,
-    subject: `[CRMtree] Zadanie ukończone: ${documentName}`,
-    html: template(`
-      <h2>Zadanie zostało ukończone</h2>
-      <p>Cześć ${ownerName},</p>
-      <p>Użytkownik <strong>${completedByName}</strong> ${action} dokument <strong>${documentName}</strong>.</p>
+    subject: t("taskCompleted.subject", { documentName }),
+    html: template(locale, `
+      <h2>${t("taskCompleted.heading")}</h2>
+      <p>${t("common.greeting", { name: ownerName })}</p>
+      <p>${t(`taskCompleted.intro.${introKey}`, { completedByName, documentName })}</p>
       <div class="info-box">
         <div class="info-row">
-          <span class="info-label">Dokument</span>
+          <span class="info-label">${t("labels.document")}</span>
           <span class="info-val">${documentName}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Numer</span>
+          <span class="info-label">${t("labels.number")}</span>
           <span class="info-val">${docNumber}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Wykonał</span>
+          <span class="info-label">${t("taskCompleted.completedBy")}</span>
           <span class="info-val">${completedByName}</span>
         </div>
         ${
           comment
             ? `<div class="info-row">
-          <span class="info-label">Komentarz</span>
+          <span class="info-label">${t("labels.comment")}</span>
           <span class="info-val">${comment}</span>
         </div>`
             : ""
         }
       </div>
-      <a href="${url}" class="btn">Otwórz dokument →</a>
+      <a href="${url}" class="btn">${t("common.openDocument")}</a>
     `),
   });
 }
 
 /**
- * Dokument odrzucony w workflow
+ * A workflow task was rejected (notification for the document owner).
  */
 async function sendTaskRejected({
   to,
+  locale,
   ownerName,
   documentName,
   docNumber,
   rejectedByName,
   comment,
 }) {
+  const t = emailTexts(locale);
   const url = `${BASE_URL}/documents`;
 
-  await sendMail({
+  await module.exports.sendMail({
     to,
-    subject: `[CRMtree] Zadanie odrzucone: ${documentName}`,
-    html: template(`
-      <h2>Zadanie zostało odrzucone</h2>
-      <p>Cześć ${ownerName},</p>
-      <p>Użytkownik <strong>${rejectedByName}</strong> odrzucił zadanie dla dokumentu <strong>${documentName}</strong>.</p>
+    subject: t("taskRejected.subject", { documentName }),
+    html: template(locale, `
+      <h2>${t("taskRejected.heading")}</h2>
+      <p>${t("common.greeting", { name: ownerName })}</p>
+      <p>${t("taskRejected.intro", { rejectedByName, documentName })}</p>
       <div class="info-box">
         <div class="info-row">
-          <span class="info-label">Dokument</span>
+          <span class="info-label">${t("labels.document")}</span>
           <span class="info-val">${documentName}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Numer</span>
+          <span class="info-label">${t("labels.number")}</span>
           <span class="info-val">${docNumber}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Odrzucił</span>
+          <span class="info-label">${t("taskRejected.rejectedBy")}</span>
           <span class="info-val">${rejectedByName}</span>
         </div>
         ${
           comment
             ? `<div class="info-row">
-          <span class="info-label">Powód</span>
+          <span class="info-label">${t("taskRejected.reason")}</span>
           <span class="info-val" style="color:#DC2626">${comment}</span>
         </div>`
             : ""
         }
       </div>
-      <a href="${url}" class="btn">Otwórz dokument →</a>
+      <a href="${url}" class="btn">${t("common.openDocument")}</a>
     `),
   });
 }
 
 /**
- * Dokument podpisany przez Signus
+ * A document was signed electronically (Signus).
  */
 async function sendDocumentSigned({
   to,
+  locale,
   recipientName,
   documentName,
   docNumber,
   signedByName,
 }) {
+  const t = emailTexts(locale);
   const url = `${BASE_URL}/documents`;
 
-  await sendMail({
+  await module.exports.sendMail({
     to,
-    subject: `[CRMtree] Dokument podpisany: ${documentName}`,
-    html: template(`
-      <h2>Dokument został podpisany</h2>
-      <p>Cześć ${recipientName},</p>
-      <p>Dokument <strong>${documentName}</strong> został pomyślnie podpisany elektronicznie.</p>
+    subject: t("documentSigned.subject", { documentName }),
+    html: template(locale, `
+      <h2>${t("documentSigned.heading")}</h2>
+      <p>${t("common.greeting", { name: recipientName })}</p>
+      <p>${t("documentSigned.intro", { documentName })}</p>
       <div class="info-box">
         <div class="info-row">
-          <span class="info-label">Dokument</span>
+          <span class="info-label">${t("labels.document")}</span>
           <span class="info-val">${documentName}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Numer</span>
+          <span class="info-label">${t("labels.number")}</span>
           <span class="info-val">${docNumber}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Podpisał</span>
+          <span class="info-label">${t("documentSigned.signedBy")}</span>
           <span class="info-val">${signedByName}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Status</span>
-          <span class="info-val"><span class="badge badge-green">Podpisany ✓</span></span>
+          <span class="info-label">${t("labels.status")}</span>
+          <span class="info-val"><span class="badge badge-green">${t("documentSigned.signedStatus")}</span></span>
         </div>
       </div>
-      <a href="${url}" class="btn">Otwórz dokument →</a>
+      <a href="${url}" class="btn">${t("common.openDocument")}</a>
     `),
   });
 }
 
 /**
- * Zaproszenie nowego użytkownika
+ * Invitation of a new user.
  */
 async function sendUserInvitation({
   to,
+  locale,
   displayName,
   invitedByName,
   loginUrl,
 }) {
-  await sendMail({
+  const t = emailTexts(locale);
+
+  await module.exports.sendMail({
     to,
-    subject: "[CRMtree] Zaproszenie do systemu",
-    html: template(`
-      <h2>Witaj w CRMtree!</h2>
-      <p>Cześć ${displayName},</p>
-      <p>Użytkownik <strong>${invitedByName}</strong> dodał Cię do systemu <strong>CRMtree</strong>.</p>
-      <p>Możesz zalogować się używając swojego konta Google Workspace (<strong>${to}</strong>) przez poniższy link:</p>
-      <a href="${loginUrl || BASE_URL}" class="btn">Zaloguj się →</a>
+    subject: t("userInvitation.subject"),
+    html: template(locale, `
+      <h2>${t("userInvitation.heading")}</h2>
+      <p>${t("common.greeting", { name: displayName })}</p>
+      <p>${t("userInvitation.intro", { invitedByName })}</p>
+      <p>${t("userInvitation.loginHint", { email: to })}</p>
+      <a href="${loginUrl || BASE_URL}" class="btn">${t("userInvitation.signIn")}</a>
       <p style="color:#71717A;font-size:12px;margin-top:16px">
-        Jeśli nie oczekiwałeś tej wiadomości, możesz ją zignorować.
+        ${t("userInvitation.ignoreHint")}
       </p>
     `),
   });
 }
 
 /**
- * Powiadomienie o przypisaniu aktywności CRM (lead lub partner)
+ * A CRM activity (of a lead or a partner) was assigned to the user.
  */
 async function sendCrmActivityAssigned({
   to,
+  locale,
   assigneeName,
   assignerName,
   activityType,
@@ -523,57 +577,94 @@ async function sendCrmActivityAssigned({
   sourceType,  // 'lead' | 'partner'
   sourceId,
 }) {
-  const typeLabels = {
-    call: 'Połączenie', email: 'Email', meeting: 'Spotkanie',
-    note: 'Notatka', doc_sent: 'Dokument', training: 'Szkolenie',
-    qbr: 'QBR', opportunity: 'Szansa',
-  };
-  const typeLabel = typeLabels[activityType] || activityType;
-  const url = `${BASE_URL}/crm/${sourceType === 'partner' ? 'partners' : 'leads'}/${sourceId}`;
+  const t = emailTexts(locale);
+  const isPartner = sourceType === 'partner';
+  const typeLabel = activityTypeLabel(t, ACTIVITY_TYPE_KEYS, activityType);
+  const url = `${BASE_URL}/crm/${isPartner ? 'partners' : 'leads'}/${sourceId}`;
 
-  await sendMail({
+  await module.exports.sendMail({
     to,
-    subject: `[CRMtree] Nowe zadanie CRM: ${activityTitle}`,
-    html: template(`
-      <h2>Przypisano Ci nowe zadanie CRM</h2>
-      <p>Cześć ${assigneeName},</p>
-      <p>Użytkownik <strong>${assignerName}</strong> przypisał Ci aktywność:</p>
+    subject: t('crmActivityAssigned.subject', { activityTitle }),
+    html: template(locale, `
+      <h2>${t('crmActivityAssigned.heading')}</h2>
+      <p>${t('common.greeting', { name: assigneeName })}</p>
+      <p>${t('crmActivityAssigned.intro', { assignerName })}</p>
       <div class="info-box">
         <div class="info-row">
-          <span class="info-label">${sourceType === 'partner' ? 'Partner' : 'Lead'}</span>
+          <span class="info-label">${t(isPartner ? 'labels.partner' : 'labels.lead')}</span>
           <span class="info-val">${sourceName}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Typ</span>
+          <span class="info-label">${t('labels.type')}</span>
           <span class="info-val"><span class="badge badge-orange">${typeLabel}</span></span>
         </div>
         <div class="info-row">
-          <span class="info-label">Tytuł</span>
+          <span class="info-label">${t('labels.title')}</span>
           <span class="info-val">${activityTitle}</span>
         </div>
         ${activityAt ? `<div class="info-row">
-          <span class="info-label">Termin</span>
-          <span class="info-val">${new Date(activityAt).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+          <span class="info-label">${t('labels.activityDate')}</span>
+          <span class="info-val">${formatDateTime(locale, activityAt)}</span>
         </div>` : ''}
         <div class="info-row">
-          <span class="info-label">Zlecający</span>
+          <span class="info-label">${t('labels.assigner')}</span>
           <span class="info-val">${assignerName}</span>
         </div>
       </div>
-      <a href="${url}" class="btn">Otwórz ${sourceType === 'partner' ? 'partnera' : 'leada'} →</a>
+      <a href="${url}" class="btn">${t(isPartner ? 'common.openPartner' : 'common.openLead')}</a>
       <p style="color:#71717A;font-size:12px;margin-top:12px">
-        Swoje zadania możesz zobaczyć w widoku <strong>Kalendarz → Zadania</strong>.
+        ${t('crmActivityAssigned.calendarHint')}
       </p>
     `),
   });
 }
 
 /**
- * Przypomnienie o nadchodzącym/zbliżającym się zadaniu CRM (lead lub partner).
- * Port 1:1 z worktrips — wysyłane przez crmReminderService.js.
+ * The user became the owner of a lead or a partner.
+ */
+async function sendCrmOwnerAssigned({
+  to,
+  locale,
+  ownerName,
+  assignerName,
+  sourceName,
+  sourceType,  // 'lead' | 'partner'
+  sourceId,
+}) {
+  const t = emailTexts(locale);
+  const isPartner = sourceType === 'partner';
+  const variant = isPartner ? 'Partner' : 'Lead';
+  const url = `${BASE_URL}/crm/${isPartner ? 'partners' : 'leads'}/${sourceId}`;
+
+  await module.exports.sendMail({
+    to,
+    subject: t(`crmOwnerAssigned.subject${variant}`, { sourceName }),
+    html: template(locale, `
+      <h2>${t(`crmOwnerAssigned.heading${variant}`)}</h2>
+      <p>${t('common.greeting', { name: escapeHtml(ownerName) })}</p>
+      <p>${t(`crmOwnerAssigned.intro${variant}`, { assignerName: escapeHtml(assignerName) })}</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">${t(isPartner ? 'labels.partner' : 'labels.lead')}</span>
+          <span class="info-val">${escapeHtml(sourceName)}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('labels.assigner')}</span>
+          <span class="info-val">${escapeHtml(assignerName)}</span>
+        </div>
+      </div>
+      <a href="${url}" class="btn">${t(isPartner ? 'common.openPartner' : 'common.openLead')}</a>
+    `),
+  });
+}
+
+/**
+ * Reminder about an upcoming CRM activity (of a lead or a partner),
+ * sent by crmReminderService.js.
  */
 async function sendActivityReminder({
   to,
+  locale,
   recipientName,
   activityType,
   activityTitle,
@@ -585,64 +676,48 @@ async function sendActivityReminder({
 }) {
   if (!to) return;
 
-  const url = `${BASE_URL}/crm/${sourceType === 'partner' ? 'partners' : 'leads'}/${sourceId}`;
+  const t = emailTexts(locale);
+  const isPartner = sourceType === 'partner';
+  const url = `${BASE_URL}/crm/${isPartner ? 'partners' : 'leads'}/${sourceId}`;
+  const typeLabel = activityTypeLabel(t, REMINDER_ACTIVITY_TYPE_KEYS, activityType);
+  const reminder = reminderLabel(t, reminderType, 'activityAtDue');
 
-  const TYPE_LABEL = {
-    call: 'Połączenie', email: 'Email', meeting: 'Spotkanie', note: 'Notatka',
-    task: 'Zadanie', doc_sent: 'Dokument', training: 'Szkolenie', qbr: 'QBR', opportunity: 'Szansa',
-  };
-  const REMINDER_LABEL = {
-    at_due:      'Termin wykonania',
-    '1d_before': '1 dzień przed terminem',
-    '2d_before': '2 dni przed terminem',
-    '3d_before': '3 dni przed terminem',
-    custom:      'Własna data przypomnienia',
-  };
-
-  const typeLabel     = TYPE_LABEL[activityType]    || activityType;
-  const reminderLabel = REMINDER_LABEL[reminderType] || '';
-  const fmtDate = (d) => d
-    ? new Date(d).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
-    : '—';
-
-  await sendMail({
+  await module.exports.sendMail({
     to,
-    subject: `[CRMtree] ⏰ Przypomnienie: ${typeLabel} — ${activityTitle}`,
-    html: template(`
-      <h2>⏰ Przypomnienie o zadaniu</h2>
-      <p>Cześć ${recipientName || ''},</p>
-      <p>Masz nadchodzące zadanie wymagające uwagi:</p>
+    subject: t('activityReminder.subject', { activityType: typeLabel, activityTitle }),
+    html: template(locale, `
+      <h2>${t('activityReminder.heading')}</h2>
+      <p>${t('common.greeting', { name: recipientName || '' })}</p>
+      <p>${t('activityReminder.intro')}</p>
       <div class="info-box">
         <div class="info-row">
-          <span class="info-label">${sourceType === 'partner' ? 'Partner' : 'Lead'}</span>
+          <span class="info-label">${t(isPartner ? 'labels.partner' : 'labels.lead')}</span>
           <span class="info-val">${sourceName}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Typ</span>
+          <span class="info-label">${t('labels.type')}</span>
           <span class="info-val"><span class="badge badge-orange">${typeLabel}</span></span>
         </div>
         <div class="info-row">
-          <span class="info-label">Zadanie</span>
+          <span class="info-label">${t('labels.task')}</span>
           <span class="info-val"><strong>${activityTitle}</strong></span>
         </div>
         <div class="info-row">
-          <span class="info-label">Termin</span>
-          <span class="info-val">${fmtDate(activityAt)}</span>
+          <span class="info-label">${t('labels.activityDate')}</span>
+          <span class="info-val">${activityAt ? formatDateTime(locale, activityAt) : '—'}</span>
         </div>
-        ${reminderLabel ? `<div class="info-row">
-          <span class="info-label">Przypomnienie</span>
-          <span class="info-val">${reminderLabel}</span>
+        ${reminder ? `<div class="info-row">
+          <span class="info-label">${t('labels.reminder')}</span>
+          <span class="info-val">${reminder}</span>
         </div>` : ''}
       </div>
-      <a href="${url}" target="_blank" class="btn">Otwórz ${sourceType === 'partner' ? 'partnera' : 'leada'} →</a>
+      <a href="${url}" target="_blank" class="btn">${t(isPartner ? 'common.openPartner' : 'common.openLead')}</a>
       <p style="color:#71717A;font-size:12px;margin-top:12px">
-        Link otworzy się w nowym oknie przeglądarki. Jeśli jesteś zalogowany, nie będziesz musiał się ponownie logować.
+        ${t('activityReminder.linkHint')}
       </p>
     `),
   });
 }
-
-// ─── Eksport ──────────────────────────────────────────────────────────────────
 
 /**
  * Informational notification: you have been named as a substitute for an absence.
@@ -650,6 +725,7 @@ async function sendActivityReminder({
  */
 async function sendSubstitutionAssigned({
   to,
+  locale,
   substituteName,
   absentName,
   assignerName,
@@ -660,53 +736,43 @@ async function sendSubstitutionAssigned({
 }) {
   if (!to) return;
 
-  const REASON_LABEL = {
-    vacation:   'Urlop',
-    sick_leave: 'Zwolnienie lekarskie (L4)',
-    other:      'Inna nieobecność',
-  };
-  const reasonLabel = REASON_LABEL[reason] || REASON_LABEL.other;
-  const fmt = (d) => d
-    ? new Date(d).toLocaleDateString('pl-PL', { day: '2-digit', month: '2-digit', year: 'numeric' })
-    : '—';
+  const t = emailTexts(locale);
+  const reasonLabel = t(`absenceReasons.${ABSENCE_REASON_KEYS[reason] || 'other'}`);
+  const formatDay = (day) => (day ? formatDate(locale, day) : '—');
   const url = `${BASE_URL}/crm/leads`;
 
-  // via module.exports so it can be spied on in tests
   await module.exports.sendMail({
     to,
-    subject: `[CRMtree] Zastępstwo za ${absentName} (${fmt(startsOn)}–${fmt(endsOn)})`,
-    html: template(`
-      <h2>Wskazano Cię jako zastępcę</h2>
-      <p>Cześć ${substituteName},</p>
-      <p>Użytkownik <strong>${assignerName}</strong> wyznaczył Cię na zastępcę
-         <strong>${absentName}</strong> na czas nieobecności. Na czas jej trwania
-         uzyskujesz taki sam dostęp do leadów i partnerów tej osoby, jaki ma jej
-         przypisany handlowiec.</p>
+    subject: t('substitutionAssigned.subject', { absentName, startsOn: formatDay(startsOn), endsOn: formatDay(endsOn) }),
+    html: template(locale, `
+      <h2>${t('substitutionAssigned.heading')}</h2>
+      <p>${t('common.greeting', { name: substituteName })}</p>
+      <p>${t('substitutionAssigned.intro', { assignerName, absentName })}</p>
       <div class="info-box">
         <div class="info-row">
-          <span class="info-label">Osoba nieobecna</span>
+          <span class="info-label">${t('substitutionAssigned.absentPerson')}</span>
           <span class="info-val">${absentName}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Powód</span>
+          <span class="info-label">${t('substitutionAssigned.reason')}</span>
           <span class="info-val"><span class="badge badge-orange">${reasonLabel}</span></span>
         </div>
         <div class="info-row">
-          <span class="info-label">Od</span>
-          <span class="info-val">${fmt(startsOn)}</span>
+          <span class="info-label">${t('substitutionAssigned.from')}</span>
+          <span class="info-val">${formatDay(startsOn)}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Do (włącznie)</span>
-          <span class="info-val">${fmt(endsOn)}</span>
+          <span class="info-label">${t('substitutionAssigned.toInclusive')}</span>
+          <span class="info-val">${formatDay(endsOn)}</span>
         </div>
         ${note ? `<div class="info-row">
-          <span class="info-label">Notatka</span>
+          <span class="info-label">${t('substitutionAssigned.note')}</span>
           <span class="info-val">${htmlText(note)}</span>
         </div>` : ''}
       </div>
-      <a href="${url}" class="btn">Otwórz CRM →</a>
+      <a href="${url}" class="btn">${t('substitutionAssigned.openCrm')}</a>
       <p style="color:#71717A;font-size:12px;margin-top:12px">
-        To powiadomienie ma charakter informacyjny — nie wymaga potwierdzenia.
+        ${t('substitutionAssigned.infoOnly')}
       </p>
     `),
   });
@@ -714,6 +780,7 @@ async function sendSubstitutionAssigned({
 
 async function sendProjectTaskAssigned({
   to,
+  locale,
   assigneeName,
   assignerName,
   projectId,
@@ -723,44 +790,38 @@ async function sendProjectTaskAssigned({
   taskName,
   endDate,
 }) {
+  const t = emailTexts(locale);
   const url = `${BASE_URL}/projects/${projectId}?task=${taskId}`;
 
-  await sendMail({
+  await module.exports.sendMail({
     to,
-    subject: `[CRMtree] Nowe zadanie w projekcie: ${taskLabel} ${taskName}`,
-    html: template(`
-      <h2>Przypisano Ci zadanie w projekcie</h2>
-      <p>Cześć ${escapeHtml(assigneeName)},</p>
-      <p>Użytkownik <strong>${escapeHtml(assignerName)}</strong> przypisał Ci zadanie:</p>
+    subject: t('projectTaskAssigned.subject', { taskLabel, taskName }),
+    html: template(locale, `
+      <h2>${t('projectTaskAssigned.heading')}</h2>
+      <p>${t('common.greeting', { name: escapeHtml(assigneeName) })}</p>
+      <p>${t('projectTaskAssigned.intro', { assignerName: escapeHtml(assignerName) })}</p>
       <div class="info-box">
         <div class="info-row">
-          <span class="info-label">Projekt</span>
+          <span class="info-label">${t('labels.project')}</span>
           <span class="info-val">${escapeHtml(projectName)}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Zadanie</span>
+          <span class="info-label">${t('labels.task')}</span>
           <span class="info-val">${escapeHtml(taskLabel)} ${escapeHtml(taskName)}</span>
         </div>
         ${endDate ? `<div class="info-row">
-          <span class="info-label">Termin</span>
+          <span class="info-label">${t('labels.dueDate')}</span>
           <span class="info-val">${escapeHtml(endDate)}</span>
         </div>` : ''}
       </div>
-      <a href="${url}" class="btn">Otwórz zadanie →</a>
+      <a href="${url}" class="btn">${t('common.openTask')}</a>
     `),
   });
 }
 
-const PROJECT_REMINDER_LABELS = {
-  at_due:      'W dniu terminu',
-  '1d_before': '1 dzień przed terminem',
-  '2d_before': '2 dni przed terminem',
-  '3d_before': '3 dni przed terminem',
-  custom:      'Własna data przypomnienia',
-};
-
 async function sendProjectTaskReminder({
   to,
+  locale,
   recipientName,
   projectId,
   projectName,
@@ -771,40 +832,249 @@ async function sendProjectTaskReminder({
   reminderType,
 }) {
   if (!to) return;
-  const url = `${BASE_URL}/projects/${projectId}?task=${taskId}`;
-  const reminderLabel = PROJECT_REMINDER_LABELS[reminderType] || '';
 
-  await sendMail({
+  const t = emailTexts(locale);
+  const url = `${BASE_URL}/projects/${projectId}?task=${taskId}`;
+  const reminder = reminderLabel(t, reminderType, 'projectAtDue');
+
+  await module.exports.sendMail({
     to,
-    subject: `[CRMtree] ⏰ Przypomnienie: ${taskLabel} ${taskName}`,
-    html: template(`
-      <h2>⏰ Przypomnienie o zadaniu w projekcie</h2>
-      <p>Cześć ${escapeHtml(recipientName || '')},</p>
-      <p>Masz zadanie wymagające uwagi:</p>
+    subject: t('projectTaskReminder.subject', { taskLabel, taskName }),
+    html: template(locale, `
+      <h2>${t('projectTaskReminder.heading')}</h2>
+      <p>${t('common.greeting', { name: escapeHtml(recipientName || '') })}</p>
+      <p>${t('projectTaskReminder.intro')}</p>
       <div class="info-box">
         <div class="info-row">
-          <span class="info-label">Projekt</span>
+          <span class="info-label">${t('labels.project')}</span>
           <span class="info-val">${escapeHtml(projectName)}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Zadanie</span>
+          <span class="info-label">${t('labels.task')}</span>
           <span class="info-val"><strong>${escapeHtml(taskLabel)} ${escapeHtml(taskName)}</strong></span>
         </div>
         <div class="info-row">
-          <span class="info-label">Termin</span>
+          <span class="info-label">${t('labels.dueDate')}</span>
           <span class="info-val">${escapeHtml(endDate || '—')}</span>
         </div>
-        ${reminderLabel ? `<div class="info-row">
-          <span class="info-label">Przypomnienie</span>
-          <span class="info-val">${reminderLabel}</span>
+        ${reminder ? `<div class="info-row">
+          <span class="info-label">${t('labels.reminder')}</span>
+          <span class="info-val">${reminder}</span>
         </div>` : ''}
       </div>
-      <a href="${url}" target="_blank" class="btn">Otwórz zadanie →</a>
+      <a href="${url}" target="_blank" class="btn">${t('common.openTask')}</a>
+    `),
+  });
+}
+
+// ─── Project deadline mails (sent by projectDeadlineNotificationService) ─────
+
+const projectTaskUrl = (projectId, taskId) => `${BASE_URL}/projects/${projectId}?task=${taskId}`;
+const projectUrl = (projectId) => `${BASE_URL}/projects/${projectId}`;
+
+/**
+ * Somebody other than the receiving PM changed the end date of a task.
+ */
+async function sendProjectTaskEndDateChanged({
+  to,
+  locale,
+  recipientName,
+  changedByName,
+  projectId,
+  projectName,
+  taskId,
+  taskLabel,        // e.g. "WSC-12"
+  taskName,
+  previousEndDate,  // "YYYY-MM-DD" or null
+  newEndDate,       // "YYYY-MM-DD" or null
+  originalEndDate,  // "YYYY-MM-DD" or null
+  slipDays,         // new end date − original, in days; null when equal or unknown
+  reason,
+}) {
+  if (!to) return;
+
+  const t = emailTexts(locale);
+  const formatDay = (day) => (day ? formatDateOnly(locale, day) : t('projectEndDateChanged.noDate'));
+  const slip = slipDays
+    ? t(slipDays > 0 ? 'projectEndDateChanged.slipLater' : 'projectEndDateChanged.slipEarlier', { count: Math.abs(slipDays) })
+    : '';
+
+  await module.exports.sendMail({
+    to,
+    subject: t('projectEndDateChanged.subject', { taskLabel, taskName }),
+    html: template(locale, `
+      <h2>${t('projectEndDateChanged.heading')}</h2>
+      <p>${t('common.greeting', { name: escapeHtml(recipientName || '') })}</p>
+      <p>${t('projectEndDateChanged.intro', { changedByName: escapeHtml(changedByName) })}</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">${t('labels.project')}</span>
+          <span class="info-val">${escapeHtml(projectName)}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('labels.task')}</span>
+          <span class="info-val"><strong>${escapeHtml(taskLabel)} ${escapeHtml(taskName)}</strong></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('projectEndDateChanged.dueDateChange')}</span>
+          <span class="info-val">${formatDay(previousEndDate)} → ${formatDay(newEndDate)}</span>
+        </div>
+        ${originalEndDate ? `<div class="info-row">
+          <span class="info-label">${t('projectEndDateChanged.originalDueDate')}</span>
+          <span class="info-val">${formatDay(originalEndDate)}${slip ? ` (${slip})` : ''}</span>
+        </div>` : ''}
+        ${reason ? `<div class="info-row">
+          <span class="info-label">${t('projectEndDateChanged.reason')}</span>
+          <span class="info-val">${htmlText(reason)}</span>
+        </div>` : ''}
+      </div>
+      <a href="${projectTaskUrl(projectId, taskId)}" class="btn">${t('common.openTask')}</a>
+    `),
+  });
+}
+
+/**
+ * A change made the project delayed: a not-done task now ends after the project's end date.
+ */
+async function sendProjectDelayed({
+  to,
+  locale,
+  recipientName,
+  projectId,
+  projectName,
+  projectEndDate,
+  tasksAfterEndCount,
+  latestTaskEndDate,
+  daysAfterEnd,
+}) {
+  if (!to) return;
+
+  const t = emailTexts(locale);
+
+  await module.exports.sendMail({
+    to,
+    subject: t('projectDelayed.subject', { projectName }),
+    html: template(locale, `
+      <h2>${t('projectDelayed.heading')}</h2>
+      <p>${t('common.greeting', { name: escapeHtml(recipientName || '') })}</p>
+      <p>${t('projectDelayed.intro')}</p>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">${t('labels.project')}</span>
+          <span class="info-val"><strong>${escapeHtml(projectName)}</strong></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('projectDelayed.projectEndDate')}</span>
+          <span class="info-val">${formatDateOnly(locale, projectEndDate)}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('projectDelayed.tasksAfterEnd')}</span>
+          <span class="info-val">${tasksAfterEndCount}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">${t('projectDelayed.latestTaskDueDate')}</span>
+          <span class="info-val">${formatDateOnly(locale, latestTaskEndDate)} (${t('projectDelayed.daysAfterEnd', { count: daysAfterEnd })})</span>
+        </div>
+      </div>
+      <a href="${projectUrl(projectId)}" class="btn">${t('projectDelayed.openProject')}</a>
+    `),
+  });
+}
+
+function deadlineSummaryTaskRow(t, locale, task, { showAssignees }) {
+  const details = [
+    t('projectDeadlineSummary.dueOn', { date: formatDateOnly(locale, task.end_date) }),
+    t('projectDeadlineSummary.daysOverdue', { count: task.days_overdue }),
+  ];
+  if (showAssignees) {
+    details.push(task.assignees.length
+      ? t('projectDeadlineSummary.assignees', {
+        names: escapeHtml(task.assignees.map((assignee) => assignee.display_name).join(', ')),
+      })
+      : t('projectDeadlineSummary.unassigned'));
+  }
+  const label = `${task.project.key}-${task.task_number}`;
+  return `<div style="padding:6px 0;border-bottom:1px solid #E4E4E7">
+    <a href="${projectTaskUrl(task.project.id, task.id)}" style="color:#18181B;font-weight:600;text-decoration:none">${escapeHtml(label)} ${escapeHtml(task.name)}</a>
+    ${task.is_new ? `<span class="badge badge-red">${t('projectDeadlineSummary.newBadge')}</span>` : ''}
+    <div style="color:#71717A;font-size:12px">${details.join(' · ')}</div>
+  </div>`;
+}
+
+function deadlineSummaryDelayReasons(t, locale, { project, delay }) {
+  const { delay_details: details } = delay;
+  const reasons = [];
+  if (delay.delay_reasons.includes('task_after_end')) {
+    reasons.push(t('projectDeadlineSummary.reasonTaskAfterEnd', {
+      count: details.tasks_after_end_count,
+      latestDate: formatDateOnly(locale, details.latest_task_end_date),
+      days: details.days_after_end,
+    }));
+  }
+  if (delay.delay_reasons.includes('end_passed')) {
+    const reason = t('projectDeadlineSummary.reasonEndPassed', {
+      date: formatDateOnly(locale, project.end_date),
+      days: details.days_past_end,
+      count: details.open_task_count,
+    });
+    // The end date passed today exactly when it was yesterday.
+    const isNew = details.days_past_end === 1;
+    reasons.push(isNew ? `${reason} <span class="badge badge-red">${t('projectDeadlineSummary.newBadge')}</span>` : reason);
+  }
+  return reasons;
+}
+
+/**
+ * Daily summary of overdue tasks and delayed projects, one mail per person:
+ * `ownTasks` — overdue tasks assigned to the recipient; `managedProjects` —
+ * for a PM, the projects they run that have overdue tasks or are delayed.
+ * Either part may be empty; tasks arrive with the ones that became overdue
+ * today first.
+ */
+async function sendProjectDeadlineSummary({ to, locale, recipientName, date, ownTasks, managedProjects }) {
+  if (!to) return;
+
+  const t = emailTexts(locale);
+  const formattedDate = formatDateOnly(locale, date);
+  const sectionHeading = (text) => `<h3 style="margin:20px 0 6px;font-size:15px;color:#18181B">${text}</h3>`;
+  const projectHeading = (project) => `<p style="margin:12px 0 2px"><a href="${projectUrl(project.id)}" style="color:#2F8F4D;font-weight:600;text-decoration:none">${escapeHtml(project.name)}</a></p>`;
+
+  const projectsWithOverdueTasks = managedProjects.filter((report) => report.overdueTasks.length);
+  const delayedProjects = managedProjects.filter((report) => report.delay);
+
+  const ownSection = ownTasks.length ? `
+      ${sectionHeading(t('projectDeadlineSummary.ownTasksHeading'))}
+      ${ownTasks.map((task) => deadlineSummaryTaskRow(t, locale, task, { showAssignees: false })).join('')}` : '';
+  const managedSection = projectsWithOverdueTasks.length ? `
+      ${sectionHeading(t('projectDeadlineSummary.managedTasksHeading'))}
+      ${projectsWithOverdueTasks.map(({ project, overdueTasks }) => `
+        ${projectHeading(project)}
+        ${overdueTasks.map((task) => deadlineSummaryTaskRow(t, locale, { ...task, project }, { showAssignees: true })).join('')}`).join('')}` : '';
+  const delayedSection = delayedProjects.length ? `
+      ${sectionHeading(t('projectDeadlineSummary.delayedProjectsHeading'))}
+      ${delayedProjects.map((report) => `
+        ${projectHeading(report.project)}
+        ${deadlineSummaryDelayReasons(t, locale, report).map((reason) => `<div style="color:#71717A;font-size:12px;padding:2px 0">${reason}</div>`).join('')}`).join('')}` : '';
+
+  await module.exports.sendMail({
+    to,
+    subject: t('projectDeadlineSummary.subject', { date: formattedDate }),
+    html: template(locale, `
+      <h2>${t('projectDeadlineSummary.heading')}</h2>
+      <p>${t('common.greeting', { name: escapeHtml(recipientName || '') })}</p>
+      <p>${t('projectDeadlineSummary.intro', { date: formattedDate })}</p>
+      ${ownSection}${managedSection}${delayedSection}
+      <p style="color:#71717A;font-size:12px;margin-top:20px">
+        ${t('projectDeadlineSummary.settingsHint')}
+      </p>
     `),
   });
 }
 
 module.exports = {
+  sendProjectTaskEndDateChanged,
+  sendProjectDelayed,
+  sendProjectDeadlineSummary,
   sendProjectTaskReminder,
   sendProjectTaskAssigned,
   sendMail,
@@ -815,6 +1085,7 @@ module.exports = {
   sendDocumentSigned,
   sendUserInvitation,
   sendCrmActivityAssigned,
+  sendCrmOwnerAssigned,
   sendActivityReminder,
   sendSubstitutionAssigned,
 };

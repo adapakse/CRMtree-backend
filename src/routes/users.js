@@ -26,12 +26,13 @@ const contactFieldRules = [
 ];
 
 // An external account may only take part in projects: no admin rights, no
-// CRM role, no creating projects. Returns the error message or null.
-function externalAccountConflict({ is_external, is_admin, crm_role, can_create_projects }) {
+// CRM role, no creating projects, no KSeF invoices. Returns the error message or null.
+function externalAccountConflict({ is_external, is_admin, crm_role, can_create_projects, can_view_ksef_invoices }) {
   if (!is_external) return null;
   if (is_admin || crm_role || can_create_projects) {
     return 'Konto zewnętrzne nie może być adminem, mieć roli CRM ani zakładać projektów';
   }
+  if (can_view_ksef_invoices) return 'An external account cannot be given access to KSeF invoices';
   return null;
 }
 
@@ -58,6 +59,7 @@ router.post(
     ...contactFieldRules,
     body('is_external').optional({ nullable: true }).isBoolean(),
     body('can_create_projects').optional({ nullable: true }).isBoolean(),
+    body('can_view_ksef_invoices').optional({ nullable: true }).isBoolean(),
   ],
   validate,
   async (req, res, next) => {
@@ -66,24 +68,30 @@ router.post(
       const { phone = null, company = null, department = null } = req.body;
       const is_external = req.body.is_external === true;
       const can_create_projects = req.body.can_create_projects === true;
+      const can_view_ksef_invoices = req.body.can_view_ksef_invoices === true;
 
-      const externalConflict = externalAccountConflict({ is_external, is_admin, crm_role, can_create_projects });
+      const externalConflict = externalAccountConflict({
+        is_external, is_admin, crm_role, can_create_projects, can_view_ksef_invoices,
+      });
       if (externalConflict) return res.status(400).json({ error: externalConflict });
 
       const { rows } = await db.query(
         `INSERT INTO users (email, first_name, last_name, is_active, is_admin, crm_role, tenant_id,
-                            phone, company, department, is_external, can_create_projects)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                            phone, company, department, is_external, can_create_projects,
+                            can_view_ksef_invoices)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING id, email, first_name, last_name, display_name, is_active, is_admin, crm_role, created_at,
-                   phone, company, department, is_external, can_create_projects`,
+                   phone, company, department, is_external, can_create_projects, can_view_ksef_invoices`,
         [email, first_name, last_name, is_active, is_admin, crm_role, req.tenantId,
-         phone, company, department, is_external, can_create_projects]
+         phone, company, department, is_external, can_create_projects, can_view_ksef_invoices]
       );
 
       await audit.log({
         user:       req.user,
         action:     'user_created',
-        afterState: { email, first_name, last_name, is_admin, crm_role, is_external, can_create_projects },
+        afterState: {
+          email, first_name, last_name, is_admin, crm_role, is_external, can_create_projects, can_view_ksef_invoices,
+        },
         ipAddress:  req.auditContext?.ipAddress,
       });
 
@@ -260,6 +268,7 @@ router.patch(
     ...contactFieldRules,
     body('is_external').optional().isBoolean(),
     body('can_create_projects').optional().isBoolean(),
+    body('can_view_ksef_invoices').optional().isBoolean(),
   ],
   validate,
   async (req, res, next) => {
@@ -279,6 +288,7 @@ router.patch(
         delete req.body.is_admin;
         delete req.body.is_external;
         delete req.body.can_create_projects;
+        delete req.body.can_view_ksef_invoices;
         if (req.body.crm_role === 'sales_manager' && before[0].crm_role !== 'sales_manager') {
           return res.status(403).json({ error: 'Only admin can assign sales_manager role' });
         }
@@ -288,7 +298,7 @@ router.patch(
 
       const allowed = [
         'email', 'first_name', 'last_name', 'is_active', 'is_admin', 'crm_role', // ★ crm_role
-        'phone', 'company', 'department', 'is_external', 'can_create_projects',
+        'phone', 'company', 'department', 'is_external', 'can_create_projects', 'can_view_ksef_invoices',
       ];
       const setClauses = [];
       const params = [];

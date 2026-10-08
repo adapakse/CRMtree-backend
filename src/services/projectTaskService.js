@@ -15,12 +15,20 @@
 //
 // Tasks are never deleted. History is kept in audit_logs, keyed by
 // metadata.task_id.
+//
+// Deadlines: every task carries computed deadline fields (rules in
+// projectDeadlineService). Two facts behind them are stored here:
+// original_end_date — the first end date the task ever had, never overwritten
+// — and completed_at, set while the task is in a "done" status.
 
 const db = require('../config/database');
 const logger = require('../utils/logger');
 const emailUtil = require('../utils/email');
+const pushService = require('./pushService');
+const { resolveLocale } = require('../config/locales');
 const projectService = require('./projectService');
 const projectConfigService = require('./projectConfigService');
+const projectDeadlineService = require('./projectDeadlineService');
 
 const CONTENT_FIELDS   = [
   'name', 'description', 'type_id', 'priority_id', 'start_date', 'end_date', 'custom_values',
@@ -29,7 +37,7 @@ const CONTENT_FIELDS   = [
 // A project task has a due date but no due time, so relative reminders are
 // sent at the hour the task is shown at in the calendar.
 const REMINDER_LOCAL_TIME = '09:00';
-const REMINDER_TIME_ZONE  = 'Europe/Warsaw';
+const REMINDER_TIME_ZONE  = projectDeadlineService.TIME_ZONE;
 const STRUCTURE_FIELDS = ['parent_task_id', 'assignee_ids'];
 const PARTICIPANT_ROLES = ['internal_participant', 'external_participant'];
 
@@ -38,11 +46,14 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const CURRENCY_RE = /^[A-Z]{3}$/;
 const HISTORY_LIMIT = 200;
 
-const TASK_SELECT = `
+// `today` and `onlyAssignedTo` are query placeholders — see taskDeadlineColumns.
+const taskSelect = (deadlinePlaceholders) => `
   SELECT t.id, t.project_id, t.task_number, t.name, t.description,
          t.type_id, t.status_id, t.priority_id, t.start_date, t.end_date,
          t.parent_task_id, t.custom_values, t.created_by, t.created_at, t.updated_at,
          t.reminder_type, t.reminder_at,
+         s.category AS status_category,
+         ${projectDeadlineService.taskDeadlineColumns(deadlinePlaceholders)},
          COALESCE((
            SELECT json_agg(json_build_object('user_id', u.id, 'display_name', u.display_name)
                            ORDER BY u.last_name, u.first_name)
@@ -50,7 +61,8 @@ const TASK_SELECT = `
            JOIN users u ON u.id = a.user_id
            WHERE a.task_id = t.id
          ), '[]'::json) AS assignees
-  FROM project_tasks t`;
+  FROM project_tasks t
+  JOIN project_task_statuses s ON s.id = t.status_id`;
 
 function httpError(status, message) {
   const err = new Error(message);
@@ -60,6 +72,11 @@ function httpError(status, message) {
 
 function seesOnlyAssignedTasks(actor) {
   return !actor.canManage && actor.membership?.role === 'external_participant';
+}
+
+// The user whose assignments limit what the actor may learn about subtasks.
+function subtaskViewerId(actor) {
+  return seesOnlyAssignedTasks(actor) ? actor.user.id : null;
 }
 
 function isAssignedTo(task, userId) {
@@ -97,16 +114,20 @@ async function listAllowedStatusIds(tenantId, task, actor) {
   return rows.map((row) => row.to_status_id);
 }
 
+// Every task of the project the actor may see, unpaged — the tree of the
+// project view is built from it. The filterable, paged lists are in
+// projectTaskListService.
 async function listTasks({ projectId, actor, onlyMine }) {
-  const params = [projectId];
+  const params = [projectId, projectDeadlineService.todayInWarsaw(), subtaskViewerId(actor)];
   let assignedCondition = '';
   if (onlyMine || seesOnlyAssignedTasks(actor)) {
     params.push(actor.user.id);
     assignedCondition = `AND EXISTS (SELECT 1 FROM project_task_assignees mine
-                                     WHERE mine.task_id = t.id AND mine.user_id = $2)`;
+                                     WHERE mine.task_id = t.id AND mine.user_id = $4)`;
   }
   const { rows } = await db.query(
-    `${TASK_SELECT} WHERE t.project_id = $1 ${assignedCondition} ORDER BY t.task_number`,
+    `${taskSelect({ today: '$2', onlyAssignedTo: '$3' })}
+     WHERE t.project_id = $1 ${assignedCondition} ORDER BY t.task_number`,
     params,
   );
   return rows;
@@ -115,7 +136,8 @@ async function listTasks({ projectId, actor, onlyMine }) {
 // Returns null when the task does not exist in the project or the actor may not see it.
 async function findVisibleTask({ projectId, taskId, actor }) {
   const { rows: [task] } = await db.query(
-    `${TASK_SELECT} WHERE t.id = $1 AND t.project_id = $2`, [taskId, projectId],
+    `${taskSelect({ today: '$3', onlyAssignedTo: '$4' })} WHERE t.id = $1 AND t.project_id = $2`,
+    [taskId, projectId, projectDeadlineService.todayInWarsaw(), subtaskViewerId(actor)],
   );
   if (!task) return null;
   if (seesOnlyAssignedTasks(actor) && !isAssignedTo(task, actor.user.id)) return null;
@@ -270,6 +292,19 @@ async function applyReminder(client, taskId, reminderType, customReminderAt) {
   );
 }
 
+// Keeps completed_at in step with the status: set when the task enters a
+// "done" status (a move between two done statuses keeps the first moment),
+// cleared when it leaves.
+async function syncCompletedAt(client, taskId) {
+  await client.query(
+    `UPDATE project_tasks t
+     SET completed_at = CASE WHEN s.category = 'done' THEN COALESCE(t.completed_at, now()) ELSE NULL END
+     FROM project_task_statuses s
+     WHERE s.id = t.status_id AND t.id = $1`,
+    [taskId],
+  );
+}
+
 async function replaceAssignees(client, tenantId, taskId, assigneeIds) {
   await client.query('DELETE FROM project_task_assignees WHERE task_id = $1', [taskId]);
   for (const userId of new Set(assigneeIds)) {
@@ -305,8 +340,8 @@ async function createTask({ tenantId, project, actor, input }) {
     const { rows: [created] } = await client.query(
       `INSERT INTO project_tasks
          (tenant_id, project_id, task_number, name, description, type_id, status_id, priority_id,
-          start_date, end_date, parent_task_id, custom_values, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
+          start_date, end_date, original_end_date, parent_task_id, custom_values, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, $10::date, $11, $12::jsonb, $13)
        RETURNING id`,
       [tenantId, project.id, counter.task_number, input.name, input.description || null,
        input.type_id || null, statusId, input.priority_id || null,
@@ -314,6 +349,7 @@ async function createTask({ tenantId, project, actor, input }) {
        JSON.stringify(customValues), actor.user.id],
     );
     await replaceAssignees(client, tenantId, created.id, assigneeIds);
+    await syncCompletedAt(client, created.id);
     if (input.reminder_type) await applyReminder(client, created.id, input.reminder_type, input.reminder_at);
     return created.id;
   });
@@ -388,8 +424,10 @@ async function updateTask({ tenantId, project, actor, taskId, changes }) {
 
   const changedFields = Object.keys(next);
   if (!changedFields.length && !assigneesChanged && !reminderNeedsRecalculation) {
-    return { task, before: null, after: null, addedAssigneeIds: [] };
+    return { task, before: null, after: null, addedAssigneeIds: [], endDateChangeReason: null };
   }
+  // A reason sent without an actual change of the end date has nothing to explain.
+  const endDateChangeReason = 'end_date' in next ? (changes.end_date_change_reason || '').trim() || null : null;
 
   await db.transaction(async (client) => {
     if (changedFields.length) {
@@ -403,6 +441,13 @@ async function updateTask({ tenantId, project, actor, taskId, changes }) {
         params,
       );
     }
+    if (next.end_date) {
+      await client.query(
+        'UPDATE project_tasks SET original_end_date = end_date WHERE id = $1 AND original_end_date IS NULL',
+        [taskId],
+      );
+    }
+    if ('status_id' in next) await syncCompletedAt(client, taskId);
     if (assigneesChanged) await replaceAssignees(client, tenantId, taskId, nextAssigneeIds);
     if (reminderNeedsRecalculation) {
       await applyReminder(client, taskId, nextReminderType, has('reminder_at') ? changes.reminder_at : task.reminder_at);
@@ -421,12 +466,13 @@ async function updateTask({ tenantId, project, actor, taskId, changes }) {
   }
   // The PM always sees the task; a participant keeps seeing it because only the PM changes assignees.
   const updated = await findVisibleTask({ projectId: project.id, taskId, actor });
-  return { task: updated, before, after, addedAssigneeIds };
+  return { task: updated, before, after, addedAssigneeIds, endDateChangeReason };
 }
 
 async function listTaskHistory({ tenantId, taskId }) {
   const { rows } = await db.query(
-    `SELECT id, user_name, action, before_state, after_state, created_at
+    `SELECT id, user_name, action, before_state, after_state, created_at,
+            metadata->>'end_date_change_reason' AS end_date_change_reason
      FROM audit_logs
      WHERE tenant_id = $1 AND metadata->>'task_id' = $2
      ORDER BY created_at DESC
@@ -440,12 +486,25 @@ async function listTaskHistory({ tenantId, taskId }) {
 async function notifyNewAssignees({ project, task, assigner, assigneeIds }) {
   const recipientIds = assigneeIds.filter((id) => id !== assigner.id);
   if (!recipientIds.length) return;
+  pushService.sendToUsers({
+    userIds: recipientIds,
+    kind: 'projectTaskAssigned',
+    params: {
+      taskLabel: `${project.key}-${task.task_number}`, taskName: task.name,
+      assignerName: assigner.display_name || assigner.email, projectName: project.name,
+    },
+    data: { source_type: 'project_task', project_id: project.id, task_id: task.id },
+  });
   try {
     const { rows: recipients } = await db.query(
-      'SELECT email, display_name FROM users WHERE id = ANY($1::uuid[]) AND is_active', [recipientIds],
+      `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+       FROM users u
+       LEFT JOIN tenants t ON t.id = u.tenant_id
+       WHERE u.id = ANY($1::uuid[]) AND u.is_active`, [recipientIds],
     );
     await Promise.all(recipients.map((recipient) => emailUtil.sendProjectTaskAssigned({
       to: recipient.email,
+      locale: resolveLocale({ userLocale: recipient.user_locale, tenantDefaultLocale: recipient.tenant_default_locale }),
       assigneeName: recipient.display_name,
       assignerName: assigner.display_name,
       projectId: project.id,
@@ -461,6 +520,8 @@ async function notifyNewAssignees({ project, task, assigner, assigneeIds }) {
 }
 
 module.exports = {
+  REMINDER_LOCAL_TIME,
+  seesOnlyAssignedTasks,
   listTasks,
   getTask,
   createTask,

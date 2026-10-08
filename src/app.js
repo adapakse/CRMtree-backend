@@ -32,11 +32,16 @@ const adminProspectsRoutes        = require('./routes/admin-prospects');
 const crmProspectsDashboardRoutes = require('./routes/crm-prospects-dashboard');
 const projectRoutes            = require('./routes/projects');
 const projectTaskRoutes        = require('./routes/project-tasks');
+const projectFinanceRoutes     = require('./routes/project-finance');
+const projectPortfolioRoutes   = require('./routes/project-portfolio');
 const adminProjectConfigRoutes = require('./routes/admin-project-config');
+const adminKsefRoutes          = require('./routes/admin-ksef');
+const ksefRoutes               = require('./routes/ksef');
 const profileRoutes       = require('./routes/profile');
 const crmGmail 		  = require('./routes/crm-gmail');
 const crmOutlook      = require('./routes/crm-outlook');
 const crmZoho         = require('./routes/crm-zoho');
+const crmYandex       = require('./routes/crm-yandex');
 const crmEmail        = require('./routes/crm-email');
 const crmWhatsapp     = require('./routes/crm-whatsapp');
 const pbxRoutes       = require('./routes/pbx');
@@ -51,6 +56,7 @@ const openapiRoutes = require('./routes/openapi');
 // ── CRM Routes ────────────────────────────────────────────── ★ DODANE
 const crmLeadsRoutes        = require('./routes/crm-leads');
 const crmMobileRoutes = require('./routes/crm-mobile');
+const assistantRoutes = require('./routes/assistant');
 const crmPartnersRoutes     = require('./routes/crm-partners');
 const crmGroupsRoutes       = require('./routes/crm-groups');
 const crmSubstitutionsRoutes = require('./routes/crm-substitutions');
@@ -201,6 +207,7 @@ app.use('/api/profile',         profileRoutes);
 app.use('/api/crm/gmail',   crmGmail);
 app.use('/api/crm/outlook', crmOutlook);
 app.use('/api/crm/zoho',    crmZoho);
+app.use('/api/crm/yandex',  crmYandex);
 app.use('/api/crm/email',   crmEmail);
 app.use('/api/crm/whatsapp', crmWhatsapp);
 app.use('/api/pbx',          pbxRoutes);
@@ -214,6 +221,7 @@ app.use('/api/documents/:documentId/attachments', attachmentRoutes);
 
 // ── CRM API Routes ────────────────────────────────────────── ★ DODANE
 app.use('/api/crm/mobile',       crmMobileRoutes);
+app.use('/api/assistant',        assistantRoutes);
 app.use('/api/crm/leads',        crmLeadsRoutes);
 app.use('/api/crm/partners',     crmPartnersRoutes);
 app.use('/api/crm/groups',       crmGroupsRoutes);
@@ -229,9 +237,14 @@ app.use('/api/crm/consents',     crmConsentsRoutes);
 app.use('/api/crm/seo',          crmSeoRoutes);
 app.use('/api/crm/prospects-dashboard', crmProspectsDashboardRoutes);
 
+// Before the /:id routers, which would read "portfolio" as a project id.
+app.use('/api/projects/portfolio',   projectPortfolioRoutes);
 app.use('/api/projects/:id/tasks',   projectTaskRoutes);
+app.use('/api/projects/:id/finance', projectFinanceRoutes);
 app.use('/api/projects',             projectRoutes);
 app.use('/api/admin/project-config', adminProjectConfigRoutes);
+app.use('/api/admin/ksef',           adminKsefRoutes);
+app.use('/api/ksef',                 ksefRoutes);
 
 // ─── Workflow global endpoints ─────────────────────────────
 const { requireAuth } = require('./middleware/auth');
@@ -331,6 +344,9 @@ app.get('/api/workflow/kanban-docs', requireAuth, injectAuditContext, async (req
 
     const { rows } = await db.query(
       `SELECT d.id, d.doc_number, d.name, d.status, d.expiration_date,
+              d.doc_type, d.payment_status,
+              (d.doc_type = 'invoice' AND d.expiration_date < CURRENT_DATE
+                AND COALESCE(d.payment_status, '') <> 'paid') AS is_payment_overdue,
               d.owner_id, u.display_name AS owner_name,
               gp.name AS group_name, gp.display_name AS group_display,
               (SELECT COUNT(*)

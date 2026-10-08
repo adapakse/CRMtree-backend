@@ -1,0 +1,195 @@
+{
+  "absenceReasons": {
+    "other": "Altra assenza",
+    "sickLeave": "Malattia",
+    "vacation": "Ferie"
+  },
+  "activityReminder": {
+    "heading": "⏰ Promemoria attività",
+    "intro": "Hai un’attività in arrivo che richiede la tua attenzione:",
+    "linkHint": "Il link si apre in una nuova finestra del browser. Se hai già effettuato l’accesso, non dovrai accedere di nuovo.",
+    "subject": "[CRMtree] ⏰ Promemoria: {activityType} — {activityTitle}"
+  },
+  "activityTypes": {
+    "call": "Chiamata",
+    "docSent": "Documento",
+    "email": "E-mail",
+    "meeting": "Riunione",
+    "note": "Nota",
+    "opportunity": "Opportunità",
+    "qbr": "QBR",
+    "task": "Attività",
+    "training": "Formazione"
+  },
+  "common": {
+    "automaticAssigner": "CRMtree (automatico)",
+    "greeting": "Ciao {name},",
+    "openDocument": "Apri documento →",
+    "openLead": "Apri lead →",
+    "openPartner": "Apri partner →",
+    "openTask": "Apri attività →"
+  },
+  "crmActivityAssigned": {
+    "calendarHint": "Puoi vedere le tue attività nella vista <strong>Calendario azioni → Attività</strong>.",
+    "heading": "Ti è stata assegnata una nuova attività CRM",
+    "intro": "<strong>{assignerName}</strong> ti ha assegnato un’azione:",
+    "subject": "[CRMtree] Nuova attività CRM: {activityTitle}"
+  },
+  "crmOwnerAssigned": {
+    "headingLead": "Ti è stato assegnato un lead",
+    "headingPartner": "Ti è stato assegnato un partner",
+    "introLead": "<strong>{assignerName}</strong> ti ha assegnato un lead:",
+    "introPartner": "<strong>{assignerName}</strong> ti ha assegnato un partner:",
+    "subjectLead": "[CRMtree] Nuovo lead: {sourceName}",
+    "subjectPartner": "[CRMtree] Nuovo partner: {sourceName}"
+  },
+  "documentSigned": {
+    "heading": "Il documento è stato firmato",
+    "intro": "Il documento <strong>{documentName}</strong> è stato firmato elettronicamente.",
+    "signedBy": "Firmato da",
+    "signedStatus": "Firmato ✓",
+    "subject": "[CRMtree] Documento firmato: {documentName}"
+  },
+  "documentStatusChanged": {
+    "changedBy": "Modificato da",
+    "heading": "Lo stato del documento è cambiato",
+    "intro": "Un documento a cui hai accesso ha cambiato stato:",
+    "newStatus": "Nuovo stato",
+    "previousStatus": "Stato precedente",
+    "subject": "[CRMtree] Stato del documento cambiato: {documentName}"
+  },
+  "documentStatuses": {
+    "beingApproved": "In approvazione",
+    "beingEdited": "In modifica",
+    "beingSigned": "In firma",
+    "completed": "Completato",
+    "hold": "In sospeso",
+    "new": "Nuovo",
+    "rejected": "Rifiutato",
+    "signed": "Firmato"
+  },
+  "documentTaskTypes": {
+    "approve": "Da approvare",
+    "edit": "Da modificare",
+    "read": "Da leggere",
+    "sign": "Da firmare"
+  },
+  "labels": {
+    "activityDate": "Data e ora",
+    "assigner": "Assegnata da",
+    "comment": "Commento",
+    "document": "Documento",
+    "dueDate": "Scadenza",
+    "lead": "Lead",
+    "number": "Numero",
+    "partner": "Partner",
+    "project": "Progetto",
+    "reminder": "Promemoria",
+    "status": "Stato",
+    "task": "Attività",
+    "taskType": "Tipo di attività",
+    "title": "Titolo",
+    "type": "Tipo"
+  },
+  "layout": {
+    "footerAutomatic": "Questo messaggio è stato generato automaticamente da CRMtree.",
+    "footerNoReply": "Non rispondere a questa e-mail — questa casella non è monitorata."
+  },
+  "projectDeadlineSummary": {
+    "assignees": "assegnata a: {names}",
+    "daysOverdue": "{count, plural, one {# giorno di ritardo} other {# giorni di ritardo}}",
+    "delayedProjectsHeading": "Progetti in ritardo",
+    "dueOn": "scadenza: {date}",
+    "heading": "Attività scadute",
+    "intro": "Situazione al {date}:",
+    "managedTasksHeading": "Attività scadute nei tuoi progetti",
+    "newBadge": "nuovo",
+    "ownTasksHeading": "Le tue attività scadute",
+    "reasonEndPassed": "La data di fine del progetto è passata il {date} ({days, plural, one {# giorno} other {# giorni}} fa) e le attività non completate sono: {count}.",
+    "reasonTaskAfterEnd": "Attività non completate con scadenza successiva alla fine del progetto: {count}. Scadenza più lontana: {latestDate} ({days, plural, one {# giorno} other {# giorni}} dopo la fine del progetto).",
+    "settingsHint": "Puoi disattivare le notifiche sulle scadenze dei progetti nella sezione «Le mie impostazioni».",
+    "subject": "[CRMtree] Attività scadute — {date}",
+    "unassigned": "non assegnata"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# giorno dopo la fine del progetto} other {# giorni dopo la fine del progetto}}",
+    "heading": "Il progetto è in ritardo",
+    "intro": "In un progetto di cui sei PM, un’attività non completata ha una scadenza successiva alla data di fine del progetto:",
+    "latestTaskDueDate": "Scadenza più lontana",
+    "openProject": "Apri progetto →",
+    "projectEndDate": "Fine del progetto",
+    "subject": "[CRMtree] Progetto in ritardo: {projectName}",
+    "tasksAfterEnd": "Attività dopo la fine del progetto"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Scadenza",
+    "heading": "Scadenza dell’attività modificata",
+    "intro": "<strong>{changedByName}</strong> ha modificato la scadenza di un’attività in un progetto di cui sei PM:",
+    "noDate": "nessuna",
+    "originalDueDate": "Scadenza originaria",
+    "reason": "Motivo della modifica",
+    "slipEarlier": "{count, plural, one {# giorno prima} other {# giorni prima}}",
+    "slipLater": "{count, plural, one {# giorno dopo} other {# giorni dopo}}",
+    "subject": "[CRMtree] Scadenza dell’attività modificata: {taskLabel} {taskName}"
+  },
+  "projectTaskAssigned": {
+    "heading": "Ti è stata assegnata un’attività in un progetto",
+    "intro": "<strong>{assignerName}</strong> ti ha assegnato un’attività:",
+    "subject": "[CRMtree] Nuova attività nel progetto: {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "heading": "⏰ Promemoria attività di progetto",
+    "intro": "Hai un’attività che richiede la tua attenzione:",
+    "subject": "[CRMtree] ⏰ Promemoria: {taskLabel} {taskName}"
+  },
+  "reminderTypes": {
+    "activityAtDue": "All’ora prevista",
+    "custom": "Data di promemoria personalizzata",
+    "daysBefore": "{count, plural, one {# giorno prima della scadenza} other {# giorni prima della scadenza}}",
+    "projectAtDue": "Il giorno della scadenza"
+  },
+  "substitutionAssigned": {
+    "absentPerson": "Persona assente",
+    "from": "Dal",
+    "heading": "Ti è stata affidata una sostituzione",
+    "infoOnly": "Questa notifica ha scopo puramente informativo — non richiede conferma.",
+    "intro": "<strong>{assignerName}</strong> ti ha affidato la sostituzione di <strong>{absentName}</strong> durante l’assenza. Per tutta la sua durata hai lo stesso accesso ai lead e ai partner di questa persona che ha il commerciale a cui sono assegnati.",
+    "note": "Nota",
+    "openCrm": "Apri CRM →",
+    "reason": "Motivo",
+    "subject": "[CRMtree] Sostituzione di {absentName} ({startsOn}–{endsOn})",
+    "toInclusive": "Al (incluso)"
+  },
+  "taskAssigned": {
+    "heading": "Hai una nuova attività da svolgere",
+    "intro": "<strong>{assignerName}</strong> ti ha assegnato un’attività relativa al documento:",
+    "subject": "[CRMtree] Nuova attività: {documentName}"
+  },
+  "taskCompleted": {
+    "completedBy": "Completata da",
+    "heading": "L’attività è stata completata",
+    "intro": {
+      "approve": "<strong>{completedByName}</strong> ha approvato il documento <strong>{documentName}</strong>.",
+      "edit": "<strong>{completedByName}</strong> ha modificato il documento <strong>{documentName}</strong>.",
+      "other": "<strong>{completedByName}</strong> ha completato un’attività relativa al documento <strong>{documentName}</strong>.",
+      "read": "<strong>{completedByName}</strong> ha letto il documento <strong>{documentName}</strong>.",
+      "sign": "<strong>{completedByName}</strong> ha firmato il documento <strong>{documentName}</strong>."
+    },
+    "subject": "[CRMtree] Attività completata: {documentName}"
+  },
+  "taskRejected": {
+    "heading": "L’attività è stata rifiutata",
+    "intro": "<strong>{rejectedByName}</strong> ha rifiutato l’attività relativa al documento <strong>{documentName}</strong>.",
+    "reason": "Motivo del rifiuto",
+    "rejectedBy": "Rifiutata da",
+    "subject": "[CRMtree] Attività rifiutata: {documentName}"
+  },
+  "userInvitation": {
+    "heading": "Ti diamo il benvenuto in CRMtree!",
+    "ignoreHint": "Se non ti aspettavi questo messaggio, puoi ignorarlo.",
+    "intro": "<strong>{invitedByName}</strong> ha creato per te un account in <strong>CRMtree</strong>.",
+    "loginHint": "Puoi accedere con il tuo account Google Workspace (<strong>{email}</strong>) tramite il link qui sotto:",
+    "signIn": "Accedi →",
+    "subject": "[CRMtree] Invito a CRMtree"
+  }
+}

@@ -4,11 +4,15 @@
 // Projects module — available to every authenticated user of a tenant with
 // the `projects` feature, independent of CRM roles.
 //
-// GET    /api/projects/config                    — dictionaries, transitions, field definitions
-// GET    /api/projects                           — projects the user is a member of (admin: all)
+// GET    /api/projects/config                    — dictionaries, transitions, field definitions,
+//                                                  at-risk threshold, has_cross_project_view
+// GET    /api/projects                           — projects the user is a member of (admin: all), paged,
+//                                                  filtered and sorted (middleware/project-list-query);
+//                                                  finance totals for PM / admin / controller;
+//                                                  can_create, can_filter_finance
 // POST   /api/projects                           — create (admin or users.can_create_projects)
-// GET    /api/projects/:id                       — project card: project, members, fields
-// PATCH  /api/projects/:id                       — name / description / partner
+// GET    /api/projects/:id                       — project card: project (with its delay), members, fields
+// PATCH  /api/projects/:id                       — name / description / start and end date
 // POST   /api/projects/:id/close | /reopen
 // GET    /api/projects/:id/member-candidates     — tenant users not yet in the project
 // POST   /api/projects/:id/members
@@ -16,7 +20,9 @@
 // DELETE /api/projects/:id/members/:userId
 // PUT    /api/projects/:id/fields                — custom fields attached to the project
 // PUT    /api/projects/:id/crm-link              — link to one lead or one partner (or unlink)
-// GET    /api/projects/assigned-tasks            — open project tasks assigned to me / to given people
+// GET    /api/projects/assigned-tasks            — open project tasks assigned to me / to given people,
+//                                                  whole set (feed of the CRM calendar and dashboard)
+// GET    /api/projects/my-tasks                  — tasks assigned to me: paged, filtered, sorted
 // GET    /api/projects/:id/messages              — general project chat
 // POST   /api/projects/:id/messages
 
@@ -27,13 +33,22 @@ const { requireAuth } = require('../middleware/auth');
 const { requireFeature, loadCrmScope } = require('../middleware/crm-rbac');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { loadProject, requireProjectManager, requireOpenProject } = require('../middleware/project-access');
+const {
+  taskListRules, readTaskFilters, projectListRules, readProjectFilters, readPagingAndSort,
+} = require('../middleware/project-list-query');
 const projectConfigService = require('../services/projectConfigService');
 const projectService = require('../services/projectService');
 const projectMessageService = require('../services/projectMessageService');
 const projectCrmLinkService = require('../services/projectCrmLinkService');
+const projectFinanceService = require('../services/projectFinanceService');
+const projectDeadlineService = require('../services/projectDeadlineService');
+const projectDeadlineNotificationService = require('../services/projectDeadlineNotificationService');
+const projectPortfolioService = require('../services/projectPortfolioService');
+const projectTaskListService = require('../services/projectTaskListService');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isAnyUUID = (field) => field.matches(UUID_RE).withMessage('Invalid UUID');
+const isDateOnly = (field) => field.isISO8601({ strict: true }).isLength({ min: 10, max: 10 });
 
 router.use(requireAuth, injectAuditContext, requireFeature('projects'));
 
@@ -58,7 +73,11 @@ const projectId = isAnyUUID(param('id'));
 
 router.get('/config', async (req, res, next) => {
   try {
-    res.json(await projectConfigService.getConfig(req.tenantId));
+    const [config, hasCrossProjectView] = await Promise.all([
+      projectConfigService.getConfig(req.tenantId),
+      projectPortfolioService.hasAccess({ tenantId: req.tenantId, user: req.user }),
+    ]);
+    res.json({ ...config, has_cross_project_view: hasCrossProjectView });
   } catch (err) { next(err); }
 });
 
@@ -86,27 +105,57 @@ router.get(
 );
 
 router.get(
-  '/',
-  [query('status').optional().isIn(['open', 'closed', 'all'])],
+  '/my-tasks',
+  [query('include_done').optional().isBoolean().toBoolean(), ...taskListRules],
   validate,
   async (req, res, next) => {
     try {
-      const projects = await projectService.listProjects({
-        tenantId: req.tenantId, user: req.user, status: req.query.status || 'open',
-      });
-      res.json({
-        projects,
-        can_create: Boolean(req.user.is_admin || req.user.can_create_projects),
-      });
+      res.json(await projectTaskListService.searchTasks({
+        scope: projectTaskListService.myTasksScope({
+          tenantId: req.tenantId,
+          viewer: req.user,
+          includeDone: req.query.include_done === true,
+          isFinanceEnabled: await projectConfigService.isFinanceEnabled(req.tenantId),
+        }),
+        // "Assignee" has no meaning in a list of one's own tasks.
+        filters: { ...readTaskFilters(req), assignee: undefined },
+        ...readPagingAndSort(req),
+      }));
     } catch (err) { next(err); }
   },
 );
+
+router.get('/', projectListRules, validate, async (req, res, next) => {
+  try {
+    const filters = readProjectFilters(req);
+    const isFinanceEnabled = await projectConfigService.isFinanceEnabled(req.tenantId);
+    const page = await projectService.searchProjects({
+      tenantId: req.tenantId,
+      user: req.user,
+      isFinanceEnabled,
+      filters: { ...filters, status: filters.status || 'open' },
+      ...readPagingAndSort(req),
+    });
+    const [financeByProject, canFilterFinance] = await Promise.all([
+      projectFinanceService.loadTotalsForList({ tenantId: req.tenantId, user: req.user, projects: page.items }),
+      projectFinanceService.canReadAnyProjectFinance({ tenantId: req.tenantId, user: req.user, isFinanceEnabled }),
+    ]);
+    res.json({
+      ...page,
+      items: page.items.map((project) => ({ ...project, finance: financeByProject.get(project.id) ?? null })),
+      can_create: Boolean(req.user.is_admin || req.user.can_create_projects),
+      can_filter_finance: canFilterFinance,
+    });
+  } catch (err) { next(err); }
+});
 
 router.post(
   '/',
   [
     body('name').isString().trim().notEmpty().isLength({ max: 200 }),
     body('description').optional({ nullable: true }).isString().isLength({ max: 20000 }),
+    isDateOnly(body('start_date').optional({ nullable: true })),
+    isDateOnly(body('end_date').optional({ nullable: true })),
   ],
   validate,
   async (req, res, next) => {
@@ -119,6 +168,8 @@ router.post(
         user: req.user,
         name: req.body.name,
         description: req.body.description,
+        startDate: req.body.start_date,
+        endDate: req.body.end_date,
       });
       req.project = project;
       await logProjectEvent(req, 'project_created', { afterState: { name: project.name } });
@@ -129,17 +180,25 @@ router.post(
 
 router.get('/:id', [projectId], validate, loadProject, async (req, res, next) => {
   try {
-    const [members, fields] = await Promise.all([
+    const [members, fields, delay, finance] = await Promise.all([
       projectService.listMembers(req.project.id),
       projectService.listProjectFields(req.project.id),
+      projectDeadlineService.getProjectDelay(req.project.id),
+      projectFinanceService.describeAccess({
+        tenantId: req.tenantId,
+        project: req.project,
+        membership: req.projectMembership,
+        canManage: req.canManageProject,
+      }),
     ]);
     res.json({
-      project: req.project,
+      project: { ...req.project, ...delay },
       members,
       fields,
       my_role: req.projectMembership?.role ?? null,
       my_access_level: req.projectMembership?.access_level ?? null,
       can_manage: req.canManageProject,
+      finance,
     });
   } catch (err) { next(err); }
 });
@@ -150,22 +209,33 @@ router.patch(
     projectId,
     body('name').optional().isString().trim().notEmpty().isLength({ max: 200 }),
     body('description').optional({ nullable: true }).isString().isLength({ max: 20000 }),
+    isDateOnly(body('start_date').optional({ nullable: true })),
+    isDateOnly(body('end_date').optional({ nullable: true })),
   ],
   validate,
   loadProject, requireProjectManager, requireOpenProject,
   async (req, res, next) => {
     try {
+      const isEndDateChange = req.body.end_date !== undefined && req.body.end_date !== req.project.end_date;
+      const delayBefore = isEndDateChange ? await projectDeadlineService.getProjectDelay(req.project.id) : null;
       const project = await projectService.updateProject({
-        tenantId: req.tenantId, projectId: req.project.id, changes: req.body,
+        tenantId: req.tenantId, project: req.project, changes: req.body,
       });
+      const stateOf = (source) =>
+        Object.fromEntries(projectService.EDITABLE_PROJECT_FIELDS.map((field) => [field, source[field]]));
       await logProjectEvent(req, 'project_updated', {
-        beforeState: { name: req.project.name, description: req.project.description },
-        afterState: { name: project.name, description: project.description },
+        beforeState: stateOf(req.project), afterState: stateOf(project),
       });
+      if (delayBefore) {
+        await projectDeadlineNotificationService.notifyIfProjectBecameDelayed({
+          project, wasDelayed: delayBefore.is_delayed,
+        });
+      }
       res.json(project);
     } catch (err) { sendServiceError(err, res, next); }
   },
 );
+
 
 function statusChangeHandler(status, action) {
   return async (req, res, next) => {

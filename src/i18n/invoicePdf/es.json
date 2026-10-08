@@ -1,0 +1,50 @@
+{
+  "address": "Dirección",
+  "buyer": "Comprador",
+  "footer": "Generado en CRMtree el {date} a partir de los datos descargados de KSeF.",
+  "issueDate": "Fecha de emisión",
+  "ksefNumber": "Número KSeF",
+  "lines": {
+    "empty": "Los datos de la factura no contienen líneas.",
+    "name": "Descripción del bien o servicio",
+    "netAmount": "Importe neto",
+    "number": "N.º",
+    "quantity": "Cantidad",
+    "unit": "Ud.",
+    "unitNetPrice": "Precio unit. neto",
+    "vatRate": "Tipo de IVA"
+  },
+  "notice": {
+    "body": "Este documento es una visualización de los datos de la factura descargados del Sistema Nacional de Facturación Electrónica de Polonia (KSeF). No es el documento original: el original es la factura estructurada almacenada en KSeF.",
+    "title": "Visualización de una factura de KSeF – no es el documento original"
+  },
+  "payment": {
+    "amountDue": "A pagar",
+    "bankAccount": "Cuenta bancaria",
+    "dueDate": "Fecha de vencimiento",
+    "form": "Forma de pago",
+    "paid": "Pagado",
+    "paidPartially": "parcialmente",
+    "paidYes": "sí",
+    "paymentDate": "Fecha de pago",
+    "title": "Pago"
+  },
+  "paymentForm": {
+    "card": "tarjeta",
+    "cash": "efectivo",
+    "cheque": "cheque",
+    "credit": "crédito",
+    "mobile": "pago móvil",
+    "transfer": "transferencia",
+    "voucher": "vale"
+  },
+  "saleDate": "Fecha de venta",
+  "seller": "Vendedor",
+  "taxId": "NIF (NIP)",
+  "title": "Factura {invoiceNumber}",
+  "totals": {
+    "gross": "Total bruto",
+    "net": "Total neto",
+    "vat": "Total IVA"
+  }
+}

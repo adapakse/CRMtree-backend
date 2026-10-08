@@ -1,0 +1,13 @@
+{
+  "activity": {
+    "body": "Što da zapišem?",
+    "company": "O kojoj je tvrtki riječ?",
+    "companyNotFound": "Nisam pronašao tvrtku „{name}”. Navedite njezin naziv drugačije.",
+    "reminder": "Trebam li postaviti podsjetnik i, ako da, koliko ranije?",
+    "title": "O čemu se radi?",
+    "when": "Do kada?"
+  },
+  "projectTask": {
+    "name": "O čemu je zadatak?"
+  }
+}

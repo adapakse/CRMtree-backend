@@ -1,0 +1,13 @@
+{
+  "activity": {
+    "body": "Co mam zapisać?",
+    "company": "Której firmy to dotyczy?",
+    "companyNotFound": "Nie znalazłem firmy „{name}”. Podaj jej nazwę inaczej.",
+    "reminder": "Czy ustawić przypomnienie, a jeśli tak, to ile wcześniej?",
+    "title": "Czego ma dotyczyć?",
+    "when": "Na kiedy?"
+  },
+  "projectTask": {
+    "name": "Czego ma dotyczyć zadanie?"
+  }
+}

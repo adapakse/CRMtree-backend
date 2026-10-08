@@ -50,7 +50,7 @@ const PARTNER_AGENDA = { activityTable: 'crm_partner_activities', parentTable: '
 // (past "new", not closed, not on hold) and the budget is met by leads won in
 // the month. Only the person's own leads count, never the team's.
 async function loadMonthKpis({ tenantId, userId, monthStart, monthEnd }) {
-  const rates = await salesMetrics.loadExchangeRates(tenantId);
+  const rates = await salesMetrics.loadExchangeRates();
   const valuePln = salesMetrics.leadValuePlnSql(rates);
   // The middle of the range is inside the month in every time zone.
   const midMonth = new Date((new Date(monthStart).getTime() + new Date(monthEnd).getTime()) / 2);
@@ -137,6 +137,116 @@ router.get('/today',
         overdue: [...leadOverdue.rows, ...partnerOverdue.rows].sort(byActivityTime),
         attention: attention.rows.map(({ updated_at: _updatedAt, ...lead }) => lead),
         kpis,
+      });
+    } catch (err) { next(err); }
+  },
+);
+
+const DASHBOARD_PERIOD_DAYS = [7, 30, 90];
+const FUNNEL_STAGES = ['new', 'qualification', 'presentation', 'offer', 'negotiation'];
+const DAY_MS = 86400000;
+
+// Whose leads the dashboard counts: everyone the person may see (their own
+// for a salesperson, the team for a manager, null = the whole company for an
+// admin), or the one salesperson it was narrowed to. A manager may name any
+// salesperson, as in the web lists (crmScope); for anyone else undefined
+// when that salesperson is outside their scope.
+function dashboardOwnerIds(req) {
+  const scope = req.crmScopeUserIds;
+  const requested = req.query.assigned_to;
+  if (!requested) return scope;
+  const isManager = req.user.crm_role === 'sales_manager';
+  if (scope && !scope.includes(requested) && !isManager) return undefined;
+  return [requested];
+}
+
+// ── GET /api/crm/mobile/dashboard ─────────────────────────────────
+// The sales dashboard: figures, the funnel and the sales chart, all counted
+// here so the phone never downloads the lead list to add it up. Definitions
+// follow "Moje wyniki" above: values in PLN at today's rates, a lead on hold
+// is not in the pipeline, and a lead is won on the day it was last changed
+// in the "won" stage. The app sends the bounds of its local week, month and
+// chart period.
+router.get('/dashboard',
+  [
+    query('week_start').isISO8601(),
+    query('week_end').isISO8601(),
+    query('month_start').isISO8601(),
+    query('month_end').isISO8601(),
+    query('period_end').isISO8601(),
+    query('period_days').isIn(DASHBOARD_PERIOD_DAYS.map(String)),
+    query('assigned_to').optional().isUUID(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const ownerIds = dashboardOwnerIds(req);
+      if (ownerIds === undefined) return res.status(403).json({ error: 'Brak dostępu do danych tego handlowca.' });
+
+      const periodDays = Number(req.query.period_days);
+      const rates = await salesMetrics.loadExchangeRates();
+      const valuePln = salesMetrics.leadValuePlnSql(rates);
+      const mine = "l.tenant_id = $1 AND ($2::uuid[] IS NULL OR l.assigned_to = ANY($2::uuid[])) AND l.stage <> 'archived'";
+      const base = [req.tenantId, ownerIds];
+      const thisWeek = 'l.created_at >= $3 AND l.created_at < $4';
+      const previousWeek = "l.created_at >= $3::timestamptz - INTERVAL '7 days' AND l.created_at < $3";
+      const active = "l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active";
+      const wonInMonth = "l.stage = 'closed_won' AND l.updated_at >= $5 AND l.updated_at < $6";
+
+      const [kpis, funnel, won] = await Promise.all([
+        db.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE ${thisWeek})::int                                        AS new_leads,
+            COUNT(*) FILTER (WHERE ${previousWeek})::int                                    AS new_leads_previous,
+            COALESCE(ROUND(SUM(${valuePln}) FILTER (WHERE ${thisWeek})), 0)::float          AS new_leads_value_pln,
+            COALESCE(ROUND(SUM(${valuePln}) FILTER (WHERE ${previousWeek})), 0)::float      AS new_leads_value_previous_pln,
+            COUNT(*) FILTER (WHERE ${active})::int                                          AS active_leads,
+            COALESCE(ROUND(SUM(${valuePln}) FILTER (WHERE ${active})), 0)::float            AS pipeline_value_pln,
+            COUNT(*) FILTER (WHERE ${wonInMonth})::int                                      AS month_won_count,
+            COALESCE(ROUND(SUM(${valuePln}) FILTER (WHERE ${wonInMonth})), 0)::float        AS month_won_value_pln
+            FROM crm_leads l
+           WHERE ${mine}`,
+          [...base, req.query.week_start, req.query.week_end, req.query.month_start, req.query.month_end]),
+        db.query(`
+          SELECT l.stage, COUNT(*)::int AS count, COALESCE(ROUND(SUM(${valuePln})), 0)::float AS value_pln
+            FROM crm_leads l
+           WHERE ${mine} AND l.stage = ANY($3::text[]) AND NOT l.hold_active AND l.converted_at IS NULL
+           GROUP BY l.stage`,
+          [...base, FUNNEL_STAGES]),
+        // Whole days back from the end of the period; twice the period, so
+        // the one before it can be compared.
+        db.query(`
+          SELECT FLOOR(EXTRACT(EPOCH FROM ($3::timestamptz - l.updated_at)) / 86400)::int AS days_back,
+                 COALESCE(ROUND(SUM(${valuePln})), 0)::float AS value_pln
+            FROM crm_leads l
+           WHERE ${mine} AND l.stage = 'closed_won'
+             AND l.updated_at < $3 AND l.updated_at >= $4
+           GROUP BY 1`,
+          [...base, req.query.period_end,
+            new Date(new Date(req.query.period_end).getTime() - 2 * periodDays * DAY_MS).toISOString()]),
+      ]);
+
+      const funnelByStage = new Map(funnel.rows.map((row) => [row.stage, row]));
+      const wonByDaysBack = new Map(won.rows.map((row) => [row.days_back, row.value_pln]));
+      let total = 0;
+      const points = [];
+      for (let daysBack = periodDays - 1; daysBack >= 0; daysBack--) {
+        total += wonByDaysBack.get(daysBack) || 0;
+        points.push(total);
+      }
+      let previousTotal = 0;
+      for (let daysBack = periodDays; daysBack < 2 * periodDays; daysBack++) {
+        previousTotal += wonByDaysBack.get(daysBack) || 0;
+      }
+
+      res.json({
+        kpis: kpis.rows[0],
+        funnel: FUNNEL_STAGES.map((stage) => ({
+          stage,
+          count: funnelByStage.get(stage)?.count || 0,
+          value_pln: funnelByStage.get(stage)?.value_pln || 0,
+        })),
+        chart: { period_days: periodDays, total_pln: total, previous_total_pln: previousTotal, points },
       });
     } catch (err) { next(err); }
   },

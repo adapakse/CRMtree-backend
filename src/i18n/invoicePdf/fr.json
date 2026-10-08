@@ -1,0 +1,50 @@
+{
+  "address": "Adresse",
+  "buyer": "Acheteur",
+  "footer": "Généré dans CRMtree le {date} à partir des données téléchargées depuis KSeF.",
+  "issueDate": "Date d’émission",
+  "ksefNumber": "Numéro KSeF",
+  "lines": {
+    "empty": "Les données de la facture ne contiennent aucune ligne.",
+    "name": "Désignation du bien ou du service",
+    "netAmount": "Montant HT",
+    "number": "N°",
+    "quantity": "Quantité",
+    "unit": "Unité",
+    "unitNetPrice": "Prix unit. HT",
+    "vatRate": "Taux de TVA"
+  },
+  "notice": {
+    "body": "Ce document est une visualisation des données de facture téléchargées depuis le système national polonais de facturation électronique (KSeF). Il ne s’agit pas du document original : l’original est la facture structurée conservée dans KSeF.",
+    "title": "Visualisation d’une facture KSeF – ceci n’est pas le document original"
+  },
+  "payment": {
+    "amountDue": "Montant à payer",
+    "bankAccount": "Compte bancaire",
+    "dueDate": "Échéance de paiement",
+    "form": "Mode de paiement",
+    "paid": "Payé",
+    "paidPartially": "partiellement",
+    "paidYes": "oui",
+    "paymentDate": "Date de paiement",
+    "title": "Paiement"
+  },
+  "paymentForm": {
+    "card": "carte",
+    "cash": "espèces",
+    "cheque": "chèque",
+    "credit": "crédit",
+    "mobile": "paiement mobile",
+    "transfer": "virement",
+    "voucher": "bon"
+  },
+  "saleDate": "Date de vente",
+  "seller": "Vendeur",
+  "taxId": "Numéro fiscal (NIP)",
+  "title": "Facture {invoiceNumber}",
+  "totals": {
+    "gross": "Total TTC",
+    "net": "Total HT",
+    "vat": "Total TVA"
+  }
+}

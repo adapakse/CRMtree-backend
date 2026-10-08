@@ -1,0 +1,13 @@
+{
+  "activity": {
+    "body": "Cosa devo annotare?",
+    "company": "Di quale azienda si tratta?",
+    "companyNotFound": "Non ho trovato un’azienda chiamata «{name}». Indica il nome in un altro modo.",
+    "reminder": "Devo impostare un promemoria e, se sì, con quanto anticipo?",
+    "title": "Di cosa si tratta?",
+    "when": "Per quando?"
+  },
+  "projectTask": {
+    "name": "Di cosa tratta l’attività?"
+  }
+}

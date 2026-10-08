@@ -110,6 +110,17 @@ describe("auth and app config", () => {
     expectDocumented(bad, "post", "/auth/mobile/login");
   });
 
+  test("PUT and DELETE /auth/devices/{deviceId}/push-token", async () => {
+    const path = "/api/auth/devices/spec-device-0001/push-token";
+    const registered = await request(app).put(path).set(auth).send({ token: "spec-fcm-token-000000000000", platform: "android" });
+    expect(registered.status).toBe(204);
+    expectDocumented(registered, "put", "/auth/devices/{deviceId}/push-token");
+    expectDocumented(await request(app).put(path).set(auth).send({ platform: "android" }), "put", "/auth/devices/{deviceId}/push-token");
+    const removed = await request(app).delete(path).set(auth);
+    expect(removed.status).toBe(204);
+    expectDocumented(removed, "delete", "/auth/devices/{deviceId}/push-token");
+  });
+
   test("GET /auth/me", async () => {
     const res = await request(app).get("/api/auth/me").set(auth);
     expect(res.status).toBe(200);
@@ -144,6 +155,11 @@ describe("leads", () => {
     expect(activity.status).toBe(201);
     expectDocumented(activity, "post", "/crm/leads/{id}/activities");
     leadActivityId = activity.body.id;
+
+    const leadContacts = await request(app).post(`/api/crm/leads/${leadId}/contacts`).set(auth)
+      .send({ contacts: [{ contact_name: "Piotr Drugi", phone: "600300400" }] });
+    expectDocumented(leadContacts, "post", "/crm/leads/{id}/contacts");
+    expect(leadContacts.body).toHaveLength(1);
 
     const task = await request(app).post(`/api/crm/leads/${leadId}/activities`).set(auth)
       .send({ type: "task", title: "Wysłać ofertę", assigned_to: user.id, priority: "asap" });
@@ -273,6 +289,21 @@ describe("partners", () => {
     expectDocumented(listed, "get", "/crm/partners");
     expect(listed.body.data[0].next_activity_title).toBe("Telefon kontrolny");
 
+    const contacts = await request(app).post(`/api/crm/partners/${partnerId}/contacts`).set(auth)
+      .send({ contacts: [{ contact_name: "Ewa Druga", contact_title: "CFO", email: "ewa@spec.example", phone: "600200300" }, { contact_title: "pusty" }] });
+    expect(contacts.status).toBe(200);
+    expectDocumented(contacts, "post", "/crm/partners/{partnerId}/contacts");
+    expect(contacts.body.map((c) => c.contact_name)).toEqual(["Ewa Druga"]);
+    const card = await request(app).get(`/api/crm/partners/${partnerId}`).set(auth);
+    expect(card.body.extra_contacts.map((c) => c.email)).toEqual(["ewa@spec.example"]);
+    expect((await request(app).get(`/api/crm/partners/${partnerId}/contacts`).set(auth)).body).toHaveLength(1);
+
+    const renamed = await request(app).patch(`/api/crm/partners/${partnerId}`).set(auth)
+      .send({ phone: "+48 600 100 300", contact_title: null, address: "ul. Testowa 1" });
+    expect(renamed.status).toBe(200);
+    expectDocumented(renamed, "patch", "/crm/partners/{partnerId}");
+    expect(renamed.body.phone).toBe("+48 600 100 300");
+
     const active = await request(app).get("/api/crm/partners?search=Spec%20Partner&status=active").set(auth);
     expect(active.body.data.map((p) => p.crm_uuid)).toContain(partnerId);
     const churned = await request(app).get("/api/crm/partners?search=Spec%20Partner&status=churned").set(auth);
@@ -329,5 +360,86 @@ describe("agenda", () => {
     const missing = await request(app).get("/api/crm/mobile/today").set(auth);
     expect(missing.status).toBe(400);
     expectDocumented(missing, "get", "/crm/mobile/today");
+  });
+
+  test("POST /assistant/activity and /assistant/project-task, with the model replaced", async () => {
+    const { assistantClient } = require("../services/assistant/assistantClient");
+    const ask = jest.spyOn(assistantClient, "ask");
+    // The task assistant belongs to the Projects module, which a new tenant may have switched off.
+    const { rows: before } = await db.query(
+      "SELECT is_enabled FROM tenant_features WHERE tenant_id = $1 AND feature = 'projects'", [tenantId],
+    );
+    await db.query(
+      `INSERT INTO tenant_features (tenant_id, feature, is_enabled) VALUES ($1, 'projects', TRUE)
+       ON CONFLICT (tenant_id, feature) DO UPDATE SET is_enabled = TRUE`, [tenantId],
+    );
+    try {
+      const conversation = { messages: [{ role: "user", content: "zadzwonić jutro" }], today: "2026-10-08", language: "pl" };
+      ask.mockResolvedValueOnce(JSON.stringify({
+        summary: "Telefon jutro o 10:00.",
+        question: null,
+        intent: {
+          title: "Telefon", body: null, activityAt: "2026-10-09T10:00", meetingLocation: null,
+          reminder: "1h_before", priority: "important", assigneeNumber: 1, companyName: "Contract",
+        },
+      }));
+      const activity = await request(app).post("/api/assistant/activity").set(auth)
+        .send({ ...conversation, now: "14:20", type: "task", needs_company: true });
+      expect(activity.status).toBe(200);
+      expectDocumented(activity, "post", "/assistant/activity");
+
+      ask.mockResolvedValueOnce(JSON.stringify({
+        summary: "Zadanie: import danych.",
+        question: null,
+        intent: { name: "Import danych", description: null, startDate: null, endDate: "2026-10-16", typeNumber: 1, priorityNumber: null, assigneeNumbers: [1] },
+      }));
+      const task = await request(app).post("/api/assistant/project-task").set(auth)
+        .send({ ...conversation, types: [{ id: "t1", name: "Bug" }], members: [{ id: "m1", name: "Anna" }] });
+      expect(task.status).toBe(200);
+      expectDocumented(task, "post", "/assistant/project-task");
+
+      const invalid = await request(app).post("/api/assistant/activity").set(auth).send({});
+      expect(invalid.status).toBe(400);
+      expectDocumented(invalid, "post", "/assistant/activity");
+
+      ask.mockRejectedValueOnce(Object.assign(new Error("Asystent jest chwilowo niedostępny, spróbuj ponownie."), { status: 503 }));
+      const down = await request(app).post("/api/assistant/project-task").set(auth).send(conversation);
+      expect(down.status).toBe(503);
+      expectDocumented(down, "post", "/assistant/project-task");
+    } finally {
+      ask.mockRestore();
+      if (before.length) {
+        await db.query(
+          "UPDATE tenant_features SET is_enabled = $2 WHERE tenant_id = $1 AND feature = 'projects'", [tenantId, before[0].is_enabled],
+        );
+      } else {
+        await db.query("DELETE FROM tenant_features WHERE tenant_id = $1 AND feature = 'projects'", [tenantId]);
+      }
+    }
+  });
+
+  test("GET /crm/mobile/dashboard and its 400", async () => {
+    const now = Date.now();
+    const res = await request(app).get("/api/crm/mobile/dashboard").set(auth)
+      .query({
+        week_start: new Date(now - 3 * 86400000).toISOString(),
+        week_end: new Date(now + 4 * 86400000).toISOString(),
+        month_start: new Date(now - 15 * 86400000).toISOString(),
+        month_end: new Date(now + 15 * 86400000).toISOString(),
+        period_end: new Date(now + 86400000).toISOString(),
+        period_days: 30,
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.chart.points).toHaveLength(30);
+    expectDocumented(res, "get", "/crm/mobile/dashboard");
+
+    const feed = await request(app).get("/api/crm/dashboard/activities?limit=5").set(auth);
+    expect(feed.status).toBe(200);
+    expect(feed.body.length).toBeGreaterThan(0);
+    expectDocumented(feed, "get", "/crm/dashboard/activities");
+
+    const missing = await request(app).get("/api/crm/mobile/dashboard").set(auth);
+    expect(missing.status).toBe(400);
+    expectDocumented(missing, "get", "/crm/mobile/dashboard");
   });
 });

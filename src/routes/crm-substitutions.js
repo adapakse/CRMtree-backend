@@ -18,6 +18,7 @@ const db     = require('../config/database');
 const audit  = require('../services/auditService');
 const logger = require('../utils/logger');
 const email  = require('../utils/email');
+const { resolveLocale } = require('../config/locales');
 const { requireAuth }                  = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, loadCrmScope }        = require('../middleware/crm-rbac');
@@ -131,8 +132,10 @@ router.post('/',
       }
 
       const { rows: userRows } = await db.query(
-        `SELECT id, display_name, email, is_active, crm_role, is_admin
-         FROM users WHERE id = ANY($1::uuid[]) AND tenant_id = $2`,
+        `SELECT u.id, u.display_name, u.email, u.is_active, u.crm_role, u.is_admin,
+                u.locale AS user_locale, t.default_locale AS tenant_default_locale
+         FROM users u JOIN tenants t ON t.id = u.tenant_id
+         WHERE u.id = ANY($1::uuid[]) AND u.tenant_id = $2`,
         [[absentUserId, substitute_user_id], req.tenantId],
       );
       const absent     = userRows.find(u => u.id === absentUserId);
@@ -197,6 +200,10 @@ router.post('/',
         try {
           await email.sendSubstitutionAssigned({
             to:             substitute.email,
+            locale:         resolveLocale({
+              userLocale:          substitute.user_locale,
+              tenantDefaultLocale: substitute.tenant_default_locale,
+            }),
             substituteName: substitute.display_name || substitute.email,
             absentName:     absent.display_name || absent.email,
             assignerName:   req.user.display_name || req.user.email,

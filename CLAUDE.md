@@ -275,6 +275,58 @@ nie po surowym stringu — inaczej ten sam numer tworzy dwie osobne karty. Szcze
 
 ---
 
+## Moduł Dokumenty — typ „Faktura”
+
+Dokumenty (`src/routes/documents.js`) mają typ (`doc_type`, zwykły tekst od migracji 0128),
+status (enum `doc_status`), typ GDPR i grupę dostępu (`group_id` → `group_profiles`; kto ma
+rolę w grupie, widzi dokument — `permissionService`). Słowniki leżą w `app_settings` tenanta
+jako tablice JSON **kodów** (etykiety tłumaczy frontend): `doc_types`, `doc_statuses`,
+`doc_gdpr_types`, `doc_contract_subjects`, `doc_entity1_options`, `doc_payment_statuses`.
+Admin tenanta edytuje je przez `PUT /api/admin/settings`; nowy tenant kopiuje je z
+`crmtree-gold`, więc migracja dodająca słownik musi objąć także ten tenant.
+
+**Faktura to dokument z `doc_type = 'invoice'`** (decyzje biznesowe, 2026-10-05 — nie cofaj
+bez pytania). Reguły i mapowanie są w nagłówku `src/services/invoiceDocumentService.js`:
+
+- **Istniejące kolumny w nowym znaczeniu:** `signing_date` = data wystawienia,
+  `expiration_date` = termin płatności (najwcześniejszy) — celowo ta sama kolumna, żeby
+  kolorowanie „wygasa wkrótce” i filtry po dacie działały dla terminu płatności; `entities` =
+  [nabywca, sprzedawca] (własna firma pierwsza, kontrahent drugi — jak w każdym dokumencie);
+  `nip` = NIP sprzedawcy; `contract_subject` nie jest używany (zawsze `NULL`, wartość z
+  żądania jest pomijana).
+- **Kolumny tylko dla faktury** (migracja 0320): `invoice_number`, `net_amount`,
+  `vat_amount`, `gross_amount`, `currency`, `bank_account`, `payment_status`,
+  `ksef_invoice_id` (NULL = faktura wpisana ręcznie). Dla innych typów są puste, a próba ich
+  ustawienia daje 400; zmiana typu z faktury na inny je czyści. Umowy i pozostałe typy
+  działają jak dotąd.
+- **Status płatności** to wartość słownika `doc_payment_statuses` (domyślnie `unpaid`,
+  `partially_paid`, `paid`, `overdue`), ustawiana ręcznie; nowa faktura dostaje `unpaid`.
+  „Po terminie” jest dodatkowo **wyliczane przy odczycie**: `is_payment_overdue` = termin
+  płatności minął i status ≠ `paid`. Zapisanego statusu nic samo nie zmienia. Kod `paid` jest
+  przez to znaczący — usunięcie go ze słownika wyłącza „opłacone” dla flagi.
+- **Faktura wpisana ręcznie** (zagraniczna, sprzed KSeF) powstaje zwykłym
+  `POST /api/documents` z plikiem PDF i polami faktury; dostaje status `new` jak każdy
+  dokument i może przejść zwykły obieg.
+- **Odpowiedź szczegółów faktury ma `project_links`** — pozycje kosztów projektów powiązane
+  z dokumentem (projekt, zadanie, kwota, status, kto i kiedy powiązał). Widzi je każdy, kto
+  widzi dokument, także bez dostępu do projektu; `can_open` mówi tylko, czy może do projektu
+  wejść (członek albo admin). Przy wyłączonych finansach projektów lista jest pusta.
+- Faktura zarejestrowana z KSeF albo powiązana z kosztami nie może zmienić typu (409).
+  Usunięcie dokumentu odpina go od pozycji kosztów (powiązanie z fakturą KSeF zostaje).
+- `POST /api/documents` odpowiada **po** zatwierdzeniu transakcji — wcześniej odpowiedź
+  wychodziła przed `COMMIT` i natychmiastowy odczyt nowego dokumentu potrafił dać 404.
+
+**Co reaguje na daty dokumentu:** tylko frontend (progi `expiration_red_days` /
+`expiration_soon_days`) i filtry listy (`expiry_before` / `expiry_after`). Backend nie ma
+żadnego joba ani maila o wygasaniu — `emailService.sendExpiryWarning` istnieje, ale nikt go
+nie wywołuje (a jego treść mówi o „wygasającym dokumencie”, więc przed podpięciem trzeba by ją
+rozróżnić dla faktur). `signing_date` nadpisuje podpis elektroniczny (`signing.js`,
+`signusService.js`) — faktur się nie podpisuje, więc nie koliduje to z datą wystawienia.
+
+Testy: `src/__tests__/invoice-documents.test.js`, `documents.test.js`.
+
+---
+
 ## Moduł Projekty
 
 Projekty z zespołem, zadaniami, osią czasu i czatem. Osobny moduł poza CRM — dostępny dla
@@ -317,7 +369,307 @@ każdego usera tenanta, niezależnie od roli handlowej. Zobacz też `CRMtree-fro
   `Europe/Warsaw` (`REMINDER_LOCAL_TIME` w `projectTaskService.js`), frontend stawia zadanie
   w kalendarzu o tej samej godzinie.
 
-### Baza danych (migracje 0307–0311)
+### Kontrola terminów (decyzje biznesowe, 2026-10-06) — nie cofaj bez pytania
+
+Wszystko poniżej jest **liczone przy odczycie, nigdy zapisywane jako status**. „Dziś” to data
+w strefie `Europe/Warsaw` (ta sama co przypomnienia). Reguły: nagłówek
+`projectDeadlineService.js`.
+
+- **Terminowość zadania** (`timeliness`): `overdue` — termin (`end_date`) przed dziś i kategoria
+  statusu inna niż `done`; `at_risk` — nie po terminie, kategoria `todo` i termin w oknie
+  dziś … dziś+N (włącznie); `on_time` — każde inne niezakończone zadanie z terminem. Zadanie
+  bez terminu i zadanie zakończone mają `null`. `days_overdue` tylko dla `overdue`.
+- **Próg N** ustawia admin tenanta (`PUT /api/admin/project-config/deadlines`,
+  `at_risk_threshold_days` 0–30, domyślnie 3). Leży w `app_settings` pod kluczem
+  `projects_at_risk_threshold_days`, tak jak przełącznik finansów; `GET /api/projects/config`
+  go zwraca.
+- **Zakończone po terminie** (`is_completed_late`): zadanie jest w statusie `done` i weszło do
+  niego po swoim terminie. Do tego służy `project_tasks.completed_at` — ustawiane przy wejściu
+  w status kategorii `done`, czyszczone przy wyjściu (także gdy admin zmieni kategorię statusu).
+  Brak `completed_at` na zakończonym zadaniu (nie dało się odtworzyć z historii) = nie „po
+  terminie”.
+- **`has_overdue_subtasks`**: któreś podzadanie (dowolnie głęboko) jest po terminie. To słabszy
+  znacznik — zadanie nadrzędne nie staje się przez to opóźnione. Uczestnik zewnętrzny widzi go
+  tylko dla podzadań przypisanych do siebie.
+- **Daty projektu:** opcjonalne `projects.start_date` / `end_date` (koniec ≥ początek), edytuje
+  PM i admin tenanta w otwartym projekcie (`PATCH /api/projects/:id`, audyt `project_updated`).
+  **Nigdy nie blokują dat zadań** — zadanie może kończyć się po końcu projektu.
+- **Opóźnienie projektu** (`is_delayed`, `delay_reasons`, `delay_details`): `task_after_end` —
+  niezakończone zadanie ma termin po końcu projektu; `end_passed` — koniec projektu minął,
+  a zostały niezakończone zadania. Bez daty końca projekt nigdy nie jest opóźniony; zamknięty
+  też nie. Zwracane na karcie projektu, liście projektów i listach projektów na karcie
+  leada/partnera.
+- **Termin pierwotny:** `project_tasks.original_end_date` = pierwszy termin, jaki zadanie
+  kiedykolwiek dostało. **Nigdy nie jest nadpisywany** — także po wyczyszczeniu terminu; zadanie
+  założone bez terminu dostaje go przy pierwszym ustawieniu. `slip_days` = termin − termin
+  pierwotny (`null`, gdy równe albo czegoś brak; ujemne przy przyspieszeniu). Śledzimy tylko
+  koniec, nie początek. Kto może zmieniać daty — bez zmian, bez akceptacji.
+- **Powód zmiany terminu:** `PATCH` zadania przyjmuje opcjonalne `end_date_change_reason`
+  (≤ 500 znaków); trafia do `audit_logs.metadata` i wraca w historii zadania jako
+  `end_date_change_reason`. Podany bez faktycznej zmiany terminu jest ignorowany.
+- **Widok międzyprojektowy** (`/api/projects/portfolio`): admin tenanta — wszystkie otwarte
+  projekty; każdy inny — otwarte projekty, w których jest PM-em albo kontrolerem; pozostali 403.
+  `GET /api/projects/config` zwraca `has_cross_project_view`. Zamknięte projekty nigdy tu nie
+  wchodzą. Filtry widoku zasilają dwa słowniki zakresu, bez stron (limit 500 + `truncated`):
+  `GET /portfolio/people` → `{ people: [{ user_id, display_name }] }` — każdy, kto jest członkiem
+  projektu z zakresu albo jest przypisany do zadania w takim projekcie (także konto
+  nieaktywne), po nazwie; `GET /portfolio/project-options` →
+  `{ projects: [{ id, key, name, start_date, end_date }] }` — wszystkie projekty zakresu, po
+  prefiksie (wybór projektów i linie końca projektu na osi czasu).
+- **Maile** (`projectDeadlineNotificationService.js`), w języku **odbiorcy** jak każdy inny
+  mail:
+  - *zmiana terminu zadania* — od razu, do PM-ów projektu poza tym, który sam zmienił
+    (także pierwsze ustawienie i wyczyszczenie terminu);
+  - *projekt stał się opóźniony* — od razu, do wszystkich PM-ów, tylko gdy zmiana (termin
+    zadania, ponowne otwarcie zadania, nowe zadanie, data końca projektu) przełącza projekt
+    z „nieopóźniony” na opóźniony przez `task_after_end`; dopóki zostaje opóźniony, nic więcej
+    nie wychodzi. Sam `end_passed` trafia do podsumowania dziennego — **tylko raz**, w dniu po
+    dacie końca projektu (decyzja Adama z 2026-10-08: opóźniony projekt zgłaszamy raz, nie
+    codziennie);
+  - *podsumowanie dzienne* — z joba przypomnień, od 09:00 `Europe/Warsaw`, **jeden mail na
+    osobę dziennie**: przypisany (także konto zewnętrzne) dostaje swoje zadania po terminie,
+    PM — zadania po terminie i opóźnione projekty swoich projektów; kto jest jednym i drugim,
+    dostaje obie części w jednym mailu. Zadania, które stały się opóźnione dziś (termin
+    wczoraj), idą pierwsze z oznaczeniem „nowe”. Admin tenanta nie jest dopisywany. Idempotencja:
+    wiersz w `project_deadline_digests` (osoba + dzień).
+  - **Wyłącznik jest per użytkownik, nie per projekt:** `users.project_deadline_notifications_enabled`
+    (domyślnie włączone), zmieniany w „Moje ustawienia” przez
+    `PUT /api/profile/project-deadline-notifications`, zwracany przez `/api/auth/me`. Wyłącza
+    wszystkie trzy maile we wszystkich projektach.
+  - Zamknięty projekt nie wysyła nic. Błąd wysyłki nigdy nie psuje żądania ani joba.
+
+### Listy modułu Projekty — stronicowanie, sortowanie, filtry (decyzja z 2026-10-06)
+
+**Każda lista jest stronicowana i filtrowana po stronie serwera.** Jedna konwencja
+(`middleware/project-list-query.js`): `page` (≥ 1), `page_size` (1–50, domyślnie 50),
+`sort` + `order` (`asc` | `desc`), odpowiedź `{ items, total, page, page_size }`. Błędna
+wartość = 400, pusta = filtr nieużyty.
+
+- **Listy zadań** — jedno zapytanie (`projectTaskListService.js`), trzy zakresy:
+  `GET /api/projects/:id/tasks/search` (zadania projektu), `GET /api/projects/my-tasks`
+  (moje zadania), `GET /api/projects/portfolio/tasks` (widok międzyprojektowy). Wiersze są
+  **płaskie** — przefiltrowana strona nie może być drzewem, więc zadanie niesie
+  `parent_task_id` / `parent_task_number` / `parent_task_name`.
+- **Oś czasu** potrzebuje całego przefiltrowanego zbioru: `GET /api/projects/:id/tasks/gantt`
+  i `GET /api/projects/portfolio/gantt` — bez stron, limit 500 zadań i flaga `truncated`,
+  te same filtry.
+- **Sortowanie zadań:** `number`, `name`, `parent` (podzadania pogrupowane po zadaniu
+  nadrzędnym, zadania bez nadrzędnego na końcu w obu kierunkach), `project`, `status`,
+  `priority`, `type`, `assignee`, `start_date`, `end_date`, `original_end_date`, `slip_days`,
+  `days_overdue`, `timeliness`, `cost`.
+- **Filtry zadań** (`projectTaskFilters.js`, te same nazwy wszędzie): `name`, `number`,
+  `project_ids`, `status_ids`, `status_category`, `priority_ids`, `type_ids`, `assignee`
+  (id albo `unassigned`; w „moich zadaniach” ignorowany), `start_from`/`start_to`,
+  `end_from`/`end_to`, `original_end_from`/`original_end_to`, `slip_min`/`slip_max`,
+  `cost_min`/`cost_max`, `timeliness`.
+- **Koszt zadania** w listach (`cost_total`, `cost_currency`) = suma WŁASNYCH pozycji kosztów
+  zadania (planowane + poniesione, bez podzadań), w walucie projektu — **bez przeliczania
+  między projektami**. Istnieje tylko dla osób, które czytają finanse danego projektu (admin,
+  PM, kontroler) i przy włączonych finansach; dla pozostałych pole jest `null`, a filtr kosztu
+  przepuszcza zadanie.
+- **Lista projektów** (`GET /api/projects`, `projectService.searchProjects`) — filtry:
+  `status`, `name` (nazwa albo prefiks), `start_from`/`start_to`, `end_from`/`end_to`,
+  `delayed`, `delay_reason` (`task_after_end` | `end_passed`, lista — dowolny z podanych),
+  `lead_id`, `partner_id`, `my_role` (`pm` | `controller` | `participant`), `pm` (id usera —
+  projekty, w których jest PM-em), `overdue_min`/`overdue_max` i `at_risk_min`/`at_risk_max`
+  (liczba zadań, liczby całkowite ≥ 0), `progress_min`/`progress_max` (całkowite 0–100),
+  `cost_min`/`cost_max` i `revenue_min`/`revenue_max` (kwoty rzeczywiste, te same co
+  w `finance`; ta sama reguła widoczności co koszt zadania); sortowanie: `name`, `key`,
+  `status`, `start_date`, `end_date`, `delay`, `pm` (alfabetycznie pierwszy PM), `progress`,
+  `overdue`, `at_risk`, `cost`, `revenue` (surowe kwoty w walucie projektu, bez przeliczania;
+  projekty, których finansów pytający nie czyta, idą na koniec w obu kierunkach).
+  `GET /api/projects/portfolio/projects` to to samo zapytanie zawężone do zakresu widoku
+  (zawsze tylko otwarte).
+  - **Zasada właściciela produktu: każda kolumna tabeli ma filtr i sortowanie.** Dodając
+    kolumnę do przeglądu projektów albo listy zadań, dodaj od razu jej filtr i klucz sortowania.
+  - **`progress_percent`** w wierszu projektu = udział zakończonych zadań zaokrąglony do
+    całego procenta, 0 dla projektu bez zadań. Filtr i sortowanie postępu działają na tej
+    samej liczbie — frontend ma ją pokazywać, a nie liczyć własną.
+  - **`can_filter_finance`** w odpowiedzi obu list projektów: finanse włączone i pytający
+    czyta finanse co najmniej jednego projektu (admin tenanta albo PM/kontroler dowolnego
+    projektu, otwartego lub zamkniętego). Frontend pokazuje filtry kosztu i przychodu tylko
+    wtedy.
+- **Zostały bez stron, celowo:** `GET /api/projects/:id/tasks` (całe drzewo dla niefiltrowanego
+  widoku projektu) i `GET /api/projects/assigned-tasks` (zasilanie kalendarza i dashboardu CRM
+  — potrzebują całego zbioru). Nie dodawaj do nich filtrów — do tego są listy stronicowane.
+
+### Finanse projektu — etap 1 (decyzje Adama, 2026-10-05) — nie cofaj bez pytania
+
+Controlling projektu, nie księgowość: **kwoty netto, bez VAT, jedna waluta na projekt**.
+Faktury kosztowe z KSeF i ich rejestrację w Dokumentach opisują osobne sekcje niżej; typ
+dokumentu „Faktura” — sekcja „Moduł Dokumenty” wyżej.
+
+- **Przełącznik per tenant:** admin tenanta włącza finanse w ustawieniach Projektów
+  (`PUT /api/admin/project-config/finance`). Leży w `app_settings` pod kluczem
+  `projects_finance_enabled`; brak wiersza = wyłączone. Przy wyłączonym każda trasa finansów
+  (i słownik kategorii kosztów) odpowiada 403, a pozostałe odpowiedzi mają `finance: null`.
+  Wyłączenie ukrywa dane, nie usuwa ich.
+- **Kategorie kosztów:** słownik admina tenanta (nazwa, kolejność, aktywność), jeden poziom,
+  bez usuwania — tylko dezaktywacja. Nieaktywna kategoria zostaje na istniejących pozycjach
+  i w budżecie, który już ją ma; nie da się jej wybrać na nowo. Domyślne (Praca własna,
+  Podwykonawcy, Materiały, Licencje, Podróże, Inne) powstają leniwie
+  (`projectConfigService.listCostCategories`).
+- **Budżet (plan):** waluta projektu (ISO, domyślnie PLN — zmienna tylko, dopóki projekt nie
+  ma żadnej pozycji kosztu ani przychodu), planowany przychód, planowany koszt per kategoria.
+  Zadanie może mieć własny planowany koszt (`project_tasks.planned_cost`) — raportowany
+  **obok** budżetu kategorii, nigdy do niego nie dodawany i nie zwracany w odpowiedziach
+  zadań.
+- **Pozycje kosztów** (`planned` | `incurred`): data, kwota > 0 w walucie projektu,
+  kategoria (wymagana), opis, opcjonalne zadanie tego samego projektu, dostawca, numer
+  dokumentu. **Pozycje przychodów** (`planned` | `invoiced` | `paid`) są tylko na projekcie,
+  nigdy na zadaniu. Jedne i drugie usuwa się naprawdę (hard delete); edycja tylko w otwartym
+  projekcie.
+- **Koszt w innej walucie:** `original_amount` + `original_currency` bez `amount` → kwota
+  liczona kursem NBP wg reguły poniżej, kurs i jego data zapisane na pozycji. **Jawne
+  `amount` zawsze wygrywa** (wtedy kursu nie zapisujemy). Przy edycji przeliczamy tylko, gdy
+  żądanie dotyka kwot — sama zmiana daty nie zmienia kwoty.
+- **Definicje liczb:** przychód rzeczywisty = pozycje `invoiced` + `paid`; koszt rzeczywisty
+  = pozycje `incurred`; koszt planowany = suma budżetów kategorii; marża % = marża /
+  przychód (`null` bez przychodu); pozostały budżet i odchylenie kategorii = budżet −
+  poniesione (pozycje `planned` nie robią przekroczenia). Suma zadania = własne pozycje +
+  wszystkich podzadań. Arytmetyka jest w `projectFinanceCalculations.js` (bez bazy).
+- **Uprawnienia:** PM i admin tenanta — wszystko. Kontroler — czyta wszystko, nic nie
+  zapisuje. Uczestnik wewnętrzny — nic, chyba że PM włączy na projekcie
+  `participants_can_add_costs`: wtedy dodaje koszty do zadań, do których jest przypisany,
+  i widzi/edytuje/usuwa wyłącznie pozycje, które sam utworzył (budżetu, przychodów
+  i podsumowania dalej nie widzi). Uczestnik zewnętrzny — nigdy nic. Zamknięty projekt —
+  tylko odczyt.
+- **Strona CRM:** kto widzi kartę leada/partnera, widzi tam sumy finansowe powiązanego
+  projektu (plan/wykonanie przychodu i kosztu, marża) także bez członkostwa — same sumy,
+  bez pozycji. Lista projektów pokazuje sumy tylko PM-owi, adminowi i kontrolerowi.
+- **Podpowiedź planowanego przychodu:** gdy projekt jest powiązany z leadem mającym wartość,
+  a planowany przychód jest pusty, podsumowanie zwraca `suggested_planned_revenue` (wartość
+  leada po najnowszym kursie). Nic nie zapisuje się samo. Przychody projektu nie mają
+  związku z transakcjami partnera ani danymi sprzedażowymi.
+- Pole dodatkowe typu `money` nie wchodzi do żadnej liczby finansowej.
+- **Historia:** zmiany pozycji idą do `audit_logs` (`project_cost_*`, `project_revenue_*`,
+  plan jako `project_updated`). Metadane celowo **nie mają `task_id`** — historię zadania
+  czyta każdy, kto widzi zadanie, także uczestnik zewnętrzny.
+- Ustawienia finansowe projektu są w osobnej tabeli `project_finance`, a nie w `projects`,
+  bo `projects` jest czytane przez `SELECT *` w odpowiedziach dla wszystkich członków.
+
+### Faktury kosztowe z KSeF — etap 3 (decyzje biznesowe, 2026-10-05) — nie cofaj bez pytania
+
+Faktury zakupu pobierane z KSeF (Krajowy System e-Faktur, API 2.0) do lokalnej kopii i
+wiązane z pozycjami kosztów projektu. Istnieją tylko u tenantów z włączonymi finansami
+projektów — przy wyłączonych każda trasa KSeF odpowiada 403, a job pomija tenanta.
+
+- **Konfiguracja należy do admina tenanta** (nie superadmina): lista firm, każda = własny
+  NIP tenanta (nabywca na fakturach) + token KSeF wklejony przez admina. Wiele NIP-ów na
+  tenanta jest dozwolone, każdy raz. Token jest sprawdzany przez **uwierzytelnienie w KSeF
+  przed zapisem**, leży zaszyfrowany (`src/utils/encrypt.js` — ten sam mechanizm co sekrety
+  WhatsApp i skrzynek) i **nigdy nie wraca w API** — tylko `token_hint` (4 ostatnie znaki).
+  Nie loguj tokenu ani tokenów dostępowych. Usunięcie firmy zostawia jej faktury
+  (`company_id` → NULL).
+- **Zakres pierwszej synchronizacji:** ustawienie tenanta `ksef_initial_sync_days` w
+  `app_settings` (domyślnie 30, 1–365). Liczy się wg daty trwałego zapisu w KSeF, nie daty
+  wystawienia; obowiązuje dla firm dodanych po zmianie.
+- **Synchronizacja:** job co 30 minut + „synchronizuj teraz” (`POST /api/ksef/sync`, 202,
+  działa w tle). Tylko faktury zakupu (`Subject2`), **korekty są pomijane** (typ zaczynający
+  się od `KOR`). Zapisujemy surowy XML i pola sparsowane. Filtr eksportu to data trwałego
+  zapisu (`PermanentStorage`), kursor `ksef_companies.sync_from` idzie tylko do przodu i jest
+  zapisywany po każdym oknie (okno ≤ 90 dni, ostatnie otwarte — do znacznika HWM). Maks. 6
+  eksportów na przebieg (limit KSeF: 20 eksportów/h na NIP). HWM spóźnia się ok. 2 minuty —
+  pusty wynik tuż po wystawieniu faktury jest normalny. Wstawianie przez
+  `ON CONFLICT (tenant_id, ksef_number) DO NOTHING`.
+- **Jedna synchronizacja firmy naraz, także między instancjami:** sesyjna blokada doradcza
+  Postgresa (`pg_try_advisory_lock`) trzymana na osobnym połączeniu przez cały przebieg.
+- **Status firmy:** `active`; `invalid` — KSeF odrzucił token, firma wypada z synchronizacji
+  do czasu podmiany tokenu; `error` — inny błąd (sieć, 5xx, limit, zepsuta paczka), ponawiany
+  w następnym przebiegu, opis w `last_error`. Jedna firma z błędem nie zatrzymuje pozostałych.
+- **HTTP 429:** czekamy tyle, ile każe `Retry-After` (do 60 s, do 3 razy); dłuższe czekanie
+  kończy przebieg błędem. Token dostępowy (ok. 15 min) jest odświeżany przed oknem, gdy
+  zostało mu mniej niż 5 minut; odmowa odświeżenia → ponowne uwierzytelnienie.
+- **VAT faktury walutowej:** metadane KSeF podają VAT w PLN, a netto/brutto w walucie
+  faktury — zapisujemy VAT jako brutto − netto.
+- **Pola z XML są opcjonalne** (data sprzedaży, termin i forma płatności, rachunek, znacznik
+  i data zapłaty, kwota do zapłaty, adresy, pozycje): brak elementu = `null`, nigdy błąd.
+  Parser to `fast-xml-parser` z wartościami jako tekst (NIP i rachunek zachowują zera).
+- **Kto widzi faktury:** osobne uprawnienie `users.can_view_ksef_invoices` nadawane przez
+  admina tenanta w panelu użytkowników (`/api/auth/me` je zwraca); admin ma je zawsze. Konto
+  zewnętrzne nie może go dostać. Bez niego każda trasa `/api/ksef` odpowiada 403.
+- **Wiązanie z kosztami:** pozycja kosztu MOŻE wskazywać fakturę
+  (`project_cost_items.ksef_invoice_id`), nie musi. `POST …/finance/costs` z
+  `ksef_invoice_id`: kwota domyślna = całe netto faktury (edytowalna), data = data
+  wystawienia, dostawca i numer dokumentu z faktury. Przy innej walucie niż projekt kwota
+  domyślna liczy się kursem NBP z dnia roboczego przed datą **wystawienia** faktury (nie datą
+  kosztu); jawne `amount` wygrywa. Istniejącą pozycję podpina i odpina
+  `PATCH` z `ksef_invoice_id` / `null`; usunięcie pozycji usuwa powiązanie.
+- **Wiązanie nigdy nie jest blokowane.** Ta sama faktura może być powiązana wiele razy — z
+  wieloma zadaniami i projektami, nawet dwa razy z tym samym. Zamiast blokady każda
+  odpowiedź z powiązaną pozycją niesie `ksef_invoice` (z `links_count`, `linked_total`,
+  `is_over_allocated`) i `other_links` (pozostałe pozycje tej samej faktury).
+  `linked_total` jest w walucie faktury: powiązanie w tej samej walucie liczy się kwotą;
+  w innej — `original_amount`, jeśli wpisano go w walucie faktury, inaczej kwotą przeliczoną
+  kursem NBP dla daty wystawienia; brak kursu → `null` (nie zgadujemy).
+  `is_over_allocated` = `linked_total` > netto faktury; liczą się pozycje `planned`
+  i `incurred`.
+- **Kto wiąże:** kto może zapisywać finanse projektu (PM, admin tenanta) **i** ma uprawnienie
+  KSeF. Uczestnik z opcją „dodaje koszty do własnych zadań” nigdy nie użyje faktury KSeF.
+  Podsumowanie faktury i `other_links` widzi każdy, kto czyta finanse projektu — także bez
+  uprawnienia KSeF (uczestnik widzący tylko własne pozycje ich nie dostaje). Zamknięty
+  projekt — tylko odczyt. Podpięcie i odpięcie idą do `audit_logs` jak inne zmiany kosztu
+  (`ksef_invoice_id` w `before_state` / `after_state`).
+
+### Faktury KSeF w Dokumentach — etap 4 (decyzje biznesowe, 2026-10-05) — nie cofaj bez pytania
+
+Fakturę z KSeF rejestruje się jako dokument typu „Faktura” (mapowanie pól — sekcja „Moduł
+Dokumenty”). Kod: `invoiceDocumentService.js`, PDF: `invoiceVisualisationPdfService.js`.
+
+- **Kiedy:** automatycznie przy pierwszym powiązaniu faktury z pozycją kosztu (utworzenie
+  pozycji z `ksef_invoice_id` albo podpięcie przez `PATCH`) oraz jawnie:
+  `POST /api/ksef/invoices/:id/document` (uprawnienie KSeF; 201 nowy dokument, 200 gdy już
+  był). **Jeden żywy dokument na fakturę KSeF** (częściowy indeks unikalny po
+  `tenant_id, ksef_invoice_id`); usunięty dokument zwalnia fakturę do ponownej rejestracji.
+- **Grupa dostępu:** admin tenanta wybiera JEDNĄ grupę dla dokumentów faktur w ustawieniach
+  KSeF (`PUT /api/admin/ksef/settings` z `invoice_documents_group_id`, `null` czyści;
+  `GET /api/admin/ksef` zwraca `invoice_documents_group`). Leży w `app_settings` pod kluczem
+  `ksef_invoice_documents_group_id`. Bez wybranej (albo po dezaktywacji) grupy rejestracja
+  automatyczna jest pomijana — **wiązanie z kosztem i tak się udaje** — a jawna odpowiada 409.
+  Listy i szczegóły faktur niosą `document_id` i `is_document_group_configured`.
+- **Bez obiegu:** dokument dostaje status `completed` („zarejestrowany, nic do zrobienia”),
+  żadnych zadań akceptacji ani podpisu. Właściciel = użytkownik, którego akcja go
+  zarejestrowała (może nie należeć do grupy — wtedy sam dokumentu nie otworzy).
+- **Dane** z wiersza `ksef_invoices`: numer, sprzedawca, nabywca, daty, kwoty, waluta,
+  rachunek; status płatności: `is_paid` → `paid`, zapłata częściowa → `partially_paid`,
+  inaczej `unpaid`. Późniejsze zmiany w dokumencie są ręczne — synchronizacja go nie nadpisuje.
+- **Wizualizacja PDF jest głównym plikiem dokumentu** (wersja 1), więc istniejący podgląd
+  pokazuje ją bez zmian we frontendzie. Zawiera wyraźną informację, że to wizualizacja danych
+  z KSeF, a nie oryginał. Etykiety idą przez i18n (zakres `invoicePdf`), język = domyślny
+  język tenanta. Ta sama biblioteka i czcionka co faktura rozliczeniowa
+  (`src/utils/pdfDocument.js`: PDFKit + DejaVu, wyłączone ligatury) — nie dodawaj drugiej
+  biblioteki PDF. Treść powstaje w `buildVisualisationContent` (testowalna bez renderowania).
+- **Pozycja kosztu ↔ dokument faktury** (`project_cost_items.document_id`): pozycja powiązana
+  z fakturą KSeF zawsze wskazuje dokument zarejestrowany z tej faktury (albo żaden) — pole
+  `document_id` w żądaniu jest wtedy ignorowane, a rejestracja dokumentu uzupełnia je także
+  na wcześniejszych pozycjach. Dokument wpisany ręcznie podpina i odpina (`POST` / `PATCH`
+  z `document_id`) osoba z prawem zapisu finansów projektu, która widzi dokument; uprawnienie
+  KSeF nie jest potrzebne. Podanie dokumentu zarejestrowanego z KSeF jest wiązaniem tej
+  faktury KSeF (z jej regułą uprawnień). Dokumentu ręcznego i faktury KSeF nie łączy się na
+  jednej pozycji (400).
+- **`other_links` jest wspólne:** wszystkie pozostałe pozycje dzielące fakturę KSeF **albo**
+  dokument, każda raz. Wiązanie nadal nigdy nie jest blokowane. Pozycja niesie też
+  `document` (id, numer, nazwa, `can_open` dla oglądającego).
+- Poza zakresem: korekty, faktury sprzedaży, integracja z płatnościami/bankiem, odświeżanie
+  dokumentu po zmianie faktury.
+
+**Zmienna środowiskowa:** `KSEF_ENVIRONMENT` = `test` | `production` (to nie sekret —
+zwykła zmienna Container Appa). Pusta = integracja wyłączona: job nie startuje (ostrzeżenie
+w logu), zapis tokenu i „synchronizuj teraz” odpowiadają 400, ekran konfiguracji dostaje
+`is_configured: false`. Adresy API są w `ksefApiClient.js`. Klucz szyfrowania tokenów to
+istniejące `EMAIL_ENCRYPTION_KEY` (z fallbackiem na `JWT_SECRET`) — zmiana klucza unieważnia
+zapisane tokeny.
+
+**Token testowy:** środowisko testowe MF (`api-test.ksef.mf.gov.pl`) przyjmuje dowolny NIP
+z poprawną sumą kontrolną i certyfikat samopodpisany (tylko z
+`?verifyCertificateChain=false`). Token powstaje tak: uwierzytelnienie XAdES pieczęcią
+samopodpisaną dla NIP-u nabywcy → `POST /tokens` z `permissions: ["InvoiceRead"]` (wartość
+tokenu wraca tylko raz) → faktury testowe wysyła się sesją online jako inny NIP
+(sprzedawca). Backend nie zawiera kodu XAdES — to narzędzie deweloperskie, nie funkcja
+aplikacji. Lokalnie ustaw `KSEF_ENVIRONMENT=test` w `.env.local`. Testy Jest nie wołają
+prawdziwego KSeF (`src/__tests__/helpers/ksefMock.js` udaje API z prawdziwym RSA/AES).
+
+### Baza danych (migracje 0307–0311, finanse 0316–0317, KSeF 0319, faktury w Dokumentach 0320, terminy 0326)
 
 `project_task_statuses`, `project_task_types`, `project_task_priorities`,
 `project_status_transitions`, `project_field_definitions`, `projects`, `project_members`,
@@ -326,29 +678,179 @@ każdego usera tenanta, niezależnie od roli handlowej. Zobacz też `CRMtree-fro
 Numer zadania = `projects.key` (prefiks generowany z nazwy przy zakładaniu, niezmienny) +
 licznik `projects.next_task_number`.
 
+Finanse: `project_cost_categories`, `project_finance` (0–1 wiersz na projekt: waluta,
+planowany przychód, `participants_can_add_costs`), `project_category_budgets`,
+`project_cost_items` (z kolumnami `original_amount`, `original_currency`, `exchange_rate`,
+`exchange_rate_date`), `project_revenue_items`, kolumna `project_tasks.planned_cost` oraz
+globalna tabela kursów `nbp_exchange_rates`.
+
+KSeF: `ksef_companies` (NIP, zaszyfrowany token, `token_hint`, `status`, `last_error`,
+kursor `sync_from`, `last_attempt_at`, `last_synced_at`; `UNIQUE (tenant_id, nip)`),
+`ksef_invoices` (pola z metadanych i XML, `payment` i `lines` jako JSONB, `metadata`,
+`raw_xml`; `UNIQUE (tenant_id, ksef_number)`), kolumny
+`project_cost_items.ksef_invoice_id` / `ksef_linked_by` / `ksef_linked_at` oraz
+`users.can_view_ksef_invoices`.
+
+Faktury w Dokumentach (0320): kolumny faktury na `documents` (lista w sekcji „Moduł
+Dokumenty”), `project_cost_items.document_id` / `document_linked_by` / `document_linked_at`,
+słownik `doc_payment_statuses` dla każdego tenanta i kod `invoice` dopisany do `doc_types`.
+
+Kontrola terminów (0326): `projects.start_date` / `end_date`,
+`project_tasks.original_end_date` / `completed_at`,
+`users.project_deadline_notifications_enabled`, tabela `project_deadline_digests`
+(`user_id`, `digest_date`). Migracja uzupełnia istniejące zadania z `audit_logs`: termin
+pierwotny = wartość sprzed pierwszej zapisanej zmiany terminu (inaczej termin bieżący),
+`completed_at` = ostatnie zapisane wejście w status `done` (inaczej `NULL`).
+
 ### Kluczowe pliki
 
 - `src/routes/projects.js` — projekty, członkowie, pola, powiązanie z CRM, czat projektu,
   `GET /assigned-tasks` (musi być zarejestrowane przed `/:id`).
-- `src/routes/project-tasks.js` — zadania, historia, czat zadania (`/api/projects/:id/tasks`).
-- `src/routes/admin-project-config.js` — konfiguracja admina tenanta.
+- `src/routes/project-tasks.js` — zadania, historia, czat zadania (`/api/projects/:id/tasks`),
+  w tym `/search`, `/gantt` i `/assignee-summary` (zarejestrowane przed `/:taskId`).
+- `src/routes/project-portfolio.js` (`/api/projects/portfolio`, montowane w `app.js` przed
+  trasami z `/:id`) — widok międzyprojektowy: `/tasks`, `/gantt`, `/projects`.
+- `src/middleware/project-list-query.js` — parametry stronicowania, sortowania i filtrów list.
+- `src/routes/project-finance.js` — finanse projektu (`/api/projects/:id/finance`):
+  podsumowanie, plan, pozycje kosztów i przychodów, planowany koszt zadania.
+- `src/routes/admin-project-config.js` — konfiguracja admina tenanta, w tym przełącznik
+  finansów i słownik `cost-categories`.
+- `src/routes/admin-ksef.js` (`/api/admin/ksef`) — firmy i tokeny KSeF, zakres pierwszej
+  synchronizacji. `src/routes/ksef.js` (`/api/ksef`) — lista i szczegóły faktur, stan firm,
+  „synchronizuj teraz”. Wiązanie faktur idzie przez `project-finance.js`.
+- KSeF w serwisach: `ksefApiClient.js` (HTTP: uwierzytelnienie tokenem, eksport, 429),
+  `ksefPackage.js` (hash, AES, ZIP), `ksefInvoiceParser.js` (FA(3)), `ksefSyncService.js`
+  (okna, kursor, blokada, statusy — reguły w nagłówku pliku), `ksefCompanyService.js`
+  (konfiguracja i tokeny), `ksefInvoiceService.js` (lista, szczegóły, powiązania — reguła
+  `linked_total` w nagłówku pliku), `invoiceDocumentService.js` (typ „Faktura”, rejestracja
+  faktur KSeF, grupa dostępu, `project_links`), `invoiceVisualisationPdfService.js`.
+  Job: `src/jobs/ksef-sync.js`.
 - `src/middleware/project-access.js` — `loadProject` (404 także dla nie-członka, żeby nie
-  ujawniać id), `requireProjectManager`, `requireOpenProject`.
+  ujawniać id), `requireProjectManager`, `requireOpenProject`, a dla finansów
+  `requireFinanceEnabled`, `requireKsefAccess`, `loadFinanceAccess` i `requireFinance*` /
+  `requireCost*`.
+- Terminy: `projectDeadlineService.js` (reguły i fragmenty SQL terminowości oraz opóźnienia
+  projektu), `projectDeadlineNotificationService.js` (maile), `projectTaskListService.js`
+  + `projectTaskFilters.js` (stronicowane listy zadań), `projectPortfolioService.js` (zakres
+  widoku międzyprojektowego).
 - `src/services/projectService.js`, `projectTaskService.js` (reguły uprawnień do zadań są
   opisane w nagłówku pliku), `projectConfigService.js`, `projectCrmLinkService.js`,
-  `projectMessageService.js`.
+  `projectMessageService.js`, `projectFinanceService.js` (reguły uprawnień do finansów
+  w nagłówku pliku), `projectFinanceCalculations.js`.
 - `GET /api/crm/leads/:id/projects` i `/api/crm/partners/:id/projects` — w trasach CRM.
 - Przypomnienia: trzeci blok w `src/services/crmReminderService.js`; maile
-  `sendProjectTaskAssigned` (od razu przy przypisaniu) i `sendProjectTaskReminder`.
+  `sendProjectTaskAssigned` (od razu przy przypisaniu) i `sendProjectTaskReminder`. Ten sam
+  job (`src/jobs/crm-reminders.js`) po przypomnieniach wysyła dzienne podsumowania terminów.
 - Historia zadania: `audit_logs` z `metadata.task_id` (akcje `project_task_created` /
   `project_task_updated`).
 - Testy: `src/__tests__/projects.test.js`, `project-tasks.test.js`,
-  `projects-crm-integration.test.js`.
+  `project-deadlines.test.js` (terminowość, daty i opóźnienie projektu, termin pierwotny,
+  filtry zadań, widok międzyprojektowy), `project-lists.test.js` (stronicowanie, sortowanie,
+  oś czasu, filtry listy projektów), `project-deadline-emails.test.js` (maile),
+  `projects-crm-integration.test.js`, `project-finance.test.js`,
+  `projectFinanceCalculations.test.js` (bez bazy), `ksef-sync.test.js` (klient, paczki,
+  synchronizacja), `ksef-invoices.test.js` (trasy, uprawnienia, wiązanie),
+  `ksefInvoiceParser.test.js` (bez bazy; fixture to próbka MF `tpl-fa3-s3.xml`),
+  `invoice-documents.test.js` (typ „Faktura”, rejestracja z KSeF, dokument ↔ koszt),
+  `invoiceVisualisationPdf.test.js` (bez bazy).
 
 ### Poza zakresem pierwszej wersji
 
 Załączniki, aplikacja mobilna (kontrakt `mobile-v1.yaml` nie zawiera Projektów), zależności
 między zadaniami, licznik nieprzeczytanych wiadomości, edycja i usuwanie wiadomości czatu.
+W finansach: VAT, wiele walut w jednym projekcie. W KSeF: faktury korygujące, faktury
+sprzedaży jako przychód, integracja z płatnościami.
+
+---
+
+## Kursy walut (NBP)
+
+Jedno źródło kursów dla całej aplikacji: tabela A NBP (kursy średnie), globalna tabela
+`nbp_exchange_rates` (waluta, data, kurs do PLN) — **nie per tenant**. Kod:
+`src/services/exchangeRateService.js`, job `src/jobs/exchange-rates-sync.js`.
+
+- **Reguła kursu:** `getRate(waluta, data)` zwraca kurs z **ostatniego dnia roboczego PRZED
+  datą** (polska zasada księgowa), nigdy z samego dnia. PLN = 1, dwie waluty obce liczymy
+  przez PLN (`getCrossRate`). Dla daty przyszłej bierzemy najnowszą opublikowaną tabelę.
+  Nieznana waluta albo brak kursu → błąd 4xx (422), **nigdy cichy kurs 1**. Kurs starszy
+  niż 10 dni od daty nie jest uznawany za „ostatni dzień roboczy”.
+- **Zasilanie:** job co godzinę dociąga dni po najnowszym zapisanym (pierwsze uruchomienie:
+  ostatnie ~3 miesiące), upsert jest idempotentny. API NBP: maks. 93 dni na zapytanie (kod
+  tnie po 90), 404 = brak tabeli w zakresie, 400 gdy zakres kończy się w przyszłości.
+- **Zapisany zakres jest ciągły** (od najstarszego do najnowszego dnia nie ma dziur poza
+  dniami bez tabeli). Dlatego dociąganie wstecz na żądanie (`getRate` dla daty starszej niż
+  zapisane) zawsze sięga aż do najstarszego zapisanego dnia — nie rób z tego „okienka”, bo
+  późniejszy odczyt zwróci nieaktualny kurs. Jedno żądanie dociąga najwyżej ok. 3 lata.
+- **Raporty sprzedaży** (`crmSalesMetricsService.loadExchangeRates`, używane przez ekran
+  mobilny i `GET /api/crm/leads/report`): najnowszy kurs NBP dla EUR/USD/GBP/CHF, stałe
+  4.25/3.90/4.90/4.20 tylko gdy tabela kursów jest pusta — takie same dla każdego tenanta.
+  Dawne ustawienia tenanta `exchange_rate_eur|usd|gbp|chf` w `app_settings` **nie są już
+  czytane**, a migracja 0318 usuwa je wszystkim tenantom (także `crmtree-gold`, z którego
+  nowe tenanty kopiują ustawienia). Nie przywracaj ręcznego kursu per tenant bez pytania —
+  decyzja Adama z 2026-10-05.
+- Testy nie wołają prawdziwego NBP (`fetch` jest podmieniany). Dane testowe kursów leżą
+  w roku 1999 — sprzed archiwum NBP (2002) — żeby nie kolidować z prawdziwymi kursami
+  w globalnej tabeli. Testy: `exchange-rates.test.js`, `exchangeRateNbpClient.test.js`.
+
+---
+
+## Wielojęzyczność (i18n)
+
+Aplikacja jest tłumaczona na 10 języków (`pl, en, de, it, es, fr, ro, ru, sl, hr`), polski jest
+źródłowy. Zasady i słowniczek: `crmtree-frontend/docs/i18n.md`.
+
+- Lista języków: `src/config/locales.js` (musi zgadzać się z migracją 0312 i frontendem).
+- Język użytkownika: `users.locale` (NULL = domyślny tenanta), ustawiany przez
+  `PUT /api/profile/locale`. Domyślny język tenanta: `tenants.default_locale`, ustawiany przez
+  admina tenanta (`PUT /api/admin/settings/default-locale`). `/api/auth/me` zwraca oba.
+- `resolveLocale()` wybiera język, w którym zwracamy się do danej osoby. Maile i przypomnienia
+  idą w języku **odbiorcy**, faktura PDF w języku tenanta.
+
+### Teksty backendu
+
+- Pliki: `src/i18n/<zakres>/<język>.json`, zakres to pierwszy człon klucza. Zakresy: `emails`,
+  `push`, `invoicePdf` (wizualizacja faktury KSeF — w języku domyślnym tenanta). Konwencje jak we frontendzie: zagnieżdżony JSON, klucze angielskie camelCase,
+  parametry `{name}`, liczba mnoga w składni ICU.
+- Helper: `src/utils/i18n.js` — `translate(locale, 'emails.taskAssigned.subject', { documentName })`,
+  `formatDate(locale, value)`, `formatDateTime(locale, value)`, `formatDateOnly` (data bez godziny,
+  niezależna od strefy serwera), `formatNumber` / `formatAmount`. Składnię ICU obsługuje
+  `@messageformat/core`, skompilowane teksty są cache'owane.
+- `translate` nigdy nie rzuca: nieobsługiwany lub pusty język → polski; brak klucza w danym języku
+  (albo zepsute ICU) → tekst polski; brak klucza wszędzie → sam klucz.
+- Daty w mailach wychodzą w strefie czasowej procesu serwera (bez wymuszonej strefy), tak jak przed
+  tłumaczeniem. Angielski używa formatu `en-GB` (dzień przed miesiącem, zegar 24-godzinny).
+
+### Jak dodać tekst
+
+1. Dopisz klucz do `src/i18n/<zakres>/pl.json` i od razu do pozostałych 9 plików zakresu.
+2. W kodzie: `translate(locale, '<zakres>.<klucz>', { parametr })`. W `src/utils/email.js` każda
+   funkcja `send*` ma lokalne `const t = emailTexts(locale)` i woła `t('taskAssigned.subject', …)`.
+3. Wartość z bazy (status, typ, powód) tłumacz dopiero przy wypisywaniu — mapy „wartość → klucz” są
+   w `email.js` (`DOCUMENT_STATUSES`, `ACTIVITY_TYPE_KEYS`, …). Nieznana wartość wychodzi bez zmian.
+4. `npm run i18n:check` (`scripts/i18n-check.js`) — komplet 10 plików, te same klucze i parametry co
+   w polskim, poprawne ICU, format kanoniczny (`-- --fix` porządkuje format). To samo sprawdza test
+   `src/__tests__/i18n-completeness.test.js`, więc niepełne tłumaczenie wywala zwykłe `npm test`.
+
+### Język odbiorcy w kodzie
+
+- Każda funkcja `send*` z `email.js` przyjmuje `locale`. Bez niego (albo z nieobsługiwanym) mail
+  jest polski.
+- Wywołujący podaje `resolveLocale({ userLocale, tenantDefaultLocale })` **odbiorcy**, nigdy osoby,
+  która wywołała akcję. Zapytanie, które pobiera adres e-mail odbiorcy, pobiera przy okazji
+  `u.locale AS user_locale` i `t.default_locale AS tenant_default_locale` (`JOIN tenants t`) —
+  bez osobnego zapytania o język.
+- Przypomnienie o aktywności bez przypisanej osoby idzie do twórcy, w języku twórcy
+  (`crmReminderService.js`).
+- Odbiorca spoza CRMtree (sam adres e-mail): język domyślny tenanta, gdy tenant jest znany, inaczej
+  polski. Dziś każdy mail trafia do użytkownika CRMtree.
+
+### Co jest nadal po polsku
+
+- Komunikaty błędów API (`res.status(...).json({ error })`) i wpisy logów.
+- Faktura rozliczeniowa PDF (`invoicePdfService.js`). Wizualizacja faktury KSeF jest tłumaczona.
+- Treści zapisywane w bazie przez backend, np. tytuł i opis automatycznego zadania churn
+  (`Churn: <partner> [Krytyczne]` w `crm-churn.js` i `jobs/daily-scores.js`) — trafiają do maila
+  jako dane, w brzmieniu z bazy.
 
 ---
 
@@ -359,6 +861,8 @@ między zadaniami, licznik nieprzeczytanych wiadomości, edycja i usuwanie wiado
   constant names, and inline comments.
 - Polish is only acceptable in user-facing API error messages and log descriptions
   directed at end users.
+- API messages are written in English (decision of 2026-10-05); older Polish messages are
+  being converted separately.
 
 ### Naming conventions
 - Use descriptive, self-explanatory names — a reader should understand intent without

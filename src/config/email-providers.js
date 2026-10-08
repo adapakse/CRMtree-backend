@@ -9,11 +9,24 @@
 // To add a new provider: implement its service module (same shape as
 // gmailService/outlookService/zohoService — getAuthUrl, exchangeCodeAndSave,
 // getStatus, disconnect, sendEmail, getThread, getNewMessages) and add one
-// entry below. No other file needs to change its list of provider keys.
+// entry below, plus its required fields in emailProviderRequiredFields.js.
+//
+// No other JS file needs to change its list of provider keys — but the DATABASE
+// does. Four CHECK constraints repeat the list and reject an unknown provider
+// with 23514 (see migration 0325, which widened them for 'yandex'):
+//   tenant_email_providers.provider          — saving a tenant's credentials
+//   tenants.active_email_provider            — activating the provider
+//   crm_lead_activities.email_provider       — storing received/sent mail
+//   crm_partner_activities.email_provider    — same, for partners
+// The frontend is not registry-driven either: the tenant admin panel
+// (pages/admin/tenants/tenants.component.ts) hardcodes a signal, a form and a
+// template block per provider, and each provider has its own OAuth callback
+// component and route.
 
 const gmailService   = require('../services/gmailService');
 const outlookService = require('../services/outlookService');
 const zohoService    = require('../services/zohoService');
+const yandexService  = require('../services/yandexService');
 const { REQUIRED_CONFIG_FIELDS } = require('./emailProviderRequiredFields');
 
 const EMAIL_PROVIDERS = {
@@ -44,6 +57,19 @@ const EMAIL_PROVIDERS = {
     supportsAttachments: true,
     configFields: ['client_id', 'client_secret', 'redirect_uri'],
     requiredConfigFields: REQUIRED_CONFIG_FIELDS.zoho,
+  },
+  yandex: {
+    key: 'yandex',
+    label: 'Yandex Mail',
+    service: yandexService,
+    // Attachments ride on the MIME message over IMAP/SMTP, so this is true in
+    // principle — but every mail operation is stage 2 (see yandexService header),
+    // so nothing reads this flag for Yandex yet.
+    supportsAttachments: true,
+    // Same three fields as Zoho: Yandex needs no Pub/Sub topic (that is Gmail's
+    // push mechanism) and no directory id (that is Azure's).
+    configFields: ['client_id', 'client_secret', 'redirect_uri'],
+    requiredConfigFields: REQUIRED_CONFIG_FIELDS.yandex,
   },
 };
 

@@ -13,6 +13,8 @@ const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
 const config   = require("../config");
 const email    = require("../utils/email");
+const pushService = require("../services/pushService");
+const { resolveLocale } = require("../config/locales");
 const logger   = require("../utils/logger");
 
 // Wspólne middleware dla wszystkich tras (requireAuth + crmAuth są też per-route dla jasności)
@@ -873,6 +875,14 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
       logger.warn('Błąd zapisu audit logu dla partnera', { error: auditErr.message, partner_id: id });
     }
 
+    // The partner has a new owner. Not awaited: notifying must not slow the request down.
+    if (r.rows[0].manager_id && r.rows[0].manager_id !== beforeSnap.manager_id && r.rows[0].manager_id !== req.user.id) {
+      notifyNewOwner({
+        ownerId: r.rows[0].manager_id, assigner: req.user, tenantId: req.tenantId,
+        sourceType: 'partner', sourceId: r.rows[0].id, sourceName: r.rows[0].company,
+      });
+    }
+
     res.json(r.rows[0]);
   } catch (err) {
     console.error("PATCH /crm/partners/:id error:", err);
@@ -955,6 +965,58 @@ function computeReminderAt(activity_at, reminder_type, reminder_at_custom) {
 
 // ── POST /crm/partners/:id/activities ─────────────────────────────────────────
 // Przy typie 'meeting' automatycznie tworzy event w Google Calendar.
+// ── Additional contacts of a partner ──────────────────────────────
+// The same contract as the lead's contacts (crm-leads.js): GET lists them,
+// POST replaces the whole set with { contacts: [...] }. The main contact
+// stays on the partner itself.
+router.get("/:id/contacts", requireAuth, crmAuth, async (req, res) => {
+  try {
+    const partnerId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
+    if (!partnerId) return res.status(404).json({ error: "Partner nie znaleziony" });
+    const { rows } = await pool.query(
+      "SELECT * FROM crm_partner_contacts WHERE partner_id = $1 AND tenant_id = $2 ORDER BY created_at, id",
+      [partnerId, req.tenantId]
+    );
+    res.json(rows);
+  } catch (err) {
+    logger.error("GET /crm/partners/:id/contacts error", { error: err.message });
+    res.status(500).json({ error: "Błąd serwera" });
+  }
+});
+
+router.post("/:id/contacts", requireAuth, crmAuth, async (req, res) => {
+  const { contacts } = req.body;
+  if (!Array.isArray(contacts)) return res.status(400).json({ error: "contacts must be array" });
+  const client = await pool.connect();
+  try {
+    const partnerId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
+    if (!partnerId) return res.status(404).json({ error: "Partner nie znaleziony" });
+
+    // One transaction: a failed insert must not leave the partner without
+    // the contacts it had.
+    await client.query("BEGIN");
+    await client.query("DELETE FROM crm_partner_contacts WHERE partner_id = $1 AND tenant_id = $2", [partnerId, req.tenantId]);
+    const inserted = [];
+    for (const contact of contacts) {
+      if (!contact.contact_name && !contact.email && !contact.phone) continue;
+      const { rows } = await client.query(
+        `INSERT INTO crm_partner_contacts (partner_id, contact_name, contact_title, email, phone, tenant_id)
+         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+        [partnerId, contact.contact_name || null, contact.contact_title || null, contact.email || null, contact.phone || null, req.tenantId]
+      );
+      inserted.push(rows[0]);
+    }
+    await client.query("COMMIT");
+    res.json(inserted);
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    logger.error("POST /crm/partners/:id/contacts error", { error: err.message });
+    res.status(500).json({ error: "Błąd serwera" });
+  } finally {
+    client.release();
+  }
+});
+
 // ── GET /api/crm/partners/:id/logo-img ── the logo as image bytes ──
 // Same as the lead route: streamed from blob storage, so the client needs no
 // SAS URL.
@@ -1048,6 +1110,16 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
       metadata:   { partner_id: partnerId, activity_id: newAct.id, source: 'partner' },
     });
 
+    if (assigned_to && assigned_to !== req.user.id) {
+      // Not awaited: the phone notification must not slow the request down.
+      pushService.sendToUsers({
+        userIds: [assigned_to],
+        kind: 'activityAssigned',
+        params: { title, assignerName: req.user.display_name || req.user.email, sourceName: partner.company || '' },
+        data: { source_type: 'partner', source_id: partnerId, activity_id: newAct.id },
+      });
+    }
+
     // Auto-zapis uczestników spotkania jako kontakty partnera.
     if (type === 'meeting' && participants) {
       const participantEmails = participants
@@ -1066,11 +1138,17 @@ router.post("/:id/activities", requireAuth, crmAuth, async (req, res) => {
       setImmediate(async () => {
         try {
           const { rows: assigneeRows } = await pool.query(
-            'SELECT email, display_name FROM users WHERE id=$1 AND tenant_id=$2', [assigned_to, req.tenantId]
+            `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+             FROM users u JOIN tenants t ON t.id = u.tenant_id
+             WHERE u.id=$1 AND u.tenant_id=$2`, [assigned_to, req.tenantId]
           );
           if (assigneeRows.length && assigneeRows[0].email) {
             await email.sendCrmActivityAssigned({
               to:            assigneeRows[0].email,
+              locale:        resolveLocale({
+                userLocale:          assigneeRows[0].user_locale,
+                tenantDefaultLocale: assigneeRows[0].tenant_default_locale,
+              }),
               assigneeName:  assigneeRows[0].display_name || assigneeRows[0].email,
               assignerName:  req.user.display_name || req.user.email,
               activityType:  type,

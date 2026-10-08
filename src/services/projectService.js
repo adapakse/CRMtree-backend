@@ -10,8 +10,12 @@
 //
 // Projects are closed, never deleted. A closed project is read-only until
 // it is reopened.
+//
+// A project may have a start and an end date. They never block task dates;
+// whether the project is delayed is computed (projectDeadlineService).
 
 const db = require('../config/database');
+const projectDeadlineService = require('./projectDeadlineService');
 
 const PROJECT_ROLES = ['pm', 'internal_participant', 'external_participant', 'controller'];
 const ACCESS_LEVELS = ['full', 'read'];
@@ -72,44 +76,207 @@ async function generateUniqueKey(client, tenantId, name) {
   throw httpError(409, 'Nie udało się nadać prefiksu projektu');
 }
 
-async function listProjects({ tenantId, user, status }) {
-  const params = [tenantId, user.id];
-  const conditions = ['p.tenant_id = $1'];
-  if (!user.is_admin) conditions.push('me.user_id IS NOT NULL');
-  if (status !== 'all') {
-    params.push(status);
-    conditions.push(`p.status = $${params.length}`);
-  }
-  const { rows } = await db.query(
-    `SELECT p.id, p.key, p.name, p.description, p.status, p.partner_id, p.lead_id, p.created_at, p.closed_at,
-            partner.company AS partner_name, lead.company AS lead_name,
-            me.role AS my_role, me.access_level AS my_access_level,
-            (SELECT COUNT(*)::int FROM project_members m WHERE m.project_id = p.id) AS member_count,
-            (SELECT COUNT(*)::int FROM project_tasks t WHERE t.project_id = p.id)   AS task_count,
-            (SELECT COUNT(*)::int
-               FROM project_tasks t
-               JOIN project_task_statuses s ON s.id = t.status_id
-               JOIN project_task_assignees a ON a.task_id = t.id AND a.user_id = $2
-              WHERE t.project_id = p.id AND s.category <> 'done') AS my_open_task_count
-     FROM projects p
-     LEFT JOIN project_members me ON me.project_id = p.id AND me.user_id = $2
-     LEFT JOIN crm_partners partner ON partner.id = p.partner_id AND partner.tenant_id = p.tenant_id
-     LEFT JOIN crm_leads lead ON lead.id = p.lead_id AND lead.tenant_id = p.tenant_id
-     WHERE ${conditions.join(' AND ')}
-     ORDER BY p.status, p.name`,
-    params,
-  );
-  return rows;
+// Sort key → ORDER BY expressions over the `project` wrapper of searchProjects.
+const PROJECT_SORT_EXPRESSIONS = {
+  name:       ['lower(project.name)'],
+  key:        ['project.key'],
+  status:     ['project.status'],
+  start_date: ['project.start_date'],
+  end_date:   ['project.end_date'],
+  // Delayed projects first when ascending; among them the longest overrun first.
+  delay:      ['(NOT (project.has_task_after_end OR project.has_end_passed))',
+               '(-GREATEST(COALESCE(project.days_after_end, 0), COALESCE(project.days_since_end, 0)))'],
+  pm:         ['project.first_manager_name'],
+  progress:   ['project.progress_percent'],
+  overdue:    ['project.overdue_task_count'],
+  at_risk:    ['project.at_risk_task_count'],
+  // Raw amounts in each project's own currency; NULL (finance not readable) sorts last.
+  cost:       ['project.filter_cost'],
+  revenue:    ['project.filter_revenue'],
+};
+const PROJECT_SORT_KEYS = Object.keys(PROJECT_SORT_EXPRESSIONS);
+// Selected only to filter or sort by; not part of a project row.
+const PROJECT_HELPER_COLUMNS = ['filter_cost', 'filter_revenue', 'first_manager_name'];
+const DELAY_REASON_COLUMNS = {
+  task_after_end: 'project.has_task_after_end',
+  end_passed:     'project.has_end_passed',
+};
+const DELAY_REASONS = Object.keys(DELAY_REASON_COLUMNS);
+const MY_ROLE_FILTERS = {
+  pm:          ['pm'],
+  controller:  ['controller'],
+  participant: ['internal_participant', 'external_participant'],
+};
+const MAX_PAGE_SIZE = 50;
+
+const escapeLike = (text) => text.replace(/[\\%_]/g, (character) => `\\${character}`);
+
+function projectOrderBy(sort, order) {
+  const direction = order === 'desc' ? 'DESC' : 'ASC';
+  const expressions = sort
+    ? PROJECT_SORT_EXPRESSIONS[sort].map((expression) => `${expression} ${direction} NULLS LAST`)
+    : ['project.status'];
+  return [...expressions, 'lower(project.name)', 'project.key'].join(', ');
 }
 
-async function createProject({ tenantId, user, name, description }) {
+// The paged, filterable list of projects: those the user is a member of (the
+// tenant admin: all), or — with `scopeProjectIds` — exactly the given ones
+// (the cross-project view).
+//
+// filters (all optional, combined with AND): status ('open' | 'closed' | 'all'),
+// name (matches name or key), startFrom/startTo, endFrom/endTo, isDelayed,
+// leadId, partnerId, myRoles, managerId (a PM of the project), delayReasons
+// (any of them), overdueMin/overdueMax and atRiskMin/atRiskMax (task counts),
+// progressMin/progressMax (progress_percent), costMin/costMax,
+// revenueMin/revenueMax.
+// progress_percent is the share of done tasks rounded to a whole percent, 0
+// for a project without tasks — the number the row carries, so the filter and
+// the column always agree.
+// The amounts are the actual ones the list shows (incurred cost; invoiced and
+// paid revenue), in each project's own currency — never converted. As in the
+// task lists, they are known only where the user may read the project's
+// finance (admin, PM, controller, finance switched on); elsewhere an amount
+// filter lets the project through.
+async function searchProjects({
+  tenantId, user, scopeProjectIds = null, isFinanceEnabled = false,
+  filters = {}, sort, order, page = 1, pageSize = MAX_PAGE_SIZE,
+}) {
+  const params = [tenantId, user.id, projectDeadlineService.todayInWarsaw(), Boolean(user.is_admin), Boolean(isFinanceEnabled)];
+  const addParam = (value) => { params.push(value); return `$${params.length}`; };
+  const inner = ['p.tenant_id = $1'];
+  const outer = [];
+
+  if (scopeProjectIds) inner.push(`p.id = ANY(${addParam(scopeProjectIds)}::uuid[])`);
+  else inner.push('($4::boolean OR me.user_id IS NOT NULL)');
+  if (filters.status && filters.status !== 'all') inner.push(`p.status = ${addParam(filters.status)}`);
+  if (filters.name) {
+    const pattern = addParam(`%${escapeLike(filters.name)}%`);
+    inner.push(`(p.name ILIKE ${pattern} OR p.key ILIKE ${pattern})`);
+  }
+  const range = (column, from, to) => {
+    if (from) inner.push(`${column} >= ${addParam(from)}::date`);
+    if (to) inner.push(`${column} <= ${addParam(to)}::date`);
+  };
+  range('p.start_date', filters.startFrom, filters.startTo);
+  range('p.end_date', filters.endFrom, filters.endTo);
+  if (filters.leadId) inner.push(`p.lead_id = ${addParam(filters.leadId)}`);
+  if (filters.partnerId) inner.push(`p.partner_id = ${addParam(filters.partnerId)}`);
+  if (filters.myRoles?.length) {
+    const roles = filters.myRoles.flatMap((role) => MY_ROLE_FILTERS[role]);
+    inner.push(`me.role = ANY(${addParam(roles)}::text[])`);
+  }
+  if (filters.managerId) {
+    inner.push(`EXISTS (SELECT 1 FROM project_members manager
+                        WHERE manager.project_id = p.id AND manager.role = 'pm'
+                          AND manager.user_id = ${addParam(filters.managerId)}::uuid)`);
+  }
+  const countRange = (column, min, max) => {
+    if (min !== undefined) outer.push(`${column} >= ${addParam(min)}::int`);
+    if (max !== undefined) outer.push(`${column} <= ${addParam(max)}::int`);
+  };
+  countRange('project.overdue_task_count', filters.overdueMin, filters.overdueMax);
+  countRange('project.at_risk_task_count', filters.atRiskMin, filters.atRiskMax);
+  countRange('project.progress_percent', filters.progressMin, filters.progressMax);
+  if (filters.delayReasons?.length) {
+    outer.push(`(${filters.delayReasons.map((reason) => DELAY_REASON_COLUMNS[reason]).join(' OR ')})`);
+  }
+  if (filters.isDelayed !== undefined) {
+    outer.push(`(project.has_task_after_end OR project.has_end_passed) = ${addParam(filters.isDelayed)}::boolean`);
+  }
+  const amountRange = (column, min, max) => {
+    if (min !== undefined) outer.push(`(${column} IS NULL OR ${column} >= ${addParam(min)}::numeric)`);
+    if (max !== undefined) outer.push(`(${column} IS NULL OR ${column} <= ${addParam(max)}::numeric)`);
+  };
+  amountRange('project.filter_cost', filters.costMin, filters.costMax);
+  amountRange('project.filter_revenue', filters.revenueMin, filters.revenueMax);
+
+  const canReadFinance = `($5::boolean AND ($4::boolean OR me.role IN ('pm', 'controller')))`;
+  const from = `FROM (
+    SELECT p.id, p.key, p.name, p.description, p.status, p.partner_id, p.lead_id, p.created_at, p.closed_at,
+           p.start_date, p.end_date,
+           partner.company AS partner_name, lead.company AS lead_name,
+           me.role AS my_role, me.access_level AS my_access_level,
+           (SELECT COUNT(*)::int FROM project_members m WHERE m.project_id = p.id) AS member_count,
+           counts.task_count, counts.done_task_count, counts.overdue_task_count, counts.at_risk_task_count,
+           CASE WHEN counts.task_count = 0 THEN 0
+                ELSE ROUND(counts.done_task_count * 100.0 / counts.task_count)::int END AS progress_percent,
+           (SELECT COUNT(*)::int
+              FROM project_tasks t
+              JOIN project_task_statuses s ON s.id = t.status_id
+              JOIN project_task_assignees a ON a.task_id = t.id AND a.user_id = $2
+             WHERE t.project_id = p.id AND s.category <> 'done') AS my_open_task_count,
+           COALESCE((
+             SELECT json_agg(json_build_object('user_id', u.id, 'display_name', u.display_name)
+                             ORDER BY u.last_name, u.first_name)
+             FROM project_members manager
+             JOIN users u ON u.id = manager.user_id
+             WHERE manager.project_id = p.id AND manager.role = 'pm'
+           ), '[]'::json) AS project_managers,
+           (SELECT MIN(lower(u.display_name))
+            FROM project_members manager
+            JOIN users u ON u.id = manager.user_id
+            WHERE manager.project_id = p.id AND manager.role = 'pm') AS first_manager_name,
+           ${projectDeadlineService.projectDelayColumns('$3')},
+           CASE WHEN ${canReadFinance} THEN (
+             SELECT COALESCE(SUM(c.amount), 0) FROM project_cost_items c
+             WHERE c.project_id = p.id AND c.status = 'incurred') END AS filter_cost,
+           CASE WHEN ${canReadFinance} THEN (
+             SELECT COALESCE(SUM(r.amount), 0) FROM project_revenue_items r
+             WHERE r.project_id = p.id AND r.status IN ('invoiced', 'paid')) END AS filter_revenue
+    FROM projects p
+    LEFT JOIN project_members me ON me.project_id = p.id AND me.user_id = $2
+    LEFT JOIN crm_partners partner ON partner.id = p.partner_id AND partner.tenant_id = p.tenant_id
+    LEFT JOIN crm_leads lead ON lead.id = p.lead_id AND lead.tenant_id = p.tenant_id
+    ${projectDeadlineService.PROJECT_DELAY_JOIN}
+    CROSS JOIN LATERAL (
+      SELECT COUNT(*)::int AS task_count,
+             COUNT(*) FILTER (WHERE task.status_category = 'done')::int AS done_task_count,
+             COUNT(*) FILTER (WHERE task.timeliness = 'overdue')::int   AS overdue_task_count,
+             COUNT(*) FILTER (WHERE task.timeliness = 'at_risk')::int   AS at_risk_task_count
+      FROM (
+        SELECT s.category AS status_category, ${projectDeadlineService.timelinessSql('$3')} AS timeliness
+        FROM project_tasks t
+        JOIN project_task_statuses s ON s.id = t.status_id
+        WHERE t.project_id = p.id
+      ) task
+    ) counts
+    WHERE ${inner.join(' AND ')}
+  ) project
+  ${outer.length ? `WHERE ${outer.join(' AND ')}` : ''}`;
+
+  const [{ rows: [{ total }] }, { rows }] = await Promise.all([
+    db.query(`SELECT COUNT(*)::int AS total ${from}`, params),
+    db.query(
+      `SELECT * ${from}
+       ORDER BY ${projectOrderBy(sort, order)}
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pageSize, (page - 1) * pageSize],
+    ),
+  ]);
+  const items = rows.map((row) => {
+    const project = projectDeadlineService.withProjectDelay(row);
+    // The amounts shown come with the finance totals.
+    for (const column of PROJECT_HELPER_COLUMNS) delete project[column];
+    return project;
+  });
+  return { items, total, page, page_size: pageSize };
+}
+
+function assertDateOrder(startDate, endDate) {
+  if (startDate && endDate && endDate < startDate) {
+    throw httpError(400, 'The project end date cannot be earlier than its start date');
+  }
+}
+
+async function createProject({ tenantId, user, name, description, startDate, endDate }) {
+  assertDateOrder(startDate, endDate);
   try {
     return await db.transaction(async (client) => {
       const key = await generateUniqueKey(client, tenantId, name);
       const { rows: [project] } = await client.query(
-        `INSERT INTO projects (tenant_id, key, name, description, created_by)
-         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [tenantId, key, name, description || null, user.id],
+        `INSERT INTO projects (tenant_id, key, name, description, start_date, end_date, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [tenantId, key, name, description || null, startDate || null, endDate || null, user.id],
       );
       await client.query(
         `INSERT INTO project_members (project_id, user_id, tenant_id, role, access_level, added_by)
@@ -175,23 +342,29 @@ async function listProjectFields(projectId) {
   return rows;
 }
 
-async function updateProject({ tenantId, projectId, changes }) {
+const EDITABLE_PROJECT_FIELDS = ['name', 'description', 'start_date', 'end_date'];
+
+async function updateProject({ tenantId, project, changes }) {
+  assertDateOrder(
+    changes.start_date === undefined ? project.start_date : changes.start_date,
+    changes.end_date === undefined ? project.end_date : changes.end_date,
+  );
   const setClauses = [];
   const params = [];
-  for (const field of ['name', 'description']) {
+  for (const field of EDITABLE_PROJECT_FIELDS) {
     if (changes[field] === undefined) continue;
     params.push(changes[field]);
     setClauses.push(`${field} = $${params.length}`);
   }
   if (!setClauses.length) throw httpError(400, 'Brak pól do zmiany');
-  params.push(projectId, tenantId);
-  const { rows: [project] } = await db.query(
+  params.push(project.id, tenantId);
+  const { rows: [updated] } = await db.query(
     `UPDATE projects SET ${setClauses.join(', ')}, updated_at = now()
      WHERE id = $${params.length - 1} AND tenant_id = $${params.length}
      RETURNING *`,
     params,
   );
-  return project;
+  return updated;
 }
 
 async function setProjectStatus({ tenantId, projectId, userId, status }) {
@@ -342,8 +515,12 @@ async function replaceProjectFields({ tenantId, projectId, fields }) {
 module.exports = {
   PROJECT_ROLES,
   ACCESS_LEVELS,
+  EDITABLE_PROJECT_FIELDS,
+  PROJECT_SORT_KEYS,
+  MY_ROLE_FILTERS,
+  DELAY_REASONS,
   buildKeyBase,
-  listProjects,
+  searchProjects,
   createProject,
   loadProjectForUser,
   listMembers,

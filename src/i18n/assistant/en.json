@@ -1,0 +1,13 @@
+{
+  "activity": {
+    "body": "What should I write down?",
+    "company": "Which company is it about?",
+    "companyNotFound": "I could not find a company called \"{name}\". Please give its name another way.",
+    "reminder": "Should I set a reminder, and if so, how long before?",
+    "title": "What is it about?",
+    "when": "When is it due?"
+  },
+  "projectTask": {
+    "name": "What is the task about?"
+  }
+}

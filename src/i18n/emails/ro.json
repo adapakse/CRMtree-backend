@@ -1,0 +1,195 @@
+{
+  "absenceReasons": {
+    "other": "Altă absență",
+    "sickLeave": "Concediu medical",
+    "vacation": "Concediu de odihnă"
+  },
+  "activityReminder": {
+    "heading": "⏰ Memento pentru sarcină",
+    "intro": "Aveți o sarcină apropiată care necesită atenție:",
+    "linkHint": "Linkul se va deschide într-o fereastră nouă a browserului. Dacă aveți o sesiune activă, nu va fi necesară o nouă autentificare.",
+    "subject": "[CRMtree] ⏰ Memento: {activityType} — {activityTitle}"
+  },
+  "activityTypes": {
+    "call": "Apel",
+    "docSent": "Document",
+    "email": "E-mail",
+    "meeting": "Întâlnire",
+    "note": "Notiță",
+    "opportunity": "Oportunitate",
+    "qbr": "QBR",
+    "task": "Sarcină",
+    "training": "Instruire"
+  },
+  "common": {
+    "automaticAssigner": "CRMtree (automat)",
+    "greeting": "Bună ziua {name},",
+    "openDocument": "Deschidere document →",
+    "openLead": "Deschidere lead →",
+    "openPartner": "Deschidere partener →",
+    "openTask": "Deschidere sarcină →"
+  },
+  "crmActivityAssigned": {
+    "calendarHint": "Sarcinile dumneavoastră sunt vizibile în vizualizarea <strong>Calendar → Sarcini</strong>.",
+    "heading": "Vi s-a atribuit o sarcină CRM nouă",
+    "intro": "<strong>{assignerName}</strong> v-a atribuit o activitate:",
+    "subject": "[CRMtree] Sarcină CRM nouă: {activityTitle}"
+  },
+  "crmOwnerAssigned": {
+    "headingLead": "Vi s-a atribuit un lead",
+    "headingPartner": "Vi s-a atribuit un partener",
+    "introLead": "<strong>{assignerName}</strong> v-a atribuit un lead:",
+    "introPartner": "<strong>{assignerName}</strong> v-a atribuit un partener:",
+    "subjectLead": "[CRMtree] Lead nou: {sourceName}",
+    "subjectPartner": "[CRMtree] Partener nou: {sourceName}"
+  },
+  "documentSigned": {
+    "heading": "Documentul a fost semnat",
+    "intro": "Documentul <strong>{documentName}</strong> a fost semnat electronic cu succes.",
+    "signedBy": "Semnat de",
+    "signedStatus": "Semnat ✓",
+    "subject": "[CRMtree] Document semnat: {documentName}"
+  },
+  "documentStatusChanged": {
+    "changedBy": "Modificat de",
+    "heading": "Statusul documentului a fost modificat",
+    "intro": "Un document la care aveți acces și-a schimbat statusul:",
+    "newStatus": "Status nou",
+    "previousStatus": "Status anterior",
+    "subject": "[CRMtree] Status document modificat: {documentName}"
+  },
+  "documentStatuses": {
+    "beingApproved": "În aprobare",
+    "beingEdited": "În editare",
+    "beingSigned": "În curs de semnare",
+    "completed": "Finalizat",
+    "hold": "Suspendat",
+    "new": "Nou",
+    "rejected": "Respins",
+    "signed": "Semnat"
+  },
+  "documentTaskTypes": {
+    "approve": "De aprobat",
+    "edit": "De editat",
+    "read": "De citit",
+    "sign": "De semnat"
+  },
+  "labels": {
+    "activityDate": "Data și ora",
+    "assigner": "Atribuită de",
+    "comment": "Comentariu",
+    "document": "Document",
+    "dueDate": "Termen",
+    "lead": "Lead",
+    "number": "Număr",
+    "partner": "Partener",
+    "project": "Proiect",
+    "reminder": "Memento",
+    "status": "Status",
+    "task": "Sarcină",
+    "taskType": "Tip sarcină",
+    "title": "Titlu",
+    "type": "Tip"
+  },
+  "layout": {
+    "footerAutomatic": "Acest mesaj a fost generat automat de sistemul CRMtree.",
+    "footerNoReply": "Nu răspundeți la acest e-mail — această căsuță poștală nu este monitorizată."
+  },
+  "projectDeadlineSummary": {
+    "assignees": "responsabili: {names}",
+    "daysOverdue": "{count, plural, one {# zi întârziere} few {# zile întârziere} other {# de zile întârziere}}",
+    "delayedProjectsHeading": "Proiecte întârziate",
+    "dueOn": "termen: {date}",
+    "heading": "Sarcini cu termen depășit",
+    "intro": "Situația la {date}:",
+    "managedTasksHeading": "Sarcini cu termen depășit în proiectele dumneavoastră",
+    "newBadge": "nou",
+    "ownTasksHeading": "Sarcinile dumneavoastră cu termen depășit",
+    "reasonEndPassed": "Data de încheiere a proiectului a trecut la {date} (acum {days, plural, one {# zi} few {# zile} other {# de zile}}), iar numărul sarcinilor nefinalizate este: {count}.",
+    "reasonTaskAfterEnd": "Sarcini nefinalizate cu termen după încheierea proiectului: {count}. Cel mai îndepărtat termen: {latestDate} ({days, plural, one {# zi} few {# zile} other {# de zile}} după încheierea proiectului).",
+    "settingsHint": "Notificările privind termenele din proiecte pot fi dezactivate în „Setările mele”.",
+    "subject": "[CRMtree] Sarcini cu termen depășit — {date}",
+    "unassigned": "neatribuită"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# zi după încheierea proiectului} few {# zile după încheierea proiectului} other {# de zile după încheierea proiectului}}",
+    "heading": "Proiectul este întârziat",
+    "intro": "Într-un proiect în care sunteți PM, o sarcină nefinalizată are termenul ulterior datei de încheiere a proiectului:",
+    "latestTaskDueDate": "Cel mai îndepărtat termen",
+    "openProject": "Deschidere proiect →",
+    "projectEndDate": "Încheierea proiectului",
+    "subject": "[CRMtree] Proiect întârziat: {projectName}",
+    "tasksAfterEnd": "Sarcini după încheierea proiectului"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Termen",
+    "heading": "Termenul sarcinii a fost modificat",
+    "intro": "<strong>{changedByName}</strong> a modificat termenul unei sarcini într-un proiect în care sunteți PM:",
+    "noDate": "fără",
+    "originalDueDate": "Termen inițial",
+    "reason": "Motivul modificării",
+    "slipEarlier": "{count, plural, one {# zi mai devreme} few {# zile mai devreme} other {# de zile mai devreme}}",
+    "slipLater": "{count, plural, one {# zi mai târziu} few {# zile mai târziu} other {# de zile mai târziu}}",
+    "subject": "[CRMtree] Termenul sarcinii a fost modificat: {taskLabel} {taskName}"
+  },
+  "projectTaskAssigned": {
+    "heading": "Vi s-a atribuit o sarcină în proiect",
+    "intro": "<strong>{assignerName}</strong> v-a atribuit o sarcină:",
+    "subject": "[CRMtree] Sarcină nouă în proiect: {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "heading": "⏰ Memento pentru sarcina din proiect",
+    "intro": "Aveți o sarcină care necesită atenție:",
+    "subject": "[CRMtree] ⏰ Memento: {taskLabel} {taskName}"
+  },
+  "reminderTypes": {
+    "activityAtDue": "La ora activității",
+    "custom": "Dată de memento personalizată",
+    "daysBefore": "{count, plural, one {# zi înainte de termen} few {# zile înainte de termen} other {# de zile înainte de termen}}",
+    "projectAtDue": "În ziua termenului"
+  },
+  "substitutionAssigned": {
+    "absentPerson": "Persoana absentă",
+    "from": "De la",
+    "heading": "Vi s-a atribuit o înlocuire",
+    "infoOnly": "Această notificare are caracter informativ — nu necesită confirmare.",
+    "intro": "<strong>{assignerName}</strong> v-a desemnat ca înlocuitor pentru <strong>{absentName}</strong> pe durata absenței. În această perioadă aveți același acces la leadurile și partenerii acestei persoane ca agentul de vânzări atribuit acestora.",
+    "note": "Notiță",
+    "openCrm": "Deschidere CRM →",
+    "reason": "Motiv",
+    "subject": "[CRMtree] Înlocuire pentru {absentName} ({startsOn}–{endsOn})",
+    "toInclusive": "Până la (inclusiv)"
+  },
+  "taskAssigned": {
+    "heading": "Aveți o sarcină nouă de îndeplinit",
+    "intro": "<strong>{assignerName}</strong> v-a atribuit o sarcină privind documentul:",
+    "subject": "[CRMtree] Sarcină nouă: {documentName}"
+  },
+  "taskCompleted": {
+    "completedBy": "Finalizată de",
+    "heading": "Sarcina a fost finalizată",
+    "intro": {
+      "approve": "<strong>{completedByName}</strong> a aprobat documentul <strong>{documentName}</strong>.",
+      "edit": "<strong>{completedByName}</strong> a editat documentul <strong>{documentName}</strong>.",
+      "other": "<strong>{completedByName}</strong> a finalizat o sarcină pentru documentul <strong>{documentName}</strong>.",
+      "read": "<strong>{completedByName}</strong> a citit documentul <strong>{documentName}</strong>.",
+      "sign": "<strong>{completedByName}</strong> a semnat documentul <strong>{documentName}</strong>."
+    },
+    "subject": "[CRMtree] Sarcină finalizată: {documentName}"
+  },
+  "taskRejected": {
+    "heading": "Sarcina a fost respinsă",
+    "intro": "<strong>{rejectedByName}</strong> a respins sarcina pentru documentul <strong>{documentName}</strong>.",
+    "reason": "Motivul respingerii",
+    "rejectedBy": "Respinsă de",
+    "subject": "[CRMtree] Sarcină respinsă: {documentName}"
+  },
+  "userInvitation": {
+    "heading": "Bun venit în CRMtree!",
+    "ignoreHint": "Dacă nu așteptați acest mesaj, îl puteți ignora.",
+    "intro": "<strong>{invitedByName}</strong> v-a adăugat în sistemul <strong>CRMtree</strong>.",
+    "loginHint": "Vă puteți autentifica folosind contul dumneavoastră Google Workspace (<strong>{email}</strong>) prin linkul de mai jos:",
+    "signIn": "Autentificare →",
+    "subject": "[CRMtree] Invitație în sistem"
+  }
+}

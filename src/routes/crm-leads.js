@@ -12,9 +12,13 @@ const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
 const { crmAuth, loadCrmScope, loadCrmModuleGrants, crmScope, requireCrmManager, assertOwnership, canOperateForOwner, requireFeature } = require('../middleware/crm-rbac');
 const projectCrmLinkService = require('../services/projectCrmLinkService');
+const salesMetrics   = require('../services/crmSalesMetricsService');
 const testAccountSvc = require('../services/testAccountService');
 const crmLeadHoldSvc = require('../services/crmLeadHoldService');
 const email          = require('../utils/email');
+const pushService    = require('../services/pushService');
+const { resolveLocale } = require('../config/locales');
+const { notifyNewOwner } = require('../services/crmOwnerNotification');
 const { autoSaveLeadContacts } = require('../services/gmailProcessor');
 
 router.use(requireAuth, injectAuditContext, crmAuth, loadCrmScope, loadCrmModuleGrants('leads'));
@@ -565,21 +569,7 @@ router.get('/report',
   validate,
   async (req, res, next) => {
     try {
-      // Kursy walut z app_settings (pkt 10/11)
-      const { rows: rateRows } = await db.query(
-        `SELECT DISTINCT ON (key) key, value::numeric AS rate FROM app_settings
-         WHERE key IN ('exchange_rate_eur','exchange_rate_usd','exchange_rate_gbp','exchange_rate_chf')
-           AND (tenant_id = $1 OR tenant_id IS NULL)
-         ORDER BY key, (tenant_id IS NOT NULL) DESC`,
-        [req.tenantId]
-      );
-      const rates = { EUR: 4.25, USD: 3.90, GBP: 4.90, CHF: 4.20 };
-      for (const r of rateRows) {
-        if (r.key === 'exchange_rate_eur') rates.EUR = Number(r.rate);
-        if (r.key === 'exchange_rate_usd') rates.USD = Number(r.rate);
-        if (r.key === 'exchange_rate_gbp') rates.GBP = Number(r.rate);
-        if (r.key === 'exchange_rate_chf') rates.CHF = Number(r.rate);
-      }
+      const rates = await salesMetrics.loadExchangeRates();
       // Wyrażenie SQL przeliczające wartość leada na PLN wg kursów
       const valPln = `(CASE COALESCE(l.annual_turnover_currency,'PLN')
         WHEN 'EUR' THEN COALESCE(l.value_pln,0) * ${rates.EUR}
@@ -1139,7 +1129,12 @@ router.get('/:id',
       let can_edit = true;
       if (!req.user.is_admin) {
         if (req.user.crm_role === 'sales_manager') {
-          can_edit = !req.crmScopeUserIds || req.crmScopeUserIds.includes(lead.assigned_to);
+          // Scope ZAPISU — grant 'read' poszerza wyłącznie crmScopeUserIds, więc
+          // czytanie go tutaj pokazywałoby edytowalny formularz, który i tak
+          // poleciałby 403 z assertOwnership. Fallback zachowuje zachowanie tam,
+          // gdzie loadCrmModuleGrants nie jest w łańcuchu (jak w crm-partners.js).
+          const writeScope = req.crmWriteScopeUserIds ?? req.crmScopeUserIds;
+          can_edit = !writeScope || writeScope.includes(lead.assigned_to);
         } else {
           // own lead, or a lead of someone I'm actively substituting
           can_edit = canOperateForOwner(req, lead.assigned_to);
@@ -1294,6 +1289,14 @@ router.patch('/:id',
           });
         }
       } catch (auditErr) { /* nie blokuj odpowiedzi */ }
+
+      // The lead has a new owner. Not awaited: notifying must not slow the request down.
+      if (rows[0].assigned_to && rows[0].assigned_to !== existing[0].assigned_to && rows[0].assigned_to !== req.user.id) {
+        notifyNewOwner({
+          ownerId: rows[0].assigned_to, assigner: req.user, tenantId: req.tenantId,
+          sourceType: 'lead', sourceId: rows[0].id, sourceName: rows[0].company,
+        });
+      }
 
       res.json(rows[0]);
     } catch (err) { next(err); }
@@ -1604,11 +1607,22 @@ router.post('/:id/activities',
         }
       }
 
+      if (assigned_to && assigned_to !== req.user.id) {
+        // Not awaited: the phone notification must not slow the request down.
+        pushService.sendToUsers({
+          userIds: [assigned_to],
+          kind: 'activityAssigned',
+          params: { title, assignerName: req.user.display_name || req.user.email, sourceName: (await db.query('SELECT company FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId])).rows[0]?.company || '' },
+          data: { source_type: 'lead', source_id: id, activity_id: rows[0].id },
+        });
+      }
       // Powiadomienie email — tylko gdy przypisano do innego usera niż twórca
       if (assigned_to && assigned_to !== req.user.id) {
         try {
           const { rows: assigneeRows } = await db.query(
-            'SELECT email, display_name FROM users WHERE id=$1 AND tenant_id=$2', [assigned_to, req.tenantId]
+            `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+             FROM users u JOIN tenants t ON t.id = u.tenant_id
+             WHERE u.id=$1 AND u.tenant_id=$2`, [assigned_to, req.tenantId]
           );
           const { rows: leadRows } = await db.query(
             'SELECT company FROM crm_leads WHERE id=$1 AND tenant_id=$2', [id, req.tenantId]
@@ -1616,6 +1630,10 @@ router.post('/:id/activities',
           if (assigneeRows.length && assigneeRows[0].email) {
             await email.sendCrmActivityAssigned({
               to:            assigneeRows[0].email,
+              locale:        resolveLocale({
+                userLocale:          assigneeRows[0].user_locale,
+                tenantDefaultLocale: assigneeRows[0].tenant_default_locale,
+              }),
               assigneeName:  assigneeRows[0].display_name || assigneeRows[0].email,
               assignerName:  req.user.display_name || req.user.email,
               activityType:  type,

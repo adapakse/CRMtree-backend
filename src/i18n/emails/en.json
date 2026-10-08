@@ -1,0 +1,195 @@
+{
+  "absenceReasons": {
+    "other": "Other absence",
+    "sickLeave": "Sick leave",
+    "vacation": "Vacation"
+  },
+  "activityReminder": {
+    "heading": "⏰ Task reminder",
+    "intro": "You have an upcoming task that needs your attention:",
+    "linkHint": "The link opens in a new browser window. If you are signed in, you will not need to sign in again.",
+    "subject": "[CRMtree] ⏰ Reminder: {activityType} — {activityTitle}"
+  },
+  "activityTypes": {
+    "call": "Call",
+    "docSent": "Document",
+    "email": "Email",
+    "meeting": "Meeting",
+    "note": "Note",
+    "opportunity": "Opportunity",
+    "qbr": "QBR",
+    "task": "Task",
+    "training": "Training"
+  },
+  "common": {
+    "automaticAssigner": "CRMtree (automatic)",
+    "greeting": "Hi {name},",
+    "openDocument": "Open document →",
+    "openLead": "Open lead →",
+    "openPartner": "Open partner →",
+    "openTask": "Open task →"
+  },
+  "crmActivityAssigned": {
+    "calendarHint": "You can see your tasks in the <strong>Calendar → Tasks</strong> view.",
+    "heading": "A new CRM task has been assigned to you",
+    "intro": "<strong>{assignerName}</strong> has assigned an activity to you:",
+    "subject": "[CRMtree] New CRM task: {activityTitle}"
+  },
+  "crmOwnerAssigned": {
+    "headingLead": "You are the new owner of a lead",
+    "headingPartner": "You are the new owner of a partner",
+    "introLead": "<strong>{assignerName}</strong> has assigned a lead to you:",
+    "introPartner": "<strong>{assignerName}</strong> has assigned a partner to you:",
+    "subjectLead": "[CRMtree] New lead: {sourceName}",
+    "subjectPartner": "[CRMtree] New partner: {sourceName}"
+  },
+  "documentSigned": {
+    "heading": "The document has been signed",
+    "intro": "The document <strong>{documentName}</strong> has been signed electronically.",
+    "signedBy": "Signed by",
+    "signedStatus": "Signed ✓",
+    "subject": "[CRMtree] Document signed: {documentName}"
+  },
+  "documentStatusChanged": {
+    "changedBy": "Changed by",
+    "heading": "The document status has changed",
+    "intro": "A document you have access to has changed its status:",
+    "newStatus": "New status",
+    "previousStatus": "Previous status",
+    "subject": "[CRMtree] Document status changed: {documentName}"
+  },
+  "documentStatuses": {
+    "beingApproved": "Awaiting approval",
+    "beingEdited": "Being edited",
+    "beingSigned": "Awaiting signature",
+    "completed": "Completed",
+    "hold": "On hold",
+    "new": "New",
+    "rejected": "Rejected",
+    "signed": "Signed"
+  },
+  "documentTaskTypes": {
+    "approve": "To approve",
+    "edit": "To edit",
+    "read": "To read",
+    "sign": "To sign"
+  },
+  "labels": {
+    "activityDate": "Date",
+    "assigner": "Assigned by",
+    "comment": "Comment",
+    "document": "Document",
+    "dueDate": "Due date",
+    "lead": "Lead",
+    "number": "Number",
+    "partner": "Partner",
+    "project": "Project",
+    "reminder": "Reminder",
+    "status": "Status",
+    "task": "Task",
+    "taskType": "Task type",
+    "title": "Title",
+    "type": "Type"
+  },
+  "layout": {
+    "footerAutomatic": "This message was generated automatically by CRMtree.",
+    "footerNoReply": "Do not reply to this e-mail — this mailbox is not monitored."
+  },
+  "projectDeadlineSummary": {
+    "assignees": "assigned to: {names}",
+    "daysOverdue": "{count, plural, one {# day overdue} other {# days overdue}}",
+    "delayedProjectsHeading": "Delayed projects",
+    "dueOn": "due: {date}",
+    "heading": "Overdue tasks",
+    "intro": "As of {date}:",
+    "managedTasksHeading": "Overdue tasks in your projects",
+    "newBadge": "new",
+    "ownTasksHeading": "Your overdue tasks",
+    "reasonEndPassed": "The project end date passed on {date} ({days, plural, one {# day} other {# days}} ago) and unfinished tasks remain: {count}.",
+    "reasonTaskAfterEnd": "Unfinished tasks due after the project end: {count}. Latest due date: {latestDate} ({days, plural, one {# day} other {# days}} after the project end).",
+    "settingsHint": "You can switch project deadline notifications off in My settings.",
+    "subject": "[CRMtree] Overdue tasks — {date}",
+    "unassigned": "unassigned"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# day after the project end} other {# days after the project end}}",
+    "heading": "The project is delayed",
+    "intro": "In a project you manage, an unfinished task is due after the project end date:",
+    "latestTaskDueDate": "Latest due date",
+    "openProject": "Open project →",
+    "projectEndDate": "Project end date",
+    "subject": "[CRMtree] Project delayed: {projectName}",
+    "tasksAfterEnd": "Tasks after the project end"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Due date",
+    "heading": "Task due date changed",
+    "intro": "<strong>{changedByName}</strong> has changed the due date of a task in a project you manage:",
+    "noDate": "none",
+    "originalDueDate": "Original due date",
+    "reason": "Reason for the change",
+    "slipEarlier": "{count, plural, one {# day earlier} other {# days earlier}}",
+    "slipLater": "{count, plural, one {# day later} other {# days later}}",
+    "subject": "[CRMtree] Task due date changed: {taskLabel} {taskName}"
+  },
+  "projectTaskAssigned": {
+    "heading": "A project task has been assigned to you",
+    "intro": "<strong>{assignerName}</strong> has assigned a task to you:",
+    "subject": "[CRMtree] New project task: {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "heading": "⏰ Project task reminder",
+    "intro": "You have a task that needs your attention:",
+    "subject": "[CRMtree] ⏰ Reminder: {taskLabel} {taskName}"
+  },
+  "reminderTypes": {
+    "activityAtDue": "At the due time",
+    "custom": "Custom reminder date",
+    "daysBefore": "{count, plural, one {# day before the due date} other {# days before the due date}}",
+    "projectAtDue": "On the due date"
+  },
+  "substitutionAssigned": {
+    "absentPerson": "Absent person",
+    "from": "From",
+    "heading": "You have been named as a substitute",
+    "infoOnly": "This notification is for your information only — no confirmation is needed.",
+    "intro": "<strong>{assignerName}</strong> has named you as the substitute for <strong>{absentName}</strong> during their absence. For that time you have the same access to this person's leads and partners as their assigned salesperson.",
+    "note": "Note",
+    "openCrm": "Open CRM →",
+    "reason": "Reason",
+    "subject": "[CRMtree] Substituting for {absentName} ({startsOn}–{endsOn})",
+    "toInclusive": "To (inclusive)"
+  },
+  "taskAssigned": {
+    "heading": "You have a new task",
+    "intro": "<strong>{assignerName}</strong> has assigned you a task for the document:",
+    "subject": "[CRMtree] New task: {documentName}"
+  },
+  "taskCompleted": {
+    "completedBy": "Completed by",
+    "heading": "The task has been completed",
+    "intro": {
+      "approve": "<strong>{completedByName}</strong> has approved the document <strong>{documentName}</strong>.",
+      "edit": "<strong>{completedByName}</strong> has edited the document <strong>{documentName}</strong>.",
+      "other": "<strong>{completedByName}</strong> has completed a task for the document <strong>{documentName}</strong>.",
+      "read": "<strong>{completedByName}</strong> has read the document <strong>{documentName}</strong>.",
+      "sign": "<strong>{completedByName}</strong> has signed the document <strong>{documentName}</strong>."
+    },
+    "subject": "[CRMtree] Task completed: {documentName}"
+  },
+  "taskRejected": {
+    "heading": "The task has been rejected",
+    "intro": "<strong>{rejectedByName}</strong> has rejected the task for the document <strong>{documentName}</strong>.",
+    "reason": "Reason",
+    "rejectedBy": "Rejected by",
+    "subject": "[CRMtree] Task rejected: {documentName}"
+  },
+  "userInvitation": {
+    "heading": "Welcome to CRMtree!",
+    "ignoreHint": "If you were not expecting this message, you can ignore it.",
+    "intro": "<strong>{invitedByName}</strong> has added you to <strong>CRMtree</strong>.",
+    "loginHint": "You can sign in with your Google Workspace account (<strong>{email}</strong>) using the link below:",
+    "signIn": "Sign in →",
+    "subject": "[CRMtree] Invitation to CRMtree"
+  }
+}

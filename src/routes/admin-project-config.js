@@ -4,7 +4,10 @@
 // Tenant-admin configuration of the Projects module. Reading the
 // configuration is open to every project user via GET /api/projects/config.
 //
-// POST  /api/admin/project-config/dictionaries/:dictionary          — statuses | types | priorities
+// PUT   /api/admin/project-config/finance                           — switch project finance on / off
+// PUT   /api/admin/project-config/deadlines                         — "at risk" threshold in days
+// POST  /api/admin/project-config/dictionaries/:dictionary          — statuses | types | priorities |
+//                                                                     cost-categories (finance on only)
 // PATCH /api/admin/project-config/dictionaries/:dictionary/:id
 // PUT   /api/admin/project-config/dictionaries/:dictionary/order
 // PUT   /api/admin/project-config/transitions/:role                 — replace a role's allowed transitions
@@ -39,12 +42,38 @@ function configMutation(area, mutate) {
         ipAddress: req.auditContext?.ipAddress,
         userAgent: req.auditContext?.userAgent,
       });
-      res.json(await projectConfigService.getConfig(req.tenantId));
+      // Same shape as GET /api/projects/config; the tenant admin always has the cross-project view.
+      res.json({ ...await projectConfigService.getConfig(req.tenantId), has_cross_project_view: true });
     } catch (err) {
       if (err.status) return res.status(err.status).json({ error: err.message });
       next(err);
     }
   };
+}
+
+router.put(
+  '/finance',
+  [body('is_enabled').isBoolean({ strict: true })],
+  validate,
+  configMutation('finance', (req) =>
+    projectConfigService.setFinanceEnabled(req.tenantId, req.body.is_enabled, req.user.id)),
+);
+
+router.put(
+  '/deadlines',
+  [body('at_risk_threshold_days').isInt({ min: 0, max: projectConfigService.MAX_AT_RISK_THRESHOLD_DAYS }).toInt()],
+  validate,
+  configMutation('deadlines', (req) =>
+    projectConfigService.setAtRiskThresholdDays(req.tenantId, req.body.at_risk_threshold_days, req.user.id)),
+);
+
+// The cost category dictionary belongs to project finance and follows its switch.
+async function requireFinanceForCostCategories(req, res, next) {
+  try {
+    if (req.params.dictionary !== projectConfigService.COST_CATEGORIES) return next();
+    if (await projectConfigService.isFinanceEnabled(req.tenantId)) return next();
+    return res.status(403).json({ error: 'Project finance is switched off' });
+  } catch (err) { next(err); }
 }
 
 const dictionaryItemRules = [
@@ -56,6 +85,7 @@ router.post(
   '/dictionaries/:dictionary',
   [body('name').isString().trim().notEmpty().isLength({ max: 80 }), ...dictionaryItemRules],
   validate,
+  requireFinanceForCostCategories,
   configMutation('dictionary', (req) =>
     projectConfigService.createDictionaryItem(req.tenantId, req.params.dictionary, req.body)),
 );
@@ -64,6 +94,7 @@ router.put(
   '/dictionaries/:dictionary/order',
   [body('ids').isArray({ min: 1, max: 500 }), isAnyUUID(body('ids.*'))],
   validate,
+  requireFinanceForCostCategories,
   configMutation('dictionary_order', (req) =>
     projectConfigService.reorderDictionary(req.tenantId, req.params.dictionary, req.body.ids)),
 );
@@ -77,6 +108,7 @@ router.patch(
     ...dictionaryItemRules,
   ],
   validate,
+  requireFinanceForCostCategories,
   configMutation('dictionary', (req) =>
     projectConfigService.updateDictionaryItem(req.tenantId, req.params.dictionary, req.params.id, req.body)),
 );

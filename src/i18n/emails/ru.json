@@ -1,0 +1,195 @@
+{
+  "absenceReasons": {
+    "other": "Другое отсутствие",
+    "sickLeave": "Больничный",
+    "vacation": "Отпуск"
+  },
+  "activityReminder": {
+    "heading": "⏰ Напоминание о задаче",
+    "intro": "У вас есть предстоящая задача, требующая внимания:",
+    "linkHint": "Ссылка откроется в новом окне браузера. Если вы уже вошли в систему, повторный вход не потребуется.",
+    "subject": "[CRMtree] ⏰ Напоминание: {activityType} — {activityTitle}"
+  },
+  "activityTypes": {
+    "call": "Звонок",
+    "docSent": "Документ",
+    "email": "E-mail",
+    "meeting": "Встреча",
+    "note": "Заметка",
+    "opportunity": "Сделка",
+    "qbr": "QBR",
+    "task": "Задача",
+    "training": "Обучение"
+  },
+  "common": {
+    "automaticAssigner": "CRMtree (автоматически)",
+    "greeting": "Здравствуйте, {name}!",
+    "openDocument": "Открыть документ →",
+    "openLead": "Открыть лид →",
+    "openPartner": "Открыть партнёра →",
+    "openTask": "Открыть задачу →"
+  },
+  "crmActivityAssigned": {
+    "calendarHint": "Свои задачи вы можете посмотреть в разделе <strong>Календарь активностей → Задачи</strong>.",
+    "heading": "Вам назначена новая задача CRM",
+    "intro": "Пользователем <strong>{assignerName}</strong> вам назначена активность:",
+    "subject": "[CRMtree] Новая задача CRM: {activityTitle}"
+  },
+  "crmOwnerAssigned": {
+    "headingLead": "Вам назначен лид",
+    "headingPartner": "Вам назначен партнёр",
+    "introLead": "Пользователем <strong>{assignerName}</strong> вам назначен лид:",
+    "introPartner": "Пользователем <strong>{assignerName}</strong> вам назначен партнёр:",
+    "subjectLead": "[CRMtree] Новый лид: {sourceName}",
+    "subjectPartner": "[CRMtree] Новый партнёр: {sourceName}"
+  },
+  "documentSigned": {
+    "heading": "Документ подписан",
+    "intro": "Документ <strong>{documentName}</strong> успешно подписан электронной подписью.",
+    "signedBy": "Кем подписан",
+    "signedStatus": "Подписан ✓",
+    "subject": "[CRMtree] Документ подписан: {documentName}"
+  },
+  "documentStatusChanged": {
+    "changedBy": "Кем изменён",
+    "heading": "Статус документа изменён",
+    "intro": "У документа, к которому у вас есть доступ, изменился статус:",
+    "newStatus": "Новый статус",
+    "previousStatus": "Предыдущий статус",
+    "subject": "[CRMtree] Статус документа изменён: {documentName}"
+  },
+  "documentStatuses": {
+    "beingApproved": "На согласовании",
+    "beingEdited": "На редактировании",
+    "beingSigned": "На подписании",
+    "completed": "Завершён",
+    "hold": "На паузе",
+    "new": "Новый",
+    "rejected": "Отклонён",
+    "signed": "Подписан"
+  },
+  "documentTaskTypes": {
+    "approve": "На согласование",
+    "edit": "На редактирование",
+    "read": "На ознакомление",
+    "sign": "На подпись"
+  },
+  "labels": {
+    "activityDate": "Дата и время",
+    "assigner": "Кем назначено",
+    "comment": "Комментарий",
+    "document": "Документ",
+    "dueDate": "Срок",
+    "lead": "Лид",
+    "number": "Номер",
+    "partner": "Партнёр",
+    "project": "Проект",
+    "reminder": "Напоминание",
+    "status": "Статус",
+    "task": "Задача",
+    "taskType": "Тип задачи",
+    "title": "Название",
+    "type": "Тип"
+  },
+  "layout": {
+    "footerAutomatic": "Это сообщение создано автоматически системой CRMtree.",
+    "footerNoReply": "Не отвечайте на это письмо — этот почтовый ящик не просматривается."
+  },
+  "projectDeadlineSummary": {
+    "assignees": "исполнители: {names}",
+    "daysOverdue": "{count, plural, one {просрочено на # день} few {просрочено на # дня} many {просрочено на # дней} other {просрочено на # дня}}",
+    "delayedProjectsHeading": "Задерживающиеся проекты",
+    "dueOn": "срок: {date}",
+    "heading": "Просроченные задачи",
+    "intro": "По состоянию на {date}:",
+    "managedTasksHeading": "Просроченные задачи в ваших проектах",
+    "newBadge": "новое",
+    "ownTasksHeading": "Ваши просроченные задачи",
+    "reasonEndPassed": "Срок окончания проекта истёк {date} ({days, plural, one {# день} few {# дня} many {# дней} other {# дня}} назад), а незавершённых задач: {count}.",
+    "reasonTaskAfterEnd": "Незавершённые задачи со сроком после окончания проекта: {count}. Самый поздний срок: {latestDate} ({days, plural, one {# день} few {# дня} many {# дней} other {# дня}} после окончания проекта).",
+    "settingsHint": "Уведомления о сроках в проектах можно отключить в разделе «Мои настройки».",
+    "subject": "[CRMtree] Просроченные задачи — {date}",
+    "unassigned": "не назначена"
+  },
+  "projectDelayed": {
+    "daysAfterEnd": "{count, plural, one {# день после окончания проекта} few {# дня после окончания проекта} many {# дней после окончания проекта} other {# дня после окончания проекта}}",
+    "heading": "Проект задерживается",
+    "intro": "В проекте, в котором вы являетесь PM, срок незавершённой задачи позже даты окончания проекта:",
+    "latestTaskDueDate": "Самый поздний срок",
+    "openProject": "Открыть проект →",
+    "projectEndDate": "Окончание проекта",
+    "subject": "[CRMtree] Проект задерживается: {projectName}",
+    "tasksAfterEnd": "Задачи после окончания проекта"
+  },
+  "projectEndDateChanged": {
+    "dueDateChange": "Срок",
+    "heading": "Срок задачи изменён",
+    "intro": "Пользователем <strong>{changedByName}</strong> изменён срок задачи в проекте, в котором вы являетесь PM:",
+    "noDate": "нет",
+    "originalDueDate": "Первоначальный срок",
+    "reason": "Причина изменения",
+    "slipEarlier": "{count, plural, one {на # день раньше} few {на # дня раньше} many {на # дней раньше} other {на # дня раньше}}",
+    "slipLater": "{count, plural, one {на # день позже} few {на # дня позже} many {на # дней позже} other {на # дня позже}}",
+    "subject": "[CRMtree] Изменён срок задачи: {taskLabel} {taskName}"
+  },
+  "projectTaskAssigned": {
+    "heading": "Вам назначена задача в проекте",
+    "intro": "Пользователем <strong>{assignerName}</strong> вам назначена задача:",
+    "subject": "[CRMtree] Новая задача в проекте: {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "heading": "⏰ Напоминание о задаче в проекте",
+    "intro": "У вас есть задача, требующая внимания:",
+    "subject": "[CRMtree] ⏰ Напоминание: {taskLabel} {taskName}"
+  },
+  "reminderTypes": {
+    "activityAtDue": "В назначенное время",
+    "custom": "Своя дата напоминания",
+    "daysBefore": "{count, plural, one {За # день до срока} few {За # дня до срока} many {За # дней до срока} other {За # дня до срока}}",
+    "projectAtDue": "В день срока"
+  },
+  "substitutionAssigned": {
+    "absentPerson": "Отсутствующий сотрудник",
+    "from": "С",
+    "heading": "Вам поручено замещение",
+    "infoOnly": "Это уведомление носит информационный характер — подтверждение не требуется.",
+    "intro": "Пользователем <strong>{assignerName}</strong> вам поручено замещать сотрудника <strong>{absentName}</strong> на время отсутствия. На этот период вы получаете такой же доступ к лидам и партнёрам этого сотрудника, как и закреплённый за ними менеджер по продажам.",
+    "note": "Заметка",
+    "openCrm": "Открыть CRM →",
+    "reason": "Причина",
+    "subject": "[CRMtree] Замещение: {absentName} ({startsOn}–{endsOn})",
+    "toInclusive": "По (включительно)"
+  },
+  "taskAssigned": {
+    "heading": "У вас новая задача",
+    "intro": "Пользователем <strong>{assignerName}</strong> вам назначена задача по документу:",
+    "subject": "[CRMtree] Новая задача: {documentName}"
+  },
+  "taskCompleted": {
+    "completedBy": "Кем выполнена",
+    "heading": "Задача выполнена",
+    "intro": {
+      "approve": "Пользователем <strong>{completedByName}</strong> согласован документ <strong>{documentName}</strong>.",
+      "edit": "Пользователем <strong>{completedByName}</strong> отредактирован документ <strong>{documentName}</strong>.",
+      "other": "Пользователем <strong>{completedByName}</strong> выполнена задача по документу <strong>{documentName}</strong>.",
+      "read": "Пользователем <strong>{completedByName}</strong> прочитан документ <strong>{documentName}</strong>.",
+      "sign": "Пользователем <strong>{completedByName}</strong> подписан документ <strong>{documentName}</strong>."
+    },
+    "subject": "[CRMtree] Задача выполнена: {documentName}"
+  },
+  "taskRejected": {
+    "heading": "Задача отклонена",
+    "intro": "Пользователем <strong>{rejectedByName}</strong> отклонена задача по документу <strong>{documentName}</strong>.",
+    "reason": "Причина",
+    "rejectedBy": "Кем отклонена",
+    "subject": "[CRMtree] Задача отклонена: {documentName}"
+  },
+  "userInvitation": {
+    "heading": "Добро пожаловать в CRMtree!",
+    "ignoreHint": "Если вы не ожидали этого письма, просто проигнорируйте его.",
+    "intro": "Пользователем <strong>{invitedByName}</strong> вы добавлены в систему <strong>CRMtree</strong>.",
+    "loginHint": "Вы можете войти с помощью своей учётной записи Google Workspace (<strong>{email}</strong>) по ссылке ниже:",
+    "signIn": "Войти →",
+    "subject": "[CRMtree] Приглашение в систему"
+  }
+}

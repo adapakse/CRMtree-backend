@@ -13,6 +13,8 @@
 const db     = require('../config/database');
 const logger = require('../utils/logger');
 const email  = require('../utils/email');
+const { resolveLocale } = require('../config/locales');
+const pushService = require('./pushService');
 
 async function sendDueReminders() {
   const now = new Date().toISOString();
@@ -26,9 +28,13 @@ async function sendDueReminders() {
       l.company AS source_name,
       -- Odbiorca: przypisany user lub twórca
       COALESCE(u_a.email, u_c.email)           AS recipient_email,
-      COALESCE(u_a.display_name, u_c.display_name) AS recipient_name
+      COALESCE(u_a.id, u_c.id)                 AS recipient_id,
+      COALESCE(u_a.display_name, u_c.display_name) AS recipient_name,
+      CASE WHEN u_a.email IS NOT NULL THEN u_a.locale ELSE u_c.locale END AS recipient_locale,
+      t.default_locale AS tenant_default_locale
     FROM crm_lead_activities a
     JOIN crm_leads l          ON l.id = a.lead_id AND l.tenant_id = a.tenant_id
+    JOIN tenants t            ON t.id = a.tenant_id
     LEFT JOIN users u_a       ON u_a.id = a.assigned_to AND u_a.tenant_id = a.tenant_id
     LEFT JOIN users u_c       ON u_c.id = a.created_by  AND u_c.tenant_id = a.tenant_id
     WHERE a.reminder_at <= $1
@@ -37,9 +43,16 @@ async function sendDueReminders() {
   `, [now]);
 
   for (const act of leadActs) {
+    const { rows: claimed } = await db.query(
+      'UPDATE crm_lead_activities SET reminder_sent = true WHERE id = $1 AND tenant_id = $2 AND reminder_sent = false RETURNING id',
+      [act.id, act.tenant_id],
+    );
+    // Another replica of the backend is already sending this one.
+    if (!claimed.length) continue;
     try {
       await email.sendActivityReminder({
         to:            act.recipient_email,
+        locale:        resolveLocale({ userLocale: act.recipient_locale, tenantDefaultLocale: act.tenant_default_locale }),
         recipientName: act.recipient_name,
         activityType:  act.type,
         activityTitle: act.title,
@@ -49,12 +62,16 @@ async function sendDueReminders() {
         sourceId:      String(act.source_id),
         sourceName:    act.source_name,
       });
-      await db.query(
-        'UPDATE crm_lead_activities SET reminder_sent = true WHERE id = $1 AND tenant_id = $2',
-        [act.id, act.tenant_id],
-      );
+      await pushService.sendToUsers({
+        userIds: [act.recipient_id],
+        kind: 'activityReminder',
+        params: { title: act.title, sourceName: act.source_name },
+        dateParams: { when: act.activity_at },
+        data: { source_type: 'lead', source_id: act.source_id, activity_id: act.id },
+      });
       totalSent++;
     } catch (err) {
+      await db.query('UPDATE crm_lead_activities SET reminder_sent = false WHERE id = $1 AND tenant_id = $2', [act.id, act.tenant_id]);
       logger.error(`[CrmReminder] Błąd lead activity ${act.id}`, { error: err.message });
     }
   }
@@ -66,9 +83,13 @@ async function sendDueReminders() {
       p.id   AS source_id,
       p.company AS source_name,
       COALESCE(u_a.email, u_c.email)           AS recipient_email,
-      COALESCE(u_a.display_name, u_c.display_name) AS recipient_name
+      COALESCE(u_a.id, u_c.id)                 AS recipient_id,
+      COALESCE(u_a.display_name, u_c.display_name) AS recipient_name,
+      CASE WHEN u_a.email IS NOT NULL THEN u_a.locale ELSE u_c.locale END AS recipient_locale,
+      t.default_locale AS tenant_default_locale
     FROM crm_partner_activities a
     JOIN crm_partners p         ON p.id = a.partner_id AND p.tenant_id = a.tenant_id
+    JOIN tenants t              ON t.id = a.tenant_id
     LEFT JOIN users u_a         ON u_a.id = a.assigned_to AND u_a.tenant_id = a.tenant_id
     LEFT JOIN users u_c         ON u_c.id = a.created_by  AND u_c.tenant_id = a.tenant_id
     WHERE a.reminder_at <= $1
@@ -77,9 +98,16 @@ async function sendDueReminders() {
   `, [now]);
 
   for (const act of partnerActs) {
+    const { rows: claimed } = await db.query(
+      'UPDATE crm_partner_activities SET reminder_sent = true WHERE id = $1 AND tenant_id = $2 AND reminder_sent = false RETURNING id',
+      [act.id, act.tenant_id],
+    );
+    // Another replica of the backend is already sending this one.
+    if (!claimed.length) continue;
     try {
       await email.sendActivityReminder({
         to:            act.recipient_email,
+        locale:        resolveLocale({ userLocale: act.recipient_locale, tenantDefaultLocale: act.tenant_default_locale }),
         recipientName: act.recipient_name,
         activityType:  act.type,
         activityTitle: act.title,
@@ -89,12 +117,16 @@ async function sendDueReminders() {
         sourceId:      String(act.source_id),
         sourceName:    act.source_name,
       });
-      await db.query(
-        'UPDATE crm_partner_activities SET reminder_sent = true WHERE id = $1 AND tenant_id = $2',
-        [act.id, act.tenant_id],
-      );
+      await pushService.sendToUsers({
+        userIds: [act.recipient_id],
+        kind: 'activityReminder',
+        params: { title: act.title, sourceName: act.source_name },
+        dateParams: { when: act.activity_at },
+        data: { source_type: 'partner', source_id: act.source_id, activity_id: act.id },
+      });
       totalSent++;
     } catch (err) {
+      await db.query('UPDATE crm_partner_activities SET reminder_sent = false WHERE id = $1 AND tenant_id = $2', [act.id, act.tenant_id]);
       logger.error(`[CrmReminder] Błąd partner activity ${act.id}`, { error: err.message });
     }
   }
@@ -106,14 +138,16 @@ async function sendDueReminders() {
     SELECT
       t.id, t.task_number, t.name, t.end_date, t.reminder_type,
       p.id AS project_id, p.key AS project_key, p.name AS project_name,
+      tn.default_locale AS tenant_default_locale,
       COALESCE((
-        SELECT json_agg(json_build_object('email', u.email, 'name', u.display_name))
+        SELECT json_agg(json_build_object('id', u.id, 'email', u.email, 'name', u.display_name, 'locale', u.locale))
         FROM project_task_assignees a
         JOIN users u ON u.id = a.user_id AND u.is_active
         WHERE a.task_id = t.id
       ), '[]'::json) AS recipients
     FROM project_tasks t
     JOIN projects p ON p.id = t.project_id
+    JOIN tenants tn ON tn.id = p.tenant_id
     JOIN project_task_statuses s ON s.id = t.status_id
     WHERE t.reminder_at <= $1
       AND t.reminder_sent = false
@@ -122,10 +156,17 @@ async function sendDueReminders() {
   `, [now]);
 
   for (const task of projectTasks) {
+    const { rows: claimed } = await db.query(
+      'UPDATE project_tasks SET reminder_sent = true WHERE id = $1 AND reminder_sent = false RETURNING id',
+      [task.id],
+    );
+    // Another replica of the backend is already sending this one.
+    if (!claimed.length) continue;
     try {
       for (const recipient of task.recipients) {
         await email.sendProjectTaskReminder({
           to:            recipient.email,
+          locale:        resolveLocale({ userLocale: recipient.locale, tenantDefaultLocale: task.tenant_default_locale }),
           recipientName: recipient.name,
           projectId:     task.project_id,
           projectName:   task.project_name,
@@ -137,8 +178,14 @@ async function sendDueReminders() {
         });
         totalSent++;
       }
-      await db.query('UPDATE project_tasks SET reminder_sent = true WHERE id = $1', [task.id]);
+      await pushService.sendToUsers({
+        userIds: task.recipients.map((recipient) => recipient.id),
+        kind: 'projectTaskReminder',
+        params: { taskLabel: `${task.project_key}-${task.task_number}`, taskName: task.name, projectName: task.project_name },
+        data: { source_type: 'project_task', project_id: task.project_id, task_id: task.id },
+      });
     } catch (err) {
+      await db.query('UPDATE project_tasks SET reminder_sent = false WHERE id = $1', [task.id]);
       logger.error(`[CrmReminder] Błąd project task ${task.id}`, { error: err.message });
     }
   }

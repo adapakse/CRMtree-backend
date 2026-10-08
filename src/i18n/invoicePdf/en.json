@@ -1,0 +1,50 @@
+{
+  "address": "Address",
+  "buyer": "Buyer",
+  "footer": "Generated in CRMtree on {date} from data downloaded from KSeF.",
+  "issueDate": "Issue date",
+  "ksefNumber": "KSeF number",
+  "lines": {
+    "empty": "The invoice data contains no line items.",
+    "name": "Name of goods or service",
+    "netAmount": "Net amount",
+    "number": "No.",
+    "quantity": "Quantity",
+    "unit": "Unit",
+    "unitNetPrice": "Unit net price",
+    "vatRate": "VAT rate"
+  },
+  "notice": {
+    "body": "This document is a visualisation of invoice data downloaded from the Polish National e-Invoice System (KSeF). It is not the original document — the original is the structured invoice stored in KSeF.",
+    "title": "Visualisation of a KSeF invoice — this is not the original document"
+  },
+  "payment": {
+    "amountDue": "Amount due",
+    "bankAccount": "Bank account",
+    "dueDate": "Payment due date",
+    "form": "Payment method",
+    "paid": "Paid",
+    "paidPartially": "partially",
+    "paidYes": "yes",
+    "paymentDate": "Payment date",
+    "title": "Payment"
+  },
+  "paymentForm": {
+    "card": "card",
+    "cash": "cash",
+    "cheque": "cheque",
+    "credit": "credit",
+    "mobile": "mobile payment",
+    "transfer": "bank transfer",
+    "voucher": "voucher"
+  },
+  "saleDate": "Sale date",
+  "seller": "Seller",
+  "taxId": "Tax ID (NIP)",
+  "title": "Invoice {invoiceNumber}",
+  "totals": {
+    "gross": "Total gross",
+    "net": "Total net",
+    "vat": "Total VAT"
+  }
+}

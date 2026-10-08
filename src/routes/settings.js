@@ -6,6 +6,7 @@ const db = require("../config/database");
 const { requireAuth, requireAdmin } = require("../middleware/auth");
 const { injectAuditContext } = require("../middleware/errorHandler");
 const { clearTrainingModeCache } = require("../utils/trainingMode");
+const { SUPPORTED_LOCALES } = require("../config/locales");
 
 // ─── GET /api/admin/settings ──────────────────────────────────────────────────
 // Returns all settings as a flat key→value object.
@@ -133,6 +134,22 @@ router.put(
 // ─── POST /api/admin/settings/tooltips ───────────────────────────────────────
 // Upsert tooltip (create or update). Admin only.
 // Body: { key, label, value }
+// PUT /api/admin/settings/default-locale — language of users who have not
+// picked their own. Lives on the tenant row, not in app_settings, because the
+// reminder job reads it by joining tenants.
+router.put("/default-locale", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { locale } = req.body;
+    if (!SUPPORTED_LOCALES.includes(locale)) {
+      return res.status(400).json({ error: "Unsupported locale" });
+    }
+    await db.query("UPDATE tenants SET default_locale = $1 WHERE id = $2", [locale, req.tenantId]);
+    res.json({ default_locale: locale });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post("/tooltips", requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const { key, label, value } = req.body;

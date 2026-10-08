@@ -1,0 +1,26 @@
+{
+  "activityAssigned": {
+    "body": "{assignerName} · {sourceName}",
+    "title": "Nouvelle tâche: {title}"
+  },
+  "activityReminder": {
+    "body": "{sourceName} · {when}",
+    "title": "Rappel: {title}"
+  },
+  "leadOwnerAssigned": {
+    "body": "{assignerName} vous a attribué ce lead",
+    "title": "Nouveau lead: {sourceName}"
+  },
+  "partnerOwnerAssigned": {
+    "body": "{assignerName} vous a attribué ce partenaire",
+    "title": "Nouveau partenaire: {sourceName}"
+  },
+  "projectTaskAssigned": {
+    "body": "{assignerName} · {projectName}",
+    "title": "Nouvelle tâche: {taskLabel} {taskName}"
+  },
+  "projectTaskReminder": {
+    "body": "{projectName}",
+    "title": "Rappel: {taskLabel} {taskName}"
+  }
+}
