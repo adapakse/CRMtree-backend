@@ -5,16 +5,17 @@
 // Pipeline:
 //   1. KRS API (ms.gov.pl) — dane rejestrowe, oddziały, URL strony
 //   2. Strona WWW firmy    — scraping podstron, ekstrakcja tekstu
-//   3. AI (DeepSeek lub Anthropic) — analiza kontekstowa → sygnały + score
+//   3. AI — analiza kontekstowa → sygnały + score
 //
 // Env vars:
-//   DEEPSEEK_API_KEY  — klucz API DeepSeek (provider: deepseek)
-//   ANTHROPIC_API_KEY — klucz API Anthropic Claude (provider: anthropic)
 //   SERPER_API_KEY    — opcjonalny (Google search, gdy KRS nie ma URL strony)
 //
-// Wybór providera: app_settings.key = 'prospect.ai_provider'
-//   'deepseek'   → DeepSeek Chat (domyślny, tańszy)
-//   'anthropic'  → Claude Haiku 4.5 (wyższa jakość)
+// DOSTAWCA AI, KLUCZ I MODEL POCHODZĄ Z KONFIGURACJI TENANTA — tenant_ai_config
+// (migracja 0327), przez services/ai/aiClient.callAi(). Ten serwis nie wie, czy
+// pod spodem jest DeepSeek, Anthropic, OpenAI czy Gemini, i nie czyta żadnego
+// klucza z env. Dawny app_settings.prospect.ai_provider jest nieużywany.
+// Tenant bez skonfigurowanego AI nie ma enrichmentu — callAi rzuca wtedy
+// AiNotConfiguredError, co enrichOne zapisuje jako 'error' (nigdy 'done' z 0).
 // ─────────────────────────────────────────────────────────────────
 
 const axios      = require('axios');
@@ -27,10 +28,7 @@ const { normalizeWebsiteUrl, normalizeLinkedinUrl } = require('../utils/urlUtils
 const tenantIcpConfigService = require('./tenantIcpConfigService');
 
 const KRS_BASE        = 'https://api-krs.ms.gov.pl/api/krs';
-const DEEPSEEK_API    = 'https://api.deepseek.com/chat/completions';
-const DEEPSEEK_MODEL  = 'deepseek-chat';
-const ANTHROPIC_API   = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
+const { callAi } = require('./ai/aiClient');
 
 // Słowa kluczowe w URLach i anchor textach — wagi wg trafności dla naszych celów
 const LINK_SCORES = [
@@ -4084,105 +4082,7 @@ function buildPromptText(company, krsData, websiteText, activeSignals, fbData = 
   return `${buildSystemPrompt(activeSignals)}\n\n${buildUserMessage(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText)}`;
 }
 
-async function callDeepSeek(userMessage, systemPrompt) {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
 
-  const { data } = await axios.post(
-    DEEPSEEK_API,
-    {
-      model: DEEPSEEK_MODEL,
-      max_tokens: 3000,
-      temperature: 0,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: userMessage },
-      ],
-    },
-    {
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 90_000,
-    }
-  );
-
-  const choice = data?.choices?.[0];
-  const usage = {
-    prompt_tokens:            data?.usage?.prompt_tokens ?? null,
-    completion_tokens:        data?.usage?.completion_tokens ?? null,
-    prompt_cache_hit_tokens:  data?.usage?.prompt_cache_hit_tokens ?? null,
-    prompt_cache_miss_tokens: data?.usage?.prompt_cache_miss_tokens ?? null,
-  };
-  logger.info('[Prospect] DeepSeek raw API response', {
-    model:            data?.model,
-    finish_reason:    choice?.finish_reason,
-    completion_tokens: usage.completion_tokens,
-    prompt_tokens:    usage.prompt_tokens,
-    prompt_cache_hit_tokens:  usage.prompt_cache_hit_tokens,
-    prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
-    contentLength:    choice?.message?.content?.length,
-    contentPreview:   choice?.message?.content?.slice(0, 300),
-  });
-
-  return { content: choice?.message?.content || '{}', model: data?.model || null, usage };
-}
-
-async function callAnthropic(userMessage, systemPrompt) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
-
-  const { data } = await axios.post(
-    ANTHROPIC_API,
-    {
-      model: ANTHROPIC_MODEL,
-      max_tokens: 3000,
-      temperature: 0,
-      system: [
-        {
-          type: 'text',
-          text: systemPrompt,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: [
-        { role: 'user', content: userMessage },
-      ],
-    },
-    {
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'prompt-caching-2024-07-31',
-        'content-type': 'application/json',
-      },
-      timeout: 90_000,
-    }
-  );
-
-  // Anthropic nazywa te pola inaczej niż DeepSeek — mapujemy na te same nazwy
-  // (prompt_cache_hit_tokens/prompt_cache_miss_tokens) dla spójnego logu/enrichLog
-  // niezależnie od providera. cache_read = trafienie cache'u (hit), input_tokens
-  // to tokeny faktycznie przetworzone poza trafionym cache'em (miss).
-  const usage = {
-    prompt_tokens:            data?.usage?.input_tokens ?? null,
-    completion_tokens:        data?.usage?.output_tokens ?? null,
-    prompt_cache_hit_tokens:  data?.usage?.cache_read_input_tokens ?? null,
-    prompt_cache_miss_tokens: data?.usage?.input_tokens ?? null,
-  };
-  logger.info('[Prospect] Anthropic raw API response', {
-    model: data?.model,
-    stop_reason: data?.stop_reason,
-    prompt_tokens: usage.prompt_tokens,
-    completion_tokens: usage.completion_tokens,
-    prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens,
-    prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
-    contentLength: data?.content?.[0]?.text?.length,
-  });
-
-  return { content: data?.content?.[0]?.text || '{}', model: data?.model || null, usage };
-}
 
 // activeSignals: konfiguracja ICP tenanta (tenantIcpConfigService.getActiveConfig()
 // .activeSignals) — caller (enrichOne) ją pobiera RAZ i przekazuje tutaj, żeby nie
@@ -4195,17 +4095,23 @@ async function callAnthropic(userMessage, systemPrompt) {
 // (naprawione 2026-09-23 — wcześniej zwracało result=null, co enrichOne cicho
 // zapisywał jako pozornie ukończony enrichment z zerowym wynikiem).
 async function analyzeWithAi(company, krsData, websiteText, activeSignals, fbData = null, linkedinText = '', gusData = null, pracujText = '') {
-  const { rows } = await db.query(
-    `SELECT value FROM app_settings WHERE key = 'prospect.ai_provider' AND tenant_id = $1`,
-    [company.tenant_id]
-  );
-  const provider = rows[0]?.value || 'deepseek';
-
   const systemPrompt = buildSystemPrompt(activeSignals);
   const userMessage = buildUserMessage(company, krsData, websiteText, fbData, linkedinText, gusData, pracujText);
-  const { content: raw, model: usedModel, usage } = provider === 'anthropic'
-    ? await callAnthropic(userMessage, systemPrompt)
-    : await callDeepSeek(userMessage, systemPrompt);
+
+  // Dostawca, klucz i model pochodzą z konfiguracji TENANTA (tenant_ai_config,
+  // migracja 0327) — enrichment nie wie już, czy to DeepSeek, Anthropic, OpenAI
+  // czy Gemini. Dawny app_settings.prospect.ai_provider i klucze z env nie są tu
+  // używane. Brak konfiguracji rzuca AiNotConfiguredError, które propaguje do
+  // enrichOne i oznacza enrichment jako 'error' — NIGDY jako 'done' z wynikiem 0
+  // (ta sama zasada co przy niesparsowalnym JSON-ie, regresja z 23.09).
+  const { content: raw, model: usedModel, provider, usage } = await callAi({
+    tenantId: company.tenant_id,
+    system: systemPrompt,
+    user: userMessage,
+    tier: 'fast',
+    maxTokens: 3000,
+    purpose: 'enrichment',
+  });
 
   logger.info('[Prospect] AI raw response', { provider, company: company.company_name, rawLength: raw.length, rawPreview: raw.slice(0, 500) });
 
@@ -4942,7 +4848,10 @@ async function enrichOne(prospectId, opts = {}) {
       // DeepSeek zwraca "deepseek-v4-flash" mimo że w requeście wysłaliśmy
       // model: "deepseek-chat" (alias). Fallback na stałą tylko gdyby usage/model
       // nie przyszły w odpowiedzi.
-      model:        usedModel || (usedProvider === 'anthropic' ? ANTHROPIC_MODEL : DEEPSEEK_MODEL),
+      // Model z odpowiedzi API, nie z konfiguracji — DeepSeek zwraca np.
+      // "deepseek-v4-flash" mimo wysłanego aliasu "deepseek-chat". Brak
+      // fallbacku na stałą: model jest teraz konfiguracją tenanta, nie kodem.
+      model:        usedModel || null,
       icp_raw:      scoreResult.raw,
       icp_bonus:    bonusResult.bonus,
       icp_gate_points: gatePointsResult.points,
@@ -5230,7 +5139,7 @@ module.exports = {
   // przyszłe API Tenant → Enrichment/ICP).
   ICP_MAX_GATE_SCORE, ICP_BONUS_MAX_SCORE, ICP_TOTAL_MAX_SCORE, ICP_REQUIRED_SIGNALS_MAX_SCORE,
   evaluateIcpConfigValidity,
-  buildUserMessage, callDeepSeek,
+  buildUserMessage,
   // Eksport na potrzeby testów regresyjnych retrievalu (19.09, druga tura —
   // limit różnorodności kandydatów, wykluczenie dokumentów prawnych z budżetu
   // klasyfikacyjnego, dwupoziomowe scorowanie "partner").

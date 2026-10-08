@@ -76,6 +76,16 @@ beforeAll(async () => {
     [SLUG],
   );
   tenantId = tenant.id;
+
+  // Enrichment bierze dostawcę, klucz i model z tenant_ai_config (migracja 0327),
+  // nie z env — bez tego wiersza callAi rzuciłoby AiNotConfiguredError i test
+  // sprawdzałby zupełnie inną ścieżkę niż niesparsowalny JSON.
+  await db.query(
+    `INSERT INTO tenant_ai_config (tenant_id, provider, api_key, api_key_hint, model_fast)
+     VALUES ($1, 'deepseek', $2, 'test', 'deepseek-chat')
+     ON CONFLICT (tenant_id) DO UPDATE SET provider = 'deepseek'`,
+    [tenantId, require('../utils/encrypt').encrypt('sk-test-key-test')],
+  );
 });
 
 beforeEach(async () => {

@@ -3,8 +3,10 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
+const { body } = require("express-validator");
 const { requireAuth, requireAdmin } = require("../middleware/auth");
-const { injectAuditContext } = require("../middleware/errorHandler");
+const { injectAuditContext, validate } = require("../middleware/errorHandler");
+const aiConfigService = require("../services/ai/aiConfigService");
 const { clearTrainingModeCache } = require("../utils/trainingMode");
 const { SUPPORTED_LOCALES } = require("../config/locales");
 
@@ -130,6 +132,80 @@ router.put(
   },
 );
 
+
+// ─── /api/admin/settings/ai ──────────────────────────────────────────────────
+// Dostawca AI, klucz API i modele tenanta (migracja 0327). Celowo BRAK :tenantId
+// w URL — zawsze req.tenantId z JWT, więc admin tenanta nie ma jak zaadresować
+// cudzego tenanta (ten sam wzorzec co etapy leada i ICP).
+//
+// Klucz API nigdy nie wraca z GET — tylko api_key_hint (4 ostatnie znaki).
+// Reguły (weryfikacja przed zapisem, brak fallbacku na klucz systemowy):
+// services/ai/aiConfigService.js i aiClient.js.
+
+router.get("/ai", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    res.json(await aiConfigService.getConfig(req.tenantId));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/ai",
+  requireAuth, requireAdmin, injectAuditContext,
+  [
+    body("provider").isString().trim().notEmpty(),
+    // Klucz opcjonalny przy aktualizacji: admin zmieniający tylko model nie musi
+    // (i nie może) wklejać go ponownie, bo API mu go nie zwraca.
+    body("api_key").optional({ nullable: true }).isString(),
+    body("model_fast").isString().trim().notEmpty().isLength({ max: 128 }),
+    body("model_quality").optional({ nullable: true }).isString().trim().isLength({ max: 128 }),
+    body("base_url").optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const config = await aiConfigService.saveConfig(req.tenantId, {
+        provider: req.body.provider,
+        apiKey: req.body.api_key,
+        modelFast: req.body.model_fast,
+        modelQuality: req.body.model_quality,
+        baseUrl: req.body.base_url,
+      }, { actorUserId: req.user?.id ?? null });
+
+      if (req.auditLog) {
+        // Logujemy dostawcę i modele, NIGDY klucza ani jego fragmentu.
+        await req.auditLog("settings_updated", null, null, {
+          ai_provider: config.provider,
+          ai_model_fast: config.model_fast,
+          ai_model_quality: config.model_quality,
+        });
+      }
+      res.json({ config });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+router.post("/ai/recheck", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    res.json(await aiConfigService.recheckConfig(req.tenantId));
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.delete("/ai", requireAuth, requireAdmin, injectAuditContext, async (req, res, next) => {
+  try {
+    const result = await aiConfigService.deleteConfig(req.tenantId);
+    if (req.auditLog) await req.auditLog("settings_updated", null, null, { ai_config_deleted: true });
+    res.json(result);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
 
 // ─── POST /api/admin/settings/tooltips ───────────────────────────────────────
 // Upsert tooltip (create or update). Admin only.
