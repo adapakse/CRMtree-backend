@@ -378,7 +378,8 @@ describe('projects list', () => {
     expect(res.body).toMatchObject({ total: 3, page: 1, page_size: 2, can_create: true });
     expect(res.body.items.map((row) => row.name)).toEqual(['Alfa Wdrożenie', 'Beta Serwis']);
     expect((await listProjects(pm, '?page_size=2&page=2&sort=name')).body.items.map((row) => row.name)).toEqual(['Listy Zadań']);
-    expect(res.body).not.toHaveProperty('projects');
+    // The released mobile app reads the same page from the old field name.
+    expect(res.body.projects).toEqual(res.body.items);
     expect((await listProjects(pm, '?page_size=51')).status).toBe(400);
     expect((await listProjects(pm, '?page=0')).status).toBe(400);
   });
