@@ -15,6 +15,7 @@ const projectCrmLinkService = require('../services/projectCrmLinkService');
 const salesMetrics   = require('../services/crmSalesMetricsService');
 const testAccountSvc = require('../services/testAccountService');
 const crmLeadHoldSvc = require('../services/crmLeadHoldService');
+const leadStageSvc   = require('../services/leadStageService');
 const email          = require('../utils/email');
 const pushService    = require('../services/pushService');
 const { resolveLocale } = require('../config/locales');
@@ -49,6 +50,10 @@ router.get('/',
       const limit  = req.query.limit || 50;
       const offset = (page - 1) * limit;
 
+      // Kody etapów są konfigurowalne, więc „ukryj archiwum" i „policz
+      // zakwalifikowane" muszą czytać konfigurację, nie literały.
+      const listStageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+
       const params = [req.tenantId];
       let where = "WHERE l.tenant_id = $1";
 
@@ -63,10 +68,11 @@ router.get('/',
       if (req.query.stage) {
         params.push(req.query.stage);
         where += ` AND l.stage = $${params.length}`;
-      } else {
+      } else if (listStageConfig.archivedKey) {
         // Bez wybranego etapu w filtrze — Archiwum jest ukryte domyślnie wszędzie,
         // widoczne tylko po jawnym wybraniu filtra Etap = Archiwum.
-        where += ` AND l.stage != 'archived'`;
+        params.push(listStageConfig.archivedKey);
+        where += ` AND l.stage <> $${params.length}`;
       }
       if (req.query.source) {
         // Może być pojedyncza wartość lub lista oddzielona przecinkami (filtr grupy)
@@ -127,7 +133,10 @@ router.get('/',
         db.query(`SELECT COUNT(*) FROM crm_leads l ${where}`, countParams),
         // "Okazje sprzedażowe" — Archiwum nigdy się tu nie liczy, nawet przy jawnym
         // filtrze Etap = Archiwum (inaczej kafelek pokazywałby zarchiwizowane leady).
-        db.query(`SELECT COUNT(*) FROM crm_leads l ${where} AND l.stage NOT IN ('new','archived')`, countParams),
+        db.query(
+          `SELECT COUNT(*) FROM crm_leads l ${where} AND NOT (l.stage = ANY($${countParams.length + 1}::text[]))`,
+          [...countParams, [listStageConfig.entryKey, listStageConfig.archivedKey].filter(Boolean)],
+        ),
         db.query(`
           SELECT l.*,
             u.display_name AS assigned_to_name,
@@ -195,7 +204,9 @@ router.post('/',
     body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
     body('phone').optional().trim(),
     body('source').optional().trim(),
-    body('stage').optional().isIn(['new','qualification','presentation','offer','negotiation','closed_won','closed_lost']),
+    // Lista dozwolonych etapów zależy od tenanta (tenant_lead_stages), więc nie
+    // da się jej zamknąć w isIn() — sprawdzamy ją w handlerze.
+    body('stage').optional().isString().trim(),
     body('value_pln').optional({ nullable: true }).isFloat({ min: 0 }),
     body('annual_turnover_currency').optional({ nullable: true }).isString(),
     body('online_pct').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
@@ -215,9 +226,18 @@ router.post('/',
     try {
       const {
         company, contact_name, contact_title, email, phone, source,
-        stage = 'new', value_pln, annual_turnover_currency, online_pct, probability, close_date, industry,
+        value_pln, annual_turnover_currency, online_pct, probability, close_date, industry,
         assigned_to, tags, notes, hot = false, nip,
       } = req.body;
+
+      // Etap wejściowy bierzemy z konfiguracji tenanta, nie ze stałej 'new' —
+      // jego kod jest niezmienny, ale to konfiguracja mówi, który etap jest
+      // pierwszy w lejku.
+      const stageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+      const stage = req.body.stage || stageConfig.entryKey;
+      if (!stageConfig.selectableKeys.includes(stage)) {
+        return res.status(400).json({ error: `Nieznany etap leada: "${stage}".` });
+      }
 
       // Handlowiec może przypisać tylko do siebie
       const ownerId = req.isCrmManager ? (assigned_to || req.user.id) : req.user.id;
@@ -570,6 +590,12 @@ router.get('/report',
   async (req, res, next) => {
     try {
       const rates = await salesMetrics.loadExchangeRates();
+      // Kolejność etapów w lejku i „etapy aktywne" (lejek bez etapu wejściowego)
+      // są konfigurowalne per tenant, więc raport sortuje i filtruje po liście z
+      // konfiguracji, a nie po wypisanym w SQL CASE — inaczej etap dodany przez
+      // tenanta wypadałby na koniec wykresu lub w ogóle nie wchodził do trendu.
+      const stageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+      const activeStageKeys = stageConfig.holdKeys;
       // Wyrażenie SQL przeliczające wartość leada na PLN wg kursów
       const valPln = `(CASE COALESCE(l.annual_turnover_currency,'PLN')
         WHEN 'EUR' THEN COALESCE(l.value_pln,0) * ${rates.EUR}
@@ -614,10 +640,24 @@ router.get('/report',
       // Zarchiwizowane leady znikają ze wszystkich KPI/wykresów raportu (w tym
       // historycznych sum Won/przychodu) — jedyny sposób ich zobaczenia to
       // filtr Etap = Archiwum na liście Leadów, nie raport.
-      conditions.push(`l.stage != 'archived'`);
+      if (stageConfig.archivedKey) {
+        params.push(stageConfig.archivedKey);
+        conditions.push(`l.stage <> $${params.length}`);
+      }
 
       const where    = conditions.length ? 'WHERE '    + conditions.join(' AND ') : '';
       const andWhere = conditions.length ? ' AND '     + conditions.join(' AND ') : '';
+
+      // Każde zapytanie dostaje WŁASNĄ instancję stageRefs — dokłada ona tylko te
+      // kody etapów, które w danym zapytaniu faktycznie wystąpiły (Postgres odrzuca
+      // przekazany, a nieużyty parametr). Patrz leadStageService.stageRefs.
+      // MUSI powstać po zbudowaniu `params`, bo numeruje się od jego długości.
+      const sKpi      = leadStageSvc.stageRefs(params, stageConfig);
+      const sFunnel   = leadStageSvc.stageRefs(params, stageConfig);
+      const sReps     = leadStageSvc.stageRefs(params, stageConfig);
+      const sChannels = leadStageSvc.stageRefs(params, stageConfig);
+      const sLost     = leadStageSvc.stageRefs(params, stageConfig);
+      const sVelocity = leadStageSvc.stageRefs(params, stageConfig);
 
       // Trend aktywnych leadów — data filtrowana po dacie kwalifikacji (q.qualified_at)
       const trendParams = [req.tenantId];
@@ -651,7 +691,8 @@ router.get('/report',
 
       // Trend wygranych — data filtrowana po dacie przejścia w closed_won (won_at lub updated_at)
       const wonTrendParams = [req.tenantId];
-      const wonTrendConds  = [`l.tenant_id = $1`, 'l.stage = \'closed_won\''];
+      wonTrendParams.push(stageConfig.wonKey);
+      const wonTrendConds  = [`l.tenant_id = $1`, `l.stage = $${wonTrendParams.length}`];
       if (req.user.is_admin) {
         // brak ograniczeń
       } else if (req.user.crm_role === 'sales_manager') {
@@ -720,34 +761,34 @@ router.get('/report',
         // KPI zbiorcze — wartości przeliczane na PLN wg kursów walut
         db.query(`
           SELECT
-            COUNT(*) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active)::int    AS active,
-            COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                              AS won,
-            COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                             AS lost,
-            COUNT(*) FILTER (WHERE l.hot = true AND l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active)::int AS hot,
-            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active),0)::numeric(14,2) AS pipeline_value,
-            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)                            AS won_value,
-            ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
-              NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
+            COUNT(*) FILTER (WHERE l.stage = ANY(${sKpi.pipeline()}) AND NOT l.hold_active)::int    AS active,
+            COUNT(*) FILTER (WHERE l.stage = ${sKpi.won()})::int                              AS won,
+            COUNT(*) FILTER (WHERE l.stage = ${sKpi.lost()})::int                             AS lost,
+            COUNT(*) FILTER (WHERE l.hot = true AND l.stage = ANY(${sKpi.pipeline()}) AND NOT l.hold_active)::int AS hot,
+            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = ANY(${sKpi.pipeline()}) AND NOT l.hold_active),0)::numeric(14,2) AS pipeline_value,
+            COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = ${sKpi.won()}),0)::numeric(14,2)                            AS won_value,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = ${sKpi.won()}) /
+              NULLIF(COUNT(*) FILTER (WHERE l.stage = ANY(${sKpi.closed()})),0))::int AS win_rate,
             ROUND(AVG(
               EXTRACT(DAY FROM (l.updated_at - COALESCE(
                 (SELECT MIN(al.created_at)
                  FROM audit_logs al
                  WHERE al.metadata->>'lead_id' = l.id::text
-                   AND al.after_state->>'stage' = 'qualification'),
+                   AND al.after_state->>'stage' = ${sKpi.cycle()}),
                 l.first_contact_date::timestamp,
                 l.created_at
               )))
-            ) FILTER (WHERE l.stage = 'closed_won'))::int AS avg_cycle_days,
-            -- pipeline_in_period: leady aktywne (kwalifikacja+) z close_date w wybranym przedziale
+            ) FILTER (WHERE l.stage = ${sKpi.won()}))::int AS avg_cycle_days,
+            -- pipeline_in_period: leady aktywne (poza etapem wejściowym) z close_date w wybranym przedziale
             COALESCE(SUM(${valPln}) FILTER (
-              WHERE l.stage NOT IN ('new','closed_won','closed_lost')
+              WHERE l.stage = ANY(${sKpi.pipeline()})
                 AND NOT l.hold_active
                 AND l.close_date IS NOT NULL
                 AND (${closeDateFrom} IS NULL OR l.close_date >= ${closeDateFrom}::date)
                 AND (${closeDateTo}   IS NULL OR l.close_date <= ${closeDateTo}::date)
             ),0)::numeric(14,2) AS pipeline_in_period
           FROM crm_leads l ${where}
-        `, params),
+        `, [...params, ...sKpi.values]),
 
         // Lejek per etap — lead na Holdzie wykluczony z etapów aktywnych, żeby nie
         // zaburzał liczby "aktywnych szans"; w 'new'/closed_won/closed_lost Hold nie występuje.
@@ -757,29 +798,27 @@ router.get('/report',
                  COALESCE(SUM(${valPln}),0)::numeric(14,2)   AS value
           FROM crm_leads l ${where ? where + ' AND NOT l.hold_active' : 'WHERE NOT l.hold_active'}
           GROUP BY l.stage
-          ORDER BY CASE l.stage
-            WHEN 'new' THEN 1 WHEN 'qualification' THEN 2 WHEN 'presentation' THEN 3
-            WHEN 'offer' THEN 4 WHEN 'negotiation' THEN 5 WHEN 'closed_won' THEN 6
-            WHEN 'closed_lost' THEN 7 ELSE 8 END
-        `, params),
+          ORDER BY array_position(${sFunnel.order()}, l.stage), l.stage
+        `, [...params, ...sFunnel.values]),
 
-        // Trend aktywnych — grupowanie po dacie wejścia w Kwalifikację, tylko etapy aktywne
+
+        // Trend aktywnych — grupowanie po dacie wejścia w pierwszy etap po utworzeniu leada
         db.query(`
           SELECT TO_CHAR(q.qualified_at,'YYYY-MM') AS month,
-                 COUNT(*) FILTER (WHERE l.stage IN ('qualification','presentation','offer','negotiation') AND NOT l.hold_active)::int AS active_leads
+                 COUNT(*) FILTER (WHERE l.stage = ANY($${trendParams.length + 1}::text[]) AND NOT l.hold_active)::int AS active_leads
           FROM crm_leads l
           JOIN (
             SELECT (metadata->>'lead_id')::int AS lead_id,
                    MIN(created_at)             AS qualified_at
             FROM audit_logs
-            WHERE after_state->>'stage' = 'qualification'
+            WHERE after_state->>'stage' = $${trendParams.length + 2}
             GROUP BY metadata->>'lead_id'
           ) q ON q.lead_id = l.id
           ${trendWhere}
           GROUP BY month
           ORDER BY month ASC
           LIMIT 24
-        `, trendParams),
+        `, [...trendParams, activeStageKeys, stageConfig.cycleStartKey]),
 
         // Trend wygranych — grupowanie po dacie wygranej (won_at z audit_logs lub updated_at)
         db.query(`
@@ -791,67 +830,67 @@ router.get('/report',
             SELECT (metadata->>'lead_id')::int AS lead_id,
                    MIN(created_at)             AS won_at
             FROM audit_logs
-            WHERE after_state->>'stage' = 'closed_won'
+            WHERE after_state->>'stage' = $${wonTrendParams.length + 1}
             GROUP BY metadata->>'lead_id'
           ) w ON w.lead_id = l.id
           ${wonTrendWhere}
           GROUP BY month
           ORDER BY month ASC
           LIMIT 24
-        `, wonTrendParams),
+        `, [...wonTrendParams, stageConfig.wonKey]),
 
         // Wyniki handlowców (tylko manager widzi wszystkich)
         req.isCrmManager
           ? db.query(`
               SELECT COALESCE(u.display_name,'— nieprzypisany —') AS rep_name,
                      u.id AS rep_id,
-                     COUNT(*) FILTER (WHERE l.stage != 'new')::int                                    AS total,
-                     COUNT(*) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active)::int    AS active,
-                     COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int                              AS won,
-                     COUNT(*) FILTER (WHERE l.stage = 'closed_lost')::int                             AS lost,
-                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage NOT IN ('new','closed_won','closed_lost') AND NOT l.hold_active),0)::numeric(14,2) AS pipeline_value,
-                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = 'closed_won'),0)::numeric(14,2)  AS won_value,
-                     ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = 'closed_won') /
-                       NULLIF(COUNT(*) FILTER (WHERE l.stage IN ('closed_won','closed_lost')),0))::int AS win_rate,
+                     COUNT(*) FILTER (WHERE l.stage <> ${sReps.entry()})::int                     AS total,
+                     COUNT(*) FILTER (WHERE l.stage = ANY(${sReps.pipeline()}) AND NOT l.hold_active)::int    AS active,
+                     COUNT(*) FILTER (WHERE l.stage = ${sReps.won()})::int                              AS won,
+                     COUNT(*) FILTER (WHERE l.stage = ${sReps.lost()})::int                             AS lost,
+                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = ANY(${sReps.pipeline()}) AND NOT l.hold_active),0)::numeric(14,2) AS pipeline_value,
+                     COALESCE(SUM(${valPln}) FILTER (WHERE l.stage = ${sReps.won()}),0)::numeric(14,2)  AS won_value,
+                     ROUND(100.0 * COUNT(*) FILTER (WHERE l.stage = ${sReps.won()}) /
+                       NULLIF(COUNT(*) FILTER (WHERE l.stage = ANY(${sReps.closed()})),0))::int AS win_rate,
                      ROUND(AVG(
                        EXTRACT(DAY FROM (l.updated_at - COALESCE(
                          (SELECT MIN(al.created_at)
                           FROM audit_logs al
                           WHERE al.metadata->>'lead_id' = l.id::text
-                            AND al.after_state->>'stage' = 'qualification'),
+                            AND al.after_state->>'stage' = ${sReps.cycle()}),
                          l.first_contact_date::timestamp,
                          l.created_at
                        )))
-                     ) FILTER (WHERE l.stage = 'closed_won'))::int AS avg_cycle_days
+                     ) FILTER (WHERE l.stage = ${sReps.won()}))::int AS avg_cycle_days
               FROM crm_leads l
               LEFT JOIN users u ON u.id = l.assigned_to AND u.tenant_id = $1
               ${where}
               GROUP BY u.display_name, u.id
               ORDER BY won_value DESC NULLS LAST
-            `, params)
+            `, [...params, ...sReps.values])
           : Promise.resolve({ rows: [] }),
 
         // Kanały (źródła leadów)
         db.query(`
           SELECT COALESCE(l.source,'inne') AS source,
                  COUNT(*)::int                                                  AS count,
-                 COUNT(*) FILTER (WHERE l.stage = 'closed_won')::int           AS won_count,
-                 COALESCE(SUM(l.value_pln) FILTER (WHERE l.stage='closed_won'),0)::numeric(14,2) AS won_value
+                 COUNT(*) FILTER (WHERE l.stage = ${sChannels.won()})::int           AS won_count,
+                 COALESCE(SUM(l.value_pln) FILTER (WHERE l.stage = ${sChannels.won()}),0)::numeric(14,2) AS won_value
           FROM crm_leads l ${where}
           GROUP BY l.source
           ORDER BY count DESC
-        `, params),
+        `, [...params, ...sChannels.values]),
 
         // Przyczyny porażek
         db.query(`
           SELECT COALESCE(l.lost_reason,'— brak powodu —') AS reason,
                  COUNT(*)::int AS count
           FROM crm_leads l
-          WHERE l.stage = 'closed_lost' ${andWhere}
+          WHERE l.stage = ${sLost.lost()} ${andWhere}
           GROUP BY l.lost_reason
           ORDER BY count DESC
           LIMIT 10
-        `, params),
+        `, [...params, ...sLost.values]),
 
         // Czas w etapie — tylko aktywne etapy (bez closed_won / closed_lost)
         // Won i Lost wykluczone — akumulują cały czas od początku i zaburzają skalę
@@ -866,13 +905,11 @@ router.get('/report',
               ))
             ))::int AS avg_days
           FROM crm_leads l
-          ${where ? where + " AND l.stage NOT IN ('closed_won','closed_lost') AND NOT l.hold_active"
-                  : "WHERE l.stage NOT IN ('closed_won','closed_lost') AND NOT l.hold_active"}
+          ${where ? where + ` AND NOT (l.stage = ANY(${sVelocity.closed()})) AND NOT l.hold_active`
+                  : `WHERE NOT (l.stage = ANY(${sVelocity.closed()})) AND NOT l.hold_active`}
           GROUP BY l.stage
-          ORDER BY CASE l.stage
-            WHEN 'new' THEN 1 WHEN 'qualification' THEN 2 WHEN 'presentation' THEN 3
-            WHEN 'offer' THEN 4 WHEN 'negotiation' THEN 5 ELSE 6 END
-        `, params),
+          ORDER BY array_position(${sVelocity.order()}, l.stage), l.stage
+        `, [...params, ...sVelocity.values]),
 
         // Aktywności handlowców (leady + partnerzy) — widoczne tylko dla managera
         req.isCrmManager
@@ -1157,7 +1194,7 @@ router.patch('/:id',
     param('id').isInt(),
     body('company').optional().notEmpty().trim(),
     body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
-    body('stage').optional().isIn(['new','qualification','presentation','offer','negotiation','closed_won','closed_lost']),
+    body('stage').optional().isString().trim(),
     body('value_pln').optional({ nullable: true }).isFloat({ min: 0 }),
     body('annual_turnover_currency').optional({ nullable: true }).isString(),
     body('online_pct').optional({ nullable: true }).isInt({ min: 0, max: 100 }),
@@ -1193,29 +1230,19 @@ router.patch('/:id',
       }
 
       // ── Walidacja sekwencji etapów ──────────────────────────────────────────
+      // Sekwencja i nazwy pochodzą z konfiguracji tenanta (tenant_lead_stages),
+      // nie ze stałych — reguły przejść (krok w przód, krok w tył, awaryjne
+      // wyjście w przegraną) są te same co dotąd, patrz leadStageService.js.
       if (req.body.stage && req.body.stage !== existing[0].stage) {
-        const STAGE_SEQ = ['new', 'qualification', 'presentation', 'offer', 'negotiation', 'closed_won'];
-        const STAGE_LABELS = {
-          new: 'Nowy', qualification: 'Kwalifikacja', presentation: 'Prezentacja',
-          offer: 'Oferta', negotiation: 'Negocjacje', closed_won: 'Wygrana', closed_lost: 'Przegrana',
-          archived: 'Archiwum',
-        };
-        function allowedNext(cur) {
-          if (cur === 'archived')    return ['new']; // jedyne wyjście z Archiwum — analogicznie do closed_lost
-          if (cur === 'closed_lost') return ['new'];
-          if (cur === 'closed_won')  return ['negotiation'];
-          const idx = STAGE_SEQ.indexOf(cur);
-          if (idx === -1) return [];
-          const result = [];
-          if (idx > 0) result.push(STAGE_SEQ[idx - 1]);
-          if (idx < STAGE_SEQ.length - 1) result.push(STAGE_SEQ[idx + 1]);
-          result.push('closed_lost'); // wyjście awaryjne z każdego aktywnego etapu
-          return result;
+        const stageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+        if (!stageConfig.selectableKeys.includes(req.body.stage)) {
+          return res.status(400).json({ error: `Nieznany etap leada: "${req.body.stage}".` });
         }
-        const allowed = allowedNext(existing[0].stage);
+        const labelOf = key => leadStageSvc.stageLabel(stageConfig.byKey.get(key)) || key;
+        const allowed = leadStageSvc.allowedNextStages(stageConfig, existing[0].stage);
         if (!allowed.includes(req.body.stage)) {
           return res.status(422).json({
-            error: `Niedozwolone przejście: "${STAGE_LABELS[existing[0].stage]}" → "${STAGE_LABELS[req.body.stage]}". Dozwolone: ${allowed.map(s => STAGE_LABELS[s]).join(', ')}.`,
+            error: `Niedozwolone przejście: "${labelOf(existing[0].stage)}" → "${labelOf(req.body.stage)}". Dozwolone: ${allowed.map(labelOf).join(', ')}.`,
           });
         }
         if (existing[0].hold_active) {
@@ -1326,9 +1353,15 @@ router.put('/:id/hold',
       try { assertOwnership(lead, req, 'assigned_to'); }
       catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
 
-      const HOLD_STAGES = ['qualification', 'presentation', 'offer', 'negotiation'];
-      if (!HOLD_STAGES.includes(lead.stage)) {
-        return res.status(422).json({ error: 'Hold dostępny tylko dla etapów: Kwalifikacja, Prezentacja, Oferta, Negocjacje.' });
+      // Hold ma sens tylko na etapie lejka, na którym handlowiec już coś robi —
+      // czyli na każdym poza etapem wejściowym (dotąd: lista na sztywno od
+      // Kwalifikacji do Negocjacji).
+      const stageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+      if (!stageConfig.holdKeys.includes(lead.stage)) {
+        const names = stageConfig.holdKeys
+          .map(key => leadStageSvc.stageLabel(stageConfig.byKey.get(key)) || key)
+          .join(', ');
+        return res.status(422).json({ error: `Hold dostępny tylko dla etapów: ${names}.` });
       }
 
       const until    = req.body.until;
@@ -1435,7 +1468,14 @@ router.put('/:id/archive',
       try { assertOwnership(lead, req, 'assigned_to'); }
       catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
 
-      if (lead.stage === 'archived') {
+      // Kod etapu archiwum jest konfigurowalny (nazwę tenant może zmienić), ale
+      // sam etap zawsze istnieje — to stan zapisywany przez kod, nie krok lejka.
+      const stageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+      const archivedKey = stageConfig.archivedKey;
+      if (!archivedKey) {
+        return res.status(409).json({ error: 'Ten tenant nie ma etapu archiwum.' });
+      }
+      if (lead.stage === archivedKey) {
         return res.status(409).json({ error: 'Lead jest już zarchiwizowany.' });
       }
 
@@ -1445,10 +1485,10 @@ router.put('/:id/archive',
 
       const { rows } = await db.query(
         `UPDATE crm_leads
-            SET stage='archived', archived_at=now(), archived_by=$1, updated_at=now()
-          WHERE id=$2 AND tenant_id=$3
+            SET stage=$1, archived_at=now(), archived_by=$2, updated_at=now()
+          WHERE id=$3 AND tenant_id=$4
           RETURNING *`,
-        [req.user.id, id, req.tenantId]
+        [archivedKey, req.user.id, id, req.tenantId]
       );
 
       try {
@@ -1456,7 +1496,7 @@ router.put('/:id/archive',
           user:        req.user,
           action:      'crm_lead_archived',
           beforeState: { stage: lead.stage },
-          afterState:  { stage: 'archived' },
+          afterState:  { stage: archivedKey },
           metadata:    { lead_id: id },
           ipAddress:   req.auditContext?.ipAddress,
         });
@@ -2375,9 +2415,14 @@ router.post('/:id/migrate',
         }
       }
 
-      // Zaktualizuj leada: stage='onboarding', converted_at=now()
+      // Lead przechodzi w stan konwersji. Kod tego stanu jest konfigurowalny co do
+      // nazwy, ale zawsze istnieje (stan zapisywany przez kod, nie krok lejka);
+      // fallback na 'onboarding' tylko dla tenanta sprzed migracji 0321.
+      const convertStageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+      const convertingKey = convertStageConfig.convertedKeys[0] ?? 'onboarding';
       await db.query(
-        `UPDATE crm_leads SET converted_at=now(), stage='onboarding', updated_at=now() WHERE id=$1 AND tenant_id=$2`, [id, req.tenantId]
+        `UPDATE crm_leads SET converted_at=now(), stage=$1, updated_at=now() WHERE id=$2 AND tenant_id=$3`,
+        [convertingKey, id, req.tenantId]
       );
 
       await audit.log({
@@ -2387,7 +2432,7 @@ router.post('/:id/migrate',
         ipAddress: req.auditContext?.ipAddress,
       });
 
-      res.status(200).json({ lead_id: id, partner_id: partner.id, company: partner.company, stage: 'onboarding' });
+      res.status(200).json({ lead_id: id, partner_id: partner.id, company: partner.company, stage: convertingKey });
     } catch (err) { next(err); }
   }
 );
