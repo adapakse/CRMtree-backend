@@ -109,6 +109,9 @@ describe("POST /api/assistant/activity", () => {
     const sent = askSpy.mock.calls[0][0];
     expect(sent.system).toContain("Today is 2026-10-08 (Thursday), the time is 14:20");
     expect(sent.system).toContain("Reply in Polish");
+    // An example with a person in it made the model address every task "to Kacper".
+    expect(sent.system).not.toMatch(/Kacp|dla Anny|Ewą/);
+    expect(sent.system).toContain("never take a name");
     expect(sent.messages).toEqual([{ role: "user", content: "cokolwiek" }]);
   });
 
