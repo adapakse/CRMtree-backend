@@ -35,6 +35,7 @@ tags:
   - name: activities
   - name: agenda
   - name: assistant
+  - name: projects
 security:
   - bearerAuth: []
 
@@ -888,6 +889,756 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
 
+  /projects/config:
+    get:
+      tags: [projects]
+      operationId: getProjectsConfig
+      summary: The company's task dictionaries and what the Projects module offers this user
+      description: |
+        Statuses, types and priorities are the company's own; inactive items
+        stay in the lists so old tasks keep their names. Every route of the
+        Projects module answers 403 while the company has the module switched
+        off (`tenant_features.projects` in `GET /auth/me`).
+      responses:
+        '200':
+          description: The configuration
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectsConfig' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /projects:
+    get:
+      tags: [projects]
+      operationId: listProjects
+      summary: One page of the projects the user is a member of (a tenant admin — of all projects)
+      description: |
+        Open projects unless `status` says otherwise. Without `sort` the rows
+        are ordered by status, then by name. `finance` of a row is filled only
+        for a project whose finance the user may read.
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [open, closed, all], default: open } }
+        - { $ref: '#/components/parameters/ProjectFilterName' }
+        - { $ref: '#/components/parameters/ListStartFrom' }
+        - { $ref: '#/components/parameters/ListStartTo' }
+        - { $ref: '#/components/parameters/ListEndFrom' }
+        - { $ref: '#/components/parameters/ListEndTo' }
+        - { $ref: '#/components/parameters/ProjectFilterDelayed' }
+        - { $ref: '#/components/parameters/ProjectFilterDelayReason' }
+        - { $ref: '#/components/parameters/ProjectFilterLeadId' }
+        - { $ref: '#/components/parameters/ProjectFilterPartnerId' }
+        - { $ref: '#/components/parameters/ProjectFilterMyRole' }
+        - { $ref: '#/components/parameters/ProjectFilterPm' }
+        - { $ref: '#/components/parameters/ProjectFilterOverdueMin' }
+        - { $ref: '#/components/parameters/ProjectFilterOverdueMax' }
+        - { $ref: '#/components/parameters/ProjectFilterAtRiskMin' }
+        - { $ref: '#/components/parameters/ProjectFilterAtRiskMax' }
+        - { $ref: '#/components/parameters/ProjectFilterProgressMin' }
+        - { $ref: '#/components/parameters/ProjectFilterProgressMax' }
+        - { $ref: '#/components/parameters/ListCostMin' }
+        - { $ref: '#/components/parameters/ListCostMax' }
+        - { $ref: '#/components/parameters/ProjectFilterRevenueMin' }
+        - { $ref: '#/components/parameters/ProjectFilterRevenueMax' }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { $ref: '#/components/parameters/ProjectSort' }
+        - { $ref: '#/components/parameters/SortOrder' }
+      responses:
+        '200':
+          description: One page of projects
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectListResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /projects/my-tasks:
+    get:
+      tags: [projects]
+      operationId: listMyProjectTasks
+      summary: One page of the tasks assigned to the user in open projects
+      description: |
+        Sorted by due date unless `sort` says otherwise. There is no
+        `assignee` filter here (one sent anyway is ignored). `cost_total` is
+        filled only in projects whose finance the user may read.
+      parameters:
+        - { name: include_done, in: query, schema: { type: boolean, default: false }, description: Also tasks in a status of the category "done" }
+        - { $ref: '#/components/parameters/TaskFilterProjectIds' }
+        - { $ref: '#/components/parameters/TaskFilterName' }
+        - { $ref: '#/components/parameters/TaskFilterNumber' }
+        - { $ref: '#/components/parameters/TaskFilterStatusIds' }
+        - { $ref: '#/components/parameters/TaskFilterStatusCategory' }
+        - { $ref: '#/components/parameters/TaskFilterPriorityIds' }
+        - { $ref: '#/components/parameters/TaskFilterTypeIds' }
+        - { $ref: '#/components/parameters/ListStartFrom' }
+        - { $ref: '#/components/parameters/ListStartTo' }
+        - { $ref: '#/components/parameters/ListEndFrom' }
+        - { $ref: '#/components/parameters/ListEndTo' }
+        - { $ref: '#/components/parameters/TaskFilterOriginalEndFrom' }
+        - { $ref: '#/components/parameters/TaskFilterOriginalEndTo' }
+        - { $ref: '#/components/parameters/TaskFilterSlipMin' }
+        - { $ref: '#/components/parameters/TaskFilterSlipMax' }
+        - { $ref: '#/components/parameters/ListCostMin' }
+        - { $ref: '#/components/parameters/ListCostMax' }
+        - { $ref: '#/components/parameters/TaskFilterTimeliness' }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { $ref: '#/components/parameters/TaskSort' }
+        - { $ref: '#/components/parameters/SortOrder' }
+      responses:
+        '200':
+          description: One page of flat task rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectTaskListResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /projects/assigned-tasks:
+    get:
+      tags: [projects]
+      operationId: listAssignedProjectTasks
+      summary: Every project task assigned to the user (or to the given people) in open projects, soonest due first
+      description: |
+        Not paged on purpose: it feeds the calendar and the "today" screen,
+        which need the whole set. Another person's tasks are returned only
+        from projects the user is a member of (a tenant admin: from all); an
+        external participant only ever gets their own.
+      parameters:
+        - { name: assigned_to, in: query, schema: { type: string }, description: 'User ids (uuid) separated by commas; without it the signed-in user' }
+        - { name: include_done, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: The tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AssignedProjectTask' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /projects/portfolio/projects:
+    get:
+      tags: [projects]
+      operationId: listPortfolioProjects
+      summary: One page of the projects of the cross-project view
+      description: |
+        The cross-project view (`has_cross_project_view` in
+        `GET /projects/config`): a tenant admin sees every open project, anyone
+        else the open projects where they are PM or controller; a user with
+        neither gets 403 on every `/projects/portfolio` route. Closed projects
+        are never part of it, so there is no `status` filter.
+      parameters:
+        - { $ref: '#/components/parameters/ProjectFilterName' }
+        - { $ref: '#/components/parameters/ListStartFrom' }
+        - { $ref: '#/components/parameters/ListStartTo' }
+        - { $ref: '#/components/parameters/ListEndFrom' }
+        - { $ref: '#/components/parameters/ListEndTo' }
+        - { $ref: '#/components/parameters/ProjectFilterDelayed' }
+        - { $ref: '#/components/parameters/ProjectFilterDelayReason' }
+        - { $ref: '#/components/parameters/ProjectFilterLeadId' }
+        - { $ref: '#/components/parameters/ProjectFilterPartnerId' }
+        - { $ref: '#/components/parameters/ProjectFilterMyRole' }
+        - { $ref: '#/components/parameters/ProjectFilterPm' }
+        - { $ref: '#/components/parameters/ProjectFilterOverdueMin' }
+        - { $ref: '#/components/parameters/ProjectFilterOverdueMax' }
+        - { $ref: '#/components/parameters/ProjectFilterAtRiskMin' }
+        - { $ref: '#/components/parameters/ProjectFilterAtRiskMax' }
+        - { $ref: '#/components/parameters/ProjectFilterProgressMin' }
+        - { $ref: '#/components/parameters/ProjectFilterProgressMax' }
+        - { $ref: '#/components/parameters/ListCostMin' }
+        - { $ref: '#/components/parameters/ListCostMax' }
+        - { $ref: '#/components/parameters/ProjectFilterRevenueMin' }
+        - { $ref: '#/components/parameters/ProjectFilterRevenueMax' }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { $ref: '#/components/parameters/ProjectSort' }
+        - { $ref: '#/components/parameters/SortOrder' }
+      responses:
+        '200':
+          description: One page of projects (without `projects` and `can_create`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectListResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /projects/portfolio/tasks:
+    get:
+      tags: [projects]
+      operationId: listPortfolioTasks
+      summary: One page of the tasks of every project of the cross-project view
+      description: |
+        Sorted by due date unless `sort` says otherwise. Costs are in each
+        project's own currency and are never converted.
+      parameters:
+        - { $ref: '#/components/parameters/TaskFilterProjectIds' }
+        - { $ref: '#/components/parameters/TaskFilterName' }
+        - { $ref: '#/components/parameters/TaskFilterNumber' }
+        - { $ref: '#/components/parameters/TaskFilterStatusIds' }
+        - { $ref: '#/components/parameters/TaskFilterStatusCategory' }
+        - { $ref: '#/components/parameters/TaskFilterPriorityIds' }
+        - { $ref: '#/components/parameters/TaskFilterTypeIds' }
+        - { $ref: '#/components/parameters/TaskFilterAssignee' }
+        - { $ref: '#/components/parameters/ListStartFrom' }
+        - { $ref: '#/components/parameters/ListStartTo' }
+        - { $ref: '#/components/parameters/ListEndFrom' }
+        - { $ref: '#/components/parameters/ListEndTo' }
+        - { $ref: '#/components/parameters/TaskFilterOriginalEndFrom' }
+        - { $ref: '#/components/parameters/TaskFilterOriginalEndTo' }
+        - { $ref: '#/components/parameters/TaskFilterSlipMin' }
+        - { $ref: '#/components/parameters/TaskFilterSlipMax' }
+        - { $ref: '#/components/parameters/ListCostMin' }
+        - { $ref: '#/components/parameters/ListCostMax' }
+        - { $ref: '#/components/parameters/TaskFilterTimeliness' }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { $ref: '#/components/parameters/TaskSort' }
+        - { $ref: '#/components/parameters/SortOrder' }
+      responses:
+        '200':
+          description: One page of flat task rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectTaskListResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /projects/portfolio/gantt:
+    get:
+      tags: [projects]
+      operationId: getPortfolioGantt
+      summary: The filtered tasks of the cross-project view for a timeline, not paged
+      description: |
+        Ordered by project key, then task number; build the tree from
+        `parent_task_id`. Stops at `limit` tasks and says so in `truncated`.
+      parameters:
+        - { $ref: '#/components/parameters/TaskFilterProjectIds' }
+        - { $ref: '#/components/parameters/TaskFilterName' }
+        - { $ref: '#/components/parameters/TaskFilterNumber' }
+        - { $ref: '#/components/parameters/TaskFilterStatusIds' }
+        - { $ref: '#/components/parameters/TaskFilterStatusCategory' }
+        - { $ref: '#/components/parameters/TaskFilterPriorityIds' }
+        - { $ref: '#/components/parameters/TaskFilterTypeIds' }
+        - { $ref: '#/components/parameters/TaskFilterAssignee' }
+        - { $ref: '#/components/parameters/ListStartFrom' }
+        - { $ref: '#/components/parameters/ListStartTo' }
+        - { $ref: '#/components/parameters/ListEndFrom' }
+        - { $ref: '#/components/parameters/ListEndTo' }
+        - { $ref: '#/components/parameters/TaskFilterOriginalEndFrom' }
+        - { $ref: '#/components/parameters/TaskFilterOriginalEndTo' }
+        - { $ref: '#/components/parameters/TaskFilterSlipMin' }
+        - { $ref: '#/components/parameters/TaskFilterSlipMax' }
+        - { $ref: '#/components/parameters/ListCostMin' }
+        - { $ref: '#/components/parameters/ListCostMax' }
+        - { $ref: '#/components/parameters/TaskFilterTimeliness' }
+      responses:
+        '200':
+          description: The tasks of the timeline
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectGanttResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /projects/portfolio/people:
+    get:
+      tags: [projects]
+      operationId: listPortfolioPeople
+      summary: Everyone who is a member of, or assigned to a task in, a project of the cross-project view
+      description: Feeds the person filter. Ordered by name, deactivated accounts included; cut at `limit`.
+      responses:
+        '200':
+          description: The people
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [people, truncated, limit]
+                properties:
+                  people:
+                    type: array
+                    items: { $ref: '#/components/schemas/ProjectPerson' }
+                  truncated: { type: boolean }
+                  limit: { type: integer }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /projects/portfolio/project-options:
+    get:
+      tags: [projects]
+      operationId: listPortfolioProjectOptions
+      summary: Id, key, name and dates of every project of the cross-project view
+      description: Feeds the project filter and the end-date lines of the timeline. Ordered by key; cut at `limit`.
+      responses:
+        '200':
+          description: The projects
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projects, truncated, limit]
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, key, name]
+                      properties:
+                        id: { type: string, format: uuid }
+                        key: { type: string }
+                        name: { type: string }
+                        start_date: { type: string, format: date, nullable: true }
+                        end_date: { type: string, format: date, nullable: true }
+                  truncated: { type: boolean }
+                  limit: { type: integer }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+    get:
+      tags: [projects]
+      operationId: getProject
+      summary: Project card — the project, its members, its custom fields and what the user may do in it
+      description: |
+        404 both for a project that does not exist and for one the user is not
+        a member of (a tenant admin opens every project).
+      responses:
+        '200':
+          description: The project card
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectCard' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}/messages:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+    get:
+      tags: [projects]
+      operationId: listProjectMessages
+      summary: The general chat of the project — its newest 200 messages, oldest first
+      responses:
+        '200':
+          description: The messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProjectMessage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [projects]
+      operationId: postProjectMessage
+      summary: Write in the general chat of the project
+      description: Every member may write. A closed project is read-only (409).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectMessageCreate' }
+      responses:
+        '201':
+          description: The message
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectMessage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}/tasks:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+    get:
+      tags: [projects]
+      operationId: listProjectTasks
+      summary: Every task of the project the user may see, by task number, not paged
+      description: |
+        The whole tree of the project view: nest by `parent_task_id`. An
+        external participant gets only the tasks assigned to them. Rows carry
+        no `permissions` and no cost; the filtered, paged list is
+        `/projects/{projectId}/tasks/search`.
+      parameters:
+        - { $ref: '#/components/parameters/TaskFilterMine' }
+      responses:
+        '200':
+          description: The tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProjectTask' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [projects]
+      operationId: createProjectTask
+      summary: Add a task to the project (the PM or a tenant admin only)
+      description: |
+        Without `status_id` the task gets the company's first "to do" status.
+        Anyone else gets 403; a closed project answers 409. The first
+        `end_date` a task gets stays as its `original_end_date`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectTaskCreate' }
+      responses:
+        '201':
+          description: The created task (without `permissions`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectTask' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}/tasks/search:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+    get:
+      tags: [projects]
+      operationId: searchProjectTasks
+      summary: One page of the project's tasks as flat rows — filtered and sorted
+      description: |
+        Sorted by task number unless `sort` says otherwise. An external
+        participant gets only the tasks assigned to them. `cost_total` is
+        filled only for someone who may read the project's finance.
+      parameters:
+        - { $ref: '#/components/parameters/TaskFilterMine' }
+        - { $ref: '#/components/parameters/TaskFilterName' }
+        - { $ref: '#/components/parameters/TaskFilterNumber' }
+        - { $ref: '#/components/parameters/TaskFilterStatusIds' }
+        - { $ref: '#/components/parameters/TaskFilterStatusCategory' }
+        - { $ref: '#/components/parameters/TaskFilterPriorityIds' }
+        - { $ref: '#/components/parameters/TaskFilterTypeIds' }
+        - { $ref: '#/components/parameters/TaskFilterAssignee' }
+        - { $ref: '#/components/parameters/ListStartFrom' }
+        - { $ref: '#/components/parameters/ListStartTo' }
+        - { $ref: '#/components/parameters/ListEndFrom' }
+        - { $ref: '#/components/parameters/ListEndTo' }
+        - { $ref: '#/components/parameters/TaskFilterOriginalEndFrom' }
+        - { $ref: '#/components/parameters/TaskFilterOriginalEndTo' }
+        - { $ref: '#/components/parameters/TaskFilterSlipMin' }
+        - { $ref: '#/components/parameters/TaskFilterSlipMax' }
+        - { $ref: '#/components/parameters/ListCostMin' }
+        - { $ref: '#/components/parameters/ListCostMax' }
+        - { $ref: '#/components/parameters/TaskFilterTimeliness' }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { $ref: '#/components/parameters/TaskSort' }
+        - { $ref: '#/components/parameters/SortOrder' }
+      responses:
+        '200':
+          description: One page of flat task rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectTaskListResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}/tasks/gantt:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+    get:
+      tags: [projects]
+      operationId: getProjectGantt
+      summary: The project's filtered tasks for a timeline, not paged
+      description: Ordered by task number; build the tree from `parent_task_id`. Stops at `limit` tasks and says so in `truncated`.
+      parameters:
+        - { $ref: '#/components/parameters/TaskFilterMine' }
+        - { $ref: '#/components/parameters/TaskFilterName' }
+        - { $ref: '#/components/parameters/TaskFilterNumber' }
+        - { $ref: '#/components/parameters/TaskFilterStatusIds' }
+        - { $ref: '#/components/parameters/TaskFilterStatusCategory' }
+        - { $ref: '#/components/parameters/TaskFilterPriorityIds' }
+        - { $ref: '#/components/parameters/TaskFilterTypeIds' }
+        - { $ref: '#/components/parameters/TaskFilterAssignee' }
+        - { $ref: '#/components/parameters/ListStartFrom' }
+        - { $ref: '#/components/parameters/ListStartTo' }
+        - { $ref: '#/components/parameters/ListEndFrom' }
+        - { $ref: '#/components/parameters/ListEndTo' }
+        - { $ref: '#/components/parameters/TaskFilterOriginalEndFrom' }
+        - { $ref: '#/components/parameters/TaskFilterOriginalEndTo' }
+        - { $ref: '#/components/parameters/TaskFilterSlipMin' }
+        - { $ref: '#/components/parameters/TaskFilterSlipMax' }
+        - { $ref: '#/components/parameters/ListCostMin' }
+        - { $ref: '#/components/parameters/ListCostMax' }
+        - { $ref: '#/components/parameters/TaskFilterTimeliness' }
+      responses:
+        '200':
+          description: The tasks of the timeline
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectGanttResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}/tasks/{taskId}:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+      - { $ref: '#/components/parameters/ProjectTaskId' }
+    get:
+      tags: [projects]
+      operationId: getProjectTask
+      summary: One task with what the user may do with it
+      description: 404 also for a task the user may not see (an external participant sees only tasks assigned to them).
+      responses:
+        '200':
+          description: The task with `permissions`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectTask' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [projects]
+      operationId: updateProjectTask
+      summary: Edit a task or change its status, as far as the user's role allows
+      description: |
+        Send only what changed: permissions are checked for every field that
+        is present, and a field the user may not change returns 403. The PM
+        and a tenant admin change everything; a participant with full access
+        edits the content of tasks assigned to them; `parent_task_id` and
+        `assignee_ids` are the PM's; a status change must be one of
+        `permissions.allowed_status_ids`. A closed project answers 409.
+        `end_date_change_reason` is kept in the task history and sent to the
+        PMs; without an actual change of `end_date` it is ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectTaskUpdate' }
+      responses:
+        '200':
+          description: The task after the change, with `permissions`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectTask' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}/tasks/{taskId}/history:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+      - { $ref: '#/components/parameters/ProjectTaskId' }
+    get:
+      tags: [projects]
+      operationId: listProjectTaskHistory
+      summary: Who changed what on the task — its newest 200 changes, newest first
+      responses:
+        '200':
+          description: The history
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProjectTaskHistoryEntry' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}/tasks/{taskId}/messages:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+      - { $ref: '#/components/parameters/ProjectTaskId' }
+    get:
+      tags: [projects]
+      operationId: listProjectTaskMessages
+      summary: The chat of the task — its newest 200 messages, oldest first
+      description: Open to whoever may see the task.
+      responses:
+        '200':
+          description: The messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProjectMessage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [projects]
+      operationId: postProjectTaskMessage
+      summary: Write in the chat of the task
+      description: Whoever may see the task may write. A closed project is read-only (409).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectMessageCreate' }
+      responses:
+        '201':
+          description: The message
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectMessage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}/finance:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+    get:
+      tags: [projects]
+      operationId: getProjectFinance
+      summary: Finance summary of the project — revenue, cost, margin, budget per category, cost per task
+      description: |
+        Net amounts in the project's one currency. For the PM, a tenant admin
+        and the controller (`finance.can_read` on the project card); anyone
+        else gets 403, and so does everyone while the company has project
+        finance switched off (`finance_enabled` in `GET /projects/config`).
+      responses:
+        '200':
+          description: The summary
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectFinanceSummary' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}/finance/costs:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+    get:
+      tags: [projects]
+      operationId: listProjectCosts
+      summary: Cost items of the project, newest cost date first
+      description: |
+        Everything for whoever reads the project's finance. An internal
+        participant allowed to add costs to own tasks
+        (`finance.can_add_own_costs`) gets only the items they created,
+        without invoice details. Anyone else gets 403.
+      parameters:
+        - { name: task_id, in: query, schema: { type: string, format: uuid }, description: Only the items booked on this task }
+      responses:
+        '200':
+          description: The cost items
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProjectCostItem' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /crm/leads/{id}/projects:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [projects]
+      operationId: listLeadProjects
+      summary: Projects run for the lead, open ones first, each with its tasks and finance totals
+      description: |
+        Visible to everyone who may see the lead, member of the project or
+        not; `can_open` says whether the user may enter the project itself.
+        403 while the company has the Projects module switched off.
+      responses:
+        '200':
+          description: The linked projects
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/LinkedProject' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /crm/partners/{partnerId}/projects:
+    parameters:
+      - $ref: '#/components/parameters/PartnerId'
+    get:
+      tags: [projects]
+      operationId: listPartnerProjects
+      summary: Projects run for the partner, open ones first, each with its tasks and finance totals
+      description: Same rules and shape as `/crm/leads/{id}/projects`.
+      responses:
+        '200':
+          description: The linked projects
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/LinkedProject' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /profile/project-deadline-notifications:
+    put:
+      tags: [projects]
+      operationId: setProjectDeadlineNotifications
+      summary: Turn the user's project deadline e-mails on or off, in every project at once
+      description: |
+        One switch for all three e-mails: the morning list of overdue tasks,
+        a moved due date and a project that became delayed. There are no push
+        notifications for these events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [is_enabled]
+              properties:
+                is_enabled: { type: boolean, description: 'A JSON boolean; the string "true" is rejected' }
+      responses:
+        '200':
+          description: The switch as saved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [project_deadline_notifications_enabled]
+                properties:
+                  project_deadline_notifications_enabled: { type: boolean }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -902,6 +1653,83 @@ components:
       required: true
       description: The partner's CRM id — `crm_uuid` from the list, `crm_id` from the card
       schema: { type: string, format: uuid }
+    ProjectId: { name: projectId, in: path, required: true, schema: { type: string, format: uuid } }
+    ProjectTaskId: { name: taskId, in: path, required: true, schema: { type: string, format: uuid } }
+
+    # Lists of the Projects module share one convention: an empty value is an
+    # unused filter, a malformed one is a 400.
+    Page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 50 } }
+    SortOrder: { name: order, in: query, schema: { type: string, enum: [asc, desc], default: asc } }
+    TaskSort:
+      name: sort
+      in: query
+      description: |
+        `parent` groups subtasks by their parent, top-level tasks last; `cost`
+        compares raw amounts, tasks without a readable cost last. Rows that
+        compare equal follow in project key and task number order.
+      schema:
+        type: string
+        enum: [number, name, parent, project, status, priority, type, assignee, start_date, end_date, original_end_date, slip_days, days_overdue, timeliness, cost]
+    ProjectSort:
+      name: sort
+      in: query
+      description: |
+        `delay` puts delayed projects first, the longest overrun first; `pm`
+        sorts by the alphabetically first PM; `cost` and `revenue` compare raw
+        amounts in each project's own currency, projects without readable
+        finance last.
+      schema:
+        type: string
+        enum: [name, key, status, start_date, end_date, delay, pm, progress, overdue, at_risk, cost, revenue]
+    ListStartFrom: { name: start_from, in: query, schema: { type: string, format: date }, description: Start date on or after this day }
+    ListStartTo: { name: start_to, in: query, schema: { type: string, format: date }, description: Start date on or before this day }
+    ListEndFrom: { name: end_from, in: query, schema: { type: string, format: date }, description: End (due) date on or after this day }
+    ListEndTo: { name: end_to, in: query, schema: { type: string, format: date }, description: End (due) date on or before this day }
+    ListCostMin:
+      name: cost_min
+      in: query
+      description: |
+        Lowest cost — of a task its `cost_total`, of a project its actual
+        cost — in the project's own currency (amounts are never converted).
+        A row whose cost the user may not read passes the filter.
+      schema: { type: number, minimum: 0 }
+    ListCostMax: { name: cost_max, in: query, schema: { type: number, minimum: 0 }, description: Highest cost; see `cost_min` }
+
+    TaskFilterMine: { name: mine, in: query, schema: { type: boolean, default: false }, description: Only the tasks assigned to the user }
+    TaskFilterName: { name: name, in: query, schema: { type: string, maxLength: 300 }, description: Part of the task name }
+    TaskFilterNumber: { name: number, in: query, schema: { type: string, maxLength: 30 }, description: 'Part of the task number, e.g. `WSC-12` or `12`' }
+    TaskFilterProjectIds: { name: project_ids, in: query, schema: { type: string }, description: Project ids (uuid) separated by commas }
+    TaskFilterStatusIds: { name: status_ids, in: query, schema: { type: string }, description: Status ids (uuid) separated by commas }
+    TaskFilterStatusCategory: { name: status_category, in: query, schema: { type: string }, description: 'Any of `todo`, `in_progress`, `done`, separated by commas' }
+    TaskFilterPriorityIds: { name: priority_ids, in: query, schema: { type: string }, description: Priority ids (uuid) separated by commas }
+    TaskFilterTypeIds: { name: type_ids, in: query, schema: { type: string }, description: Type ids (uuid) separated by commas }
+    TaskFilterAssignee: { name: assignee, in: query, schema: { type: string }, description: 'A user id (uuid), or `unassigned` for tasks nobody is assigned to' }
+    TaskFilterOriginalEndFrom: { name: original_end_from, in: query, schema: { type: string, format: date }, description: Original due date on or after this day }
+    TaskFilterOriginalEndTo: { name: original_end_to, in: query, schema: { type: string, format: date }, description: Original due date on or before this day }
+    TaskFilterSlipMin:
+      name: slip_min
+      in: query
+      description: Fewest days the due date moved from the original one (negative when brought forward); a task that never moved counts as 0
+      schema: { type: integer }
+    TaskFilterSlipMax: { name: slip_max, in: query, schema: { type: integer }, description: Most days the due date moved; see `slip_min` }
+    TaskFilterTimeliness: { name: timeliness, in: query, schema: { type: string }, description: 'Any of `overdue`, `at_risk`, `on_time`, separated by commas' }
+
+    ProjectFilterName: { name: name, in: query, schema: { type: string, maxLength: 200 }, description: Part of the project name or of its key }
+    ProjectFilterDelayed: { name: delayed, in: query, schema: { type: boolean }, description: Only delayed (`true`) or only not delayed (`false`) projects }
+    ProjectFilterDelayReason: { name: delay_reason, in: query, schema: { type: string }, description: 'Any of `task_after_end`, `end_passed`, separated by commas' }
+    ProjectFilterLeadId: { name: lead_id, in: query, schema: { type: integer, minimum: 1 }, description: Projects linked to this lead }
+    ProjectFilterPartnerId: { name: partner_id, in: query, schema: { type: string, format: uuid }, description: Projects linked to this partner (its CRM id) }
+    ProjectFilterMyRole: { name: my_role, in: query, schema: { type: string }, description: 'The user''s role in the project: any of `pm`, `controller`, `participant`, separated by commas' }
+    ProjectFilterPm: { name: pm, in: query, schema: { type: string, format: uuid }, description: Projects where this user is a PM }
+    ProjectFilterOverdueMin: { name: overdue_min, in: query, schema: { type: integer, minimum: 0 }, description: Fewest overdue tasks }
+    ProjectFilterOverdueMax: { name: overdue_max, in: query, schema: { type: integer, minimum: 0 }, description: Most overdue tasks }
+    ProjectFilterAtRiskMin: { name: at_risk_min, in: query, schema: { type: integer, minimum: 0 }, description: Fewest at-risk tasks }
+    ProjectFilterAtRiskMax: { name: at_risk_max, in: query, schema: { type: integer, minimum: 0 }, description: Most at-risk tasks }
+    ProjectFilterProgressMin: { name: progress_min, in: query, schema: { type: integer, minimum: 0, maximum: 100 }, description: Lowest `progress_percent` }
+    ProjectFilterProgressMax: { name: progress_max, in: query, schema: { type: integer, minimum: 0, maximum: 100 }, description: Highest `progress_percent` }
+    ProjectFilterRevenueMin: { name: revenue_min, in: query, schema: { type: number, minimum: 0 }, description: 'Lowest actual revenue; same rules as `cost_min`' }
+    ProjectFilterRevenueMax: { name: revenue_max, in: query, schema: { type: number, minimum: 0 }, description: Highest actual revenue }
 
   responses:
     Error:
@@ -1629,3 +2457,624 @@ components:
         pipeline_value_pln: { type: number, description: 'Value of those leads in PLN, rounded to whole PLN' }
         month_won_value_pln: { type: number, description: 'Value of own leads won in the month, in whole PLN' }
         month_budget_pln: { type: number, description: 'Planned budget for the month in whole PLN; 0 when no budget is set' }
+
+    ProjectPerson:
+      type: object
+      required: [user_id]
+      properties:
+        user_id: { type: string, format: uuid }
+        display_name: { type: string, nullable: true }
+
+    ProjectDictionaryItem:
+      description: A status, type, priority or cost category from the company's own dictionaries
+      type: object
+      required: [id, name, sort_order, is_active]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        color: { type: string, description: 'Hex colour, e.g. `#3B82F6`; cost categories have none' }
+        category: { type: string, enum: [todo, in_progress, done], description: 'Statuses only: the fixed meaning behind the company''s name' }
+        sort_order: { type: integer }
+        is_active: { type: boolean, description: Inactive items are kept so old tasks still show their name; do not offer them for new choices }
+
+    ProjectsConfig:
+      type: object
+      required: [statuses, types, priorities, transitions, field_definitions, finance_enabled, cost_categories, at_risk_threshold_days, has_cross_project_view]
+      properties:
+        statuses: { type: array, items: { $ref: '#/components/schemas/ProjectDictionaryItem' } }
+        types: { type: array, items: { $ref: '#/components/schemas/ProjectDictionaryItem' } }
+        priorities: { type: array, items: { $ref: '#/components/schemas/ProjectDictionaryItem' } }
+        transitions:
+          description: 'Status changes each project role may make; a PM may make any. For one task use `permissions.allowed_status_ids` instead'
+          type: array
+          items:
+            type: object
+            required: [role, from_status_id, to_status_id]
+            properties:
+              role: { type: string, enum: [internal_participant, external_participant, controller] }
+              from_status_id: { type: string, format: uuid }
+              to_status_id: { type: string, format: uuid }
+        field_definitions:
+          description: Custom task fields the company defined; a project uses the ones on its card
+          type: array
+          items:
+            type: object
+            required: [id, name, field_type, options, sort_order, is_active]
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+              field_type: { type: string, enum: [text, number, list, date, money] }
+              options: { type: array, items: { type: string }, description: 'Allowed values of a `list` field; empty for other types' }
+              sort_order: { type: integer }
+              is_active: { type: boolean }
+        finance_enabled: { type: boolean, description: The company uses project finance }
+        cost_categories:
+          description: Empty while project finance is switched off
+          type: array
+          items: { $ref: '#/components/schemas/ProjectDictionaryItem' }
+        at_risk_threshold_days: { type: integer, description: 'A "to do" task due within this many days (today included) is at risk' }
+        has_cross_project_view: { type: boolean, description: The user may use the `/projects/portfolio` routes }
+
+    ProjectTaskDeadline:
+      description: |
+        Deadline control of a task. Everything here is worked out by the
+        server when it is read ("today" is the date in Europe/Warsaw) — the
+        app shows it and never computes its own.
+      type: object
+      required: [original_end_date, completed_at, slip_days, timeliness, days_overdue, is_completed_late, has_overdue_subtasks]
+      properties:
+        original_end_date: { type: string, format: date, nullable: true, description: The first due date the task ever had; later changes never overwrite it }
+        completed_at: { type: string, format: date-time, nullable: true, description: 'When the task entered a "done" status; null while it is not done' }
+        slip_days: { type: integer, nullable: true, description: 'Due date minus the original one; null when they are equal or one is missing, negative when brought forward' }
+        timeliness:
+          type: string
+          nullable: true
+          enum: [overdue, at_risk, on_time, null]
+          description: |
+            `overdue` — due before today and not done; `at_risk` — not yet
+            started ("to do") and due within the company's threshold;
+            `on_time` — any other open task with a due date. Null without a
+            due date and once done.
+        days_overdue: { type: integer, nullable: true, description: Only for an overdue task }
+        is_completed_late: { type: boolean, description: 'Done, but after its due date' }
+        has_overdue_subtasks:
+          type: boolean
+          description: 'A subtask at any depth is overdue. A weaker marker: the task itself is not overdue because of it'
+
+    ProjectTaskRow:
+      description: |
+        A task as a flat row of the filtered lists and the timeline: it names
+        its project, parent, status, priority and type instead of nesting.
+      allOf:
+        - $ref: '#/components/schemas/ProjectTaskDeadline'
+        - type: object
+          required: [id, project_id, project_key, project_name, task_number, name, status_id, status_name, status_category, status_color, assignees]
+          properties:
+            id: { type: string, format: uuid }
+            project_id: { type: string, format: uuid }
+            project_key: { type: string, description: 'Prefix of the task number: `WSC` in `WSC-12`' }
+            project_name: { type: string }
+            task_number: { type: integer }
+            name: { type: string }
+            start_date: { type: string, format: date, nullable: true }
+            end_date: { type: string, format: date, nullable: true, description: 'The due date; a task has no due time' }
+            parent_task_id: { type: string, format: uuid, nullable: true }
+            parent_task_number: { type: integer, nullable: true, description: Null for a top-level task and when the user may not see the parent }
+            parent_task_name: { type: string, nullable: true }
+            status_id: { type: string, format: uuid }
+            status_name: { type: string }
+            status_category: { type: string, enum: [todo, in_progress, done] }
+            status_color: { type: string }
+            priority_id: { type: string, format: uuid, nullable: true }
+            priority_name: { type: string, nullable: true }
+            priority_color: { type: string, nullable: true }
+            type_id: { type: string, format: uuid, nullable: true }
+            type_name: { type: string, nullable: true }
+            type_color: { type: string, nullable: true }
+            cost_total:
+              type: number
+              nullable: true
+              description: |
+                Sum of the cost items booked on the task itself (planned and
+                incurred, without its subtasks). Null for someone who may not
+                read the project's finance and while finance is switched off.
+            cost_currency: { type: string, nullable: true, description: The project's currency; null together with `cost_total` }
+            assignees: { type: array, items: { $ref: '#/components/schemas/ProjectPerson' } }
+
+    ProjectTaskListResponse:
+      type: object
+      required: [items, total, page, page_size]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ProjectTaskRow' } }
+        total: { type: integer, description: Tasks matching the filters on all pages }
+        page: { type: integer }
+        page_size: { type: integer }
+
+    ProjectGanttResponse:
+      type: object
+      required: [items, truncated, limit]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ProjectTaskRow' } }
+        truncated: { type: boolean, description: More tasks match than `limit`; ask the user to narrow the filters }
+        limit: { type: integer, example: 500 }
+
+    ProjectTask:
+      description: |
+        A task of the project view. Status, type and priority are ids into
+        `GET /projects/config`.
+      allOf:
+        - $ref: '#/components/schemas/ProjectTaskDeadline'
+        - type: object
+          required: [id, project_id, task_number, name, status_id, status_category, custom_values, created_at, updated_at, assignees]
+          properties:
+            id: { type: string, format: uuid }
+            project_id: { type: string, format: uuid }
+            task_number: { type: integer }
+            name: { type: string }
+            description: { type: string, nullable: true }
+            type_id: { type: string, format: uuid, nullable: true }
+            status_id: { type: string, format: uuid }
+            status_category: { type: string, enum: [todo, in_progress, done] }
+            priority_id: { type: string, format: uuid, nullable: true }
+            start_date: { type: string, format: date, nullable: true }
+            end_date: { type: string, format: date, nullable: true }
+            parent_task_id: { type: string, format: uuid, nullable: true }
+            custom_values:
+              type: object
+              additionalProperties: true
+              description: 'Values of the project''s custom fields, keyed by `field_definition_id`; a `money` value is `{ amount, currency }`'
+            reminder_type: { type: string, nullable: true, enum: [at_due, 1d_before, 2d_before, 3d_before, custom, null] }
+            reminder_at: { type: string, format: date-time, nullable: true, description: 'When the reminder goes out; relative kinds count from 09:00 Europe/Warsaw on the due date' }
+            created_by: { type: string, format: uuid, nullable: true }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+            assignees: { type: array, items: { $ref: '#/components/schemas/ProjectPerson' } }
+            permissions:
+              description: 'Only with a single task (GET and PATCH of one task): what the user may do with it. All false / empty in a closed project'
+              type: object
+              required: [can_edit_content, can_edit_structure, allowed_status_ids]
+              properties:
+                can_edit_content: { type: boolean, description: 'Name, description, type, priority, dates, custom fields, reminder' }
+                can_edit_structure: { type: boolean, description: Parent task and assignees }
+                allowed_status_ids: { type: array, items: { type: string, format: uuid }, description: Statuses the user may move the task to from its current one }
+
+    ProjectTaskCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 300 }
+        description: { type: string, nullable: true, maxLength: 20000 }
+        type_id: { type: string, format: uuid, nullable: true }
+        priority_id: { type: string, format: uuid, nullable: true }
+        status_id: { type: string, format: uuid, description: 'An active status; without it the first "to do" status' }
+        start_date: { type: string, format: date, nullable: true }
+        end_date: { type: string, format: date, nullable: true, description: Not before `start_date` }
+        parent_task_id: { type: string, format: uuid, nullable: true, description: A task of the same project }
+        assignee_ids: { type: array, maxItems: 100, items: { type: string, format: uuid }, description: Members of the project }
+        custom_values: { type: object, additionalProperties: true, description: 'Values of the project''s custom fields, keyed by `field_definition_id`; required fields must be present' }
+        reminder_type: { type: string, nullable: true, enum: [at_due, 1d_before, 2d_before, 3d_before, custom, null] }
+        reminder_at: { type: string, format: date-time, nullable: true, description: Required with `reminder_type` `custom` }
+
+    ProjectTaskUpdate:
+      description: Only the fields that change. `assignee_ids` replaces the whole list; `custom_values` changes the fields it names.
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 300 }
+        description: { type: string, nullable: true, maxLength: 20000 }
+        type_id: { type: string, format: uuid, nullable: true }
+        priority_id: { type: string, format: uuid, nullable: true }
+        status_id: { type: string, format: uuid }
+        start_date: { type: string, format: date, nullable: true }
+        end_date: { type: string, format: date, nullable: true }
+        end_date_change_reason: { type: string, nullable: true, maxLength: 500, description: 'Why the due date moves; optional, ignored unless `end_date` really changes' }
+        parent_task_id: { type: string, format: uuid, nullable: true }
+        assignee_ids: { type: array, maxItems: 100, items: { type: string, format: uuid } }
+        custom_values: { type: object, additionalProperties: true }
+        reminder_type: { type: string, nullable: true, enum: [at_due, 1d_before, 2d_before, 3d_before, custom, null] }
+        reminder_at: { type: string, format: date-time, nullable: true }
+
+    ProjectTaskSummary:
+      description: A task as lists outside the project show it — it carries its status and priority by name
+      allOf:
+        - $ref: '#/components/schemas/ProjectTaskDeadline'
+        - type: object
+          required: [id, project_id, task_number, name, status_id, status_name, status_color, status_category, assignees]
+          properties:
+            id: { type: string, format: uuid }
+            project_id: { type: string, format: uuid }
+            task_number: { type: integer }
+            name: { type: string }
+            start_date: { type: string, format: date, nullable: true }
+            end_date: { type: string, format: date, nullable: true }
+            parent_task_id: { type: string, format: uuid, nullable: true }
+            status_id: { type: string, format: uuid }
+            status_name: { type: string }
+            status_color: { type: string }
+            status_category: { type: string, enum: [todo, in_progress, done] }
+            priority_name: { type: string, nullable: true }
+            priority_color: { type: string, nullable: true }
+            assignees: { type: array, items: { $ref: '#/components/schemas/ProjectPerson' } }
+
+    AssignedProjectTask:
+      allOf:
+        - $ref: '#/components/schemas/ProjectTaskSummary'
+        - type: object
+          required: [project_key, project_name, updated_at]
+          properties:
+            project_key: { type: string }
+            project_name: { type: string }
+            reminder_type: { type: string, nullable: true }
+            reminder_at: { type: string, format: date-time, nullable: true }
+            updated_at: { type: string, format: date-time }
+
+    ProjectDelay:
+      description: |
+        Whether the project is delayed — worked out by the server. Only an
+        open project with an end date can be delayed.
+      type: object
+      required: [is_delayed, delay_reasons, delay_details]
+      properties:
+        is_delayed: { type: boolean }
+        delay_reasons:
+          description: '`task_after_end` — an open task is due after the project''s end date; `end_passed` — the end date has passed and open tasks remain'
+          type: array
+          items: { type: string, enum: [task_after_end, end_passed] }
+        delay_details:
+          type: object
+          required: [open_task_count, tasks_after_end_count]
+          properties:
+            open_task_count: { type: integer, description: Tasks not done }
+            tasks_after_end_count: { type: integer, description: Open tasks due after the project's end date }
+            latest_task_end_date: { type: string, format: date, nullable: true, description: The latest due date among those tasks }
+            days_after_end: { type: integer, nullable: true, description: Days between the project's end date and that due date }
+            days_past_end: { type: integer, nullable: true, description: 'Days since the project''s end date; only with `end_passed`' }
+
+    ProjectSummary:
+      description: A project as a row of the project lists
+      allOf:
+        - $ref: '#/components/schemas/ProjectDelay'
+        - type: object
+          required: [id, key, name, status, created_at, member_count, task_count, done_task_count, overdue_task_count, at_risk_task_count, progress_percent, my_open_task_count, project_managers, finance]
+          properties:
+            id: { type: string, format: uuid }
+            key: { type: string, description: 'Prefix of the task numbers, never changed' }
+            name: { type: string }
+            description: { type: string, nullable: true }
+            status: { type: string, enum: [open, closed], description: A closed project is read-only }
+            lead_id: { type: integer, nullable: true, description: 'A project is linked to one lead, one partner or neither' }
+            lead_name: { type: string, nullable: true }
+            partner_id: { type: string, format: uuid, nullable: true }
+            partner_name: { type: string, nullable: true }
+            start_date: { type: string, format: date, nullable: true }
+            end_date: { type: string, format: date, nullable: true, description: Tasks may be due after it — the project is then delayed }
+            created_at: { type: string, format: date-time }
+            closed_at: { type: string, format: date-time, nullable: true }
+            my_role: { type: string, nullable: true, enum: [pm, internal_participant, external_participant, controller, null], description: Null for a tenant admin who is not a member }
+            my_access_level: { type: string, nullable: true, enum: [full, read, null] }
+            member_count: { type: integer }
+            task_count: { type: integer }
+            done_task_count: { type: integer }
+            overdue_task_count: { type: integer }
+            at_risk_task_count: { type: integer }
+            progress_percent: { type: integer, description: 'Share of done tasks in whole percent, 0 without tasks; show this number, do not compute another' }
+            my_open_task_count: { type: integer, description: Open tasks assigned to the user }
+            project_managers: { type: array, items: { $ref: '#/components/schemas/ProjectPerson' } }
+            finance: { $ref: '#/components/schemas/ProjectFinanceTotals' }
+
+    ProjectListResponse:
+      type: object
+      required: [items, total, page, page_size, can_filter_finance]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ProjectSummary' } }
+        total: { type: integer, description: Projects matching the filters on all pages }
+        page: { type: integer }
+        page_size: { type: integer }
+        can_filter_finance: { type: boolean, description: Offer the cost and revenue filters and sort keys only when true }
+        can_create: { type: boolean, description: '`GET /projects` only: the user may create projects' }
+        projects:
+          deprecated: true
+          description: '`GET /projects` only: the same rows as `items`, under the name used before paging. Read `items`'
+          type: array
+          items: { $ref: '#/components/schemas/ProjectSummary' }
+
+    ProjectMember:
+      type: object
+      required: [user_id, role, access_level, is_external, is_active]
+      properties:
+        user_id: { type: string, format: uuid }
+        role: { type: string, enum: [pm, internal_participant, external_participant, controller] }
+        access_level: { type: string, enum: [full, read], description: 'A PM always has `full`, a controller always `read`' }
+        display_name: { type: string, nullable: true }
+        email: { type: string }
+        phone: { type: string, nullable: true }
+        company: { type: string, nullable: true }
+        department: { type: string, nullable: true }
+        is_external: { type: boolean, description: An account that only uses the Projects module }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time, description: When the person joined the project }
+
+    ProjectField:
+      description: A custom task field the PM attached to the project
+      type: object
+      required: [field_definition_id, name, field_type, is_required]
+      properties:
+        field_definition_id: { type: string, format: uuid, description: Key of the value in a task's `custom_values` }
+        name: { type: string }
+        field_type: { type: string, enum: [text, number, list, date, money] }
+        options: { type: array, items: { type: string } }
+        is_required: { type: boolean }
+        sort_order: { type: integer }
+        is_active: { type: boolean }
+
+    ProjectCard:
+      type: object
+      required: [project, members, fields, my_role, my_access_level, can_manage, finance]
+      properties:
+        project:
+          allOf:
+            - $ref: '#/components/schemas/ProjectDelay'
+            - type: object
+              required: [id, key, name, status, created_at]
+              properties:
+                id: { type: string, format: uuid }
+                key: { type: string }
+                name: { type: string }
+                description: { type: string, nullable: true }
+                status: { type: string, enum: [open, closed] }
+                lead_id: { type: integer, nullable: true }
+                lead_name: { type: string, nullable: true }
+                partner_id: { type: string, format: uuid, nullable: true }
+                partner_name: { type: string, nullable: true }
+                start_date: { type: string, format: date, nullable: true }
+                end_date: { type: string, format: date, nullable: true }
+                created_at: { type: string, format: date-time }
+                updated_at: { type: string, format: date-time }
+                closed_at: { type: string, format: date-time, nullable: true }
+        members:
+          description: PMs first, then by name
+          type: array
+          items: { $ref: '#/components/schemas/ProjectMember' }
+        fields: { type: array, items: { $ref: '#/components/schemas/ProjectField' } }
+        my_role:
+          type: string
+          nullable: true
+          enum: [pm, internal_participant, external_participant, controller, null]
+          description: 'The user''s role — here, next to `project`, not inside it. Null for a tenant admin who is not a member'
+        my_access_level: { type: string, nullable: true, enum: [full, read, null] }
+        can_manage: { type: boolean, description: The user is a PM of the project or a tenant admin }
+        finance: { $ref: '#/components/schemas/ProjectFinanceAccess' }
+
+    ProjectFinanceAccess:
+      description: |
+        What the user may do with the project's finance. Null when the company
+        has project finance switched off or the user may see none of it — take
+        the permissions from here, never from the role.
+      type: object
+      nullable: true
+      required: [currency, can_read, can_write, can_add_own_costs]
+      properties:
+        currency: { type: string, example: PLN }
+        can_read: { type: boolean, description: 'May open the summary and every cost item (PM, tenant admin, controller)' }
+        can_write: { type: boolean, description: False in a closed project }
+        can_add_own_costs: { type: boolean, description: 'An internal participant the PM allowed to add costs to own tasks; sees only own cost items' }
+
+    ProjectMargin:
+      type: object
+      required: [amount, percent]
+      properties:
+        amount: { type: number, nullable: true, description: Revenue minus cost; null without a planned revenue }
+        percent: { type: number, nullable: true, description: 'In percentage points (12.5 = 12.5%); null without revenue' }
+
+    ProjectFinanceTotals:
+      description: |
+        Finance totals of a project, net, in its one currency. Null when the
+        user may not read them or project finance is switched off. Actual
+        revenue = invoiced and paid items; actual cost = incurred items;
+        planned cost = the sum of the category budgets.
+      type: object
+      nullable: true
+      required: [currency, revenue, cost, margin]
+      properties:
+        currency: { type: string, example: PLN }
+        revenue:
+          type: object
+          required: [planned, actual]
+          properties:
+            planned: { type: number, nullable: true }
+            actual: { type: number }
+        cost:
+          type: object
+          required: [planned, actual]
+          properties:
+            planned: { type: number }
+            actual: { type: number }
+        margin:
+          type: object
+          required: [planned, actual]
+          properties:
+            planned: { $ref: '#/components/schemas/ProjectMargin' }
+            actual: { $ref: '#/components/schemas/ProjectMargin' }
+
+    ProjectFinanceSummary:
+      type: object
+      required: [currency, is_currency_locked, participants_can_add_costs, revenue, suggested_planned_revenue, cost, margin, remaining_budget, categories, tasks]
+      properties:
+        currency: { type: string, example: PLN }
+        is_currency_locked: { type: boolean, description: The project already has cost or revenue items }
+        participants_can_add_costs: { type: boolean }
+        revenue:
+          type: object
+          required: [planned, actual, by_status]
+          properties:
+            planned: { type: number, nullable: true }
+            actual: { type: number, description: Invoiced and paid items }
+            by_status:
+              type: object
+              required: [planned, invoiced, paid]
+              properties:
+                planned: { type: number }
+                invoiced: { type: number }
+                paid: { type: number }
+        suggested_planned_revenue:
+          type: number
+          nullable: true
+          description: 'Value of the linked lead in the project''s currency, offered only while no planned revenue is set; nothing is saved'
+        cost:
+          type: object
+          required: [planned, actual, planned_items, task_planned_total]
+          properties:
+            planned: { type: number, description: Sum of the category budgets }
+            actual: { type: number, description: Incurred cost items }
+            planned_items: { type: number, description: Cost items still only planned }
+            task_planned_total: { type: number, description: 'Sum of the planned costs of tasks; reported next to the budget, never added to it' }
+        margin:
+          type: object
+          required: [planned, actual]
+          properties:
+            planned: { $ref: '#/components/schemas/ProjectMargin' }
+            actual: { $ref: '#/components/schemas/ProjectMargin' }
+        remaining_budget: { type: number, description: Planned cost minus actual cost; negative when over budget }
+        categories:
+          description: 'Cost categories in the company''s order; an inactive one only while it still has a budget or items'
+          type: array
+          items:
+            type: object
+            required: [category_id, name, is_active, budget, incurred, planned, variance, is_over_budget]
+            properties:
+              category_id: { type: string, format: uuid }
+              name: { type: string }
+              is_active: { type: boolean }
+              budget: { type: number, description: 0 without a budget }
+              incurred: { type: number }
+              planned: { type: number, description: Cost items still only planned }
+              variance: { type: number, description: Budget minus incurred }
+              is_over_budget: { type: boolean }
+        tasks:
+          description: 'Tasks that have a planned cost or cost items, by task number'
+          type: array
+          items:
+            type: object
+            required: [task_id, task_number, name, own_incurred, own_planned, total_incurred, total_planned]
+            properties:
+              task_id: { type: string, format: uuid }
+              task_number: { type: integer }
+              name: { type: string }
+              parent_task_id: { type: string, format: uuid, nullable: true }
+              planned_cost: { type: number, nullable: true }
+              own_incurred: { type: number, description: Incurred items booked on the task itself }
+              own_planned: { type: number }
+              total_incurred: { type: number, description: The task's own items plus those of all its subtasks }
+              total_planned: { type: number }
+
+    ProjectCostItem:
+      type: object
+      required: [id, project_id, date, amount, category_id, category_name, status, created_at, updated_at, ksef_invoice, document, other_links]
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        date: { type: string, format: date }
+        amount: { type: number, description: Net amount in the project's currency }
+        category_id: { type: string, format: uuid }
+        category_name: { type: string }
+        status: { type: string, enum: [planned, incurred] }
+        description: { type: string, nullable: true }
+        task_id: { type: string, format: uuid, nullable: true }
+        task_number: { type: integer, nullable: true }
+        task_name: { type: string, nullable: true }
+        supplier_name: { type: string, nullable: true }
+        document_number: { type: string, nullable: true }
+        original_amount: { type: number, nullable: true, description: The amount as entered when the cost was in another currency }
+        original_currency: { type: string, nullable: true }
+        exchange_rate: { type: number, nullable: true, description: Filled only when `amount` was computed from an NBP rate }
+        exchange_rate_date: { type: string, format: date, nullable: true }
+        ksef_invoice_id: { type: string, format: uuid, nullable: true }
+        document_id: { type: string, format: uuid, nullable: true }
+        created_by: { type: string, format: uuid, nullable: true }
+        created_by_name: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        ksef_invoice:
+          description: Summary of the linked KSeF purchase invoice (KSeF itself is web-only); show `invoice_number`
+          type: object
+          nullable: true
+          additionalProperties: true
+          properties:
+            id: { type: string, format: uuid }
+            invoice_number: { type: string, nullable: true }
+            seller_name: { type: string, nullable: true }
+        document:
+          description: The linked invoice document of the Documents module
+          type: object
+          nullable: true
+          additionalProperties: true
+          properties:
+            id: { type: string, format: uuid }
+            invoice_number: { type: string, nullable: true }
+        other_links:
+          description: 'Every other cost item — in any project — linked to the same invoice; when not empty, warn that the invoice is booked elsewhere too'
+          type: array
+          items:
+            type: object
+            required: [cost_item_id, project_id]
+            additionalProperties: true
+            properties:
+              cost_item_id: { type: string, format: uuid }
+              project_id: { type: string, format: uuid }
+              project_key: { type: string }
+              project_name: { type: string }
+              task_id: { type: string, format: uuid, nullable: true }
+              task_number: { type: integer, nullable: true }
+              task_name: { type: string, nullable: true }
+              amount: { type: number }
+              currency: { type: string }
+              status: { type: string }
+
+    LinkedProject:
+      description: 'A project run for a lead or a partner, as their card shows it: its state, its tasks and its finance totals'
+      allOf:
+        - $ref: '#/components/schemas/ProjectDelay'
+        - type: object
+          required: [id, key, name, status, created_at, can_open, tasks, finance]
+          properties:
+            id: { type: string, format: uuid }
+            key: { type: string }
+            name: { type: string }
+            status: { type: string, enum: [open, closed] }
+            start_date: { type: string, format: date, nullable: true }
+            end_date: { type: string, format: date, nullable: true }
+            created_at: { type: string, format: date-time }
+            closed_at: { type: string, format: date-time, nullable: true }
+            can_open: { type: boolean, description: 'The user is a member (or a tenant admin) and may enter the project; otherwise this summary is all they see' }
+            tasks:
+              description: 'Every task of the project, by task number'
+              type: array
+              items: { $ref: '#/components/schemas/ProjectTaskSummary' }
+            finance: { $ref: '#/components/schemas/ProjectFinanceTotals' }
+
+    ProjectMessage:
+      type: object
+      required: [id, body, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        body: { type: string }
+        created_at: { type: string, format: date-time }
+        author_id: { type: string, format: uuid, nullable: true, description: Null once the author's account is deleted }
+        author_name: { type: string, nullable: true }
+
+    ProjectMessageCreate:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 4000 }
+
+    ProjectTaskHistoryEntry:
+      type: object
+      required: [id, action, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        action: { type: string, description: '`project_task_created` or `project_task_updated`' }
+        user_name: { type: string, nullable: true }
+        before_state: { type: object, nullable: true, additionalProperties: true, description: 'The changed fields under their API names, as they were; null for the creation' }
+        after_state: { type: object, nullable: true, additionalProperties: true, description: The same fields after the change }
+        end_date_change_reason: { type: string, nullable: true, description: 'Why the due date was moved, when the person said so' }
+        created_at: { type: string, format: date-time }
