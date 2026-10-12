@@ -39,7 +39,9 @@ Pole "follow_up_required" ustaw na true, gdy z notatek wynika, że handlowiec um
 - klient odłożył temat z intencją powrotu ("temat odłożony w czasie", "wrócimy gdy...")
 - jakakolwiek inna wzmianka o kontynuacji rozmowy w przyszłości
 
-Pole "follow_up_date_hint" ustaw na krótką frazę opisującą KIEDY nastąpi kolejny kontakt. Data rozmowy jest podana w notatkach jako [CALL_DATE:RRRR-MM-DD] — traktuj ją jako "dziś" przy wyliczaniu terminów względnych. Ważne zasady:
+JĘZYK ODPOWIEDZI. Pola "summary", "signals" i "objections" pisz W JĘZYKU NOTATEK Z ROZMOWY — rozmowa po polsku daje opis po polsku, rozmowa po białorusku po białorusku, po rosyjsku po rosyjsku, po angielsku po angielsku. NIE tłumacz treści na polski: handlowiec prowadzący tego klienta czyta w tym samym języku, w którym rozmawiał. Gdy notatki mieszają języki, wybierz ten, w którym wypowiada się klient. Nie dotyczy to "follow_up_date_iso", które zawsze ma format RRRR-MM-DD.
+
+Pole "follow_up_date_hint" ustaw na krótką frazę opisującą KIEDY nastąpi kolejny kontakt. Frazę zostaw w języku rozmowy (dla rozmowy po białorusku — po białorusku); poniższe reguły normalizacji dotyczą rozmów po polsku, a dla pozostałych języków najważniejsze jest poprawne "follow_up_date_iso". Data rozmowy jest podana w notatkach jako [CALL_DATE:RRRR-MM-DD] — traktuj ją jako "dziś" przy wyliczaniu terminów względnych. Ważne zasady:
 1. SKANUJ OD KOŃCA ROZMOWY WSTECZ — znajdź ostatnią wypowiedź zawierającą ustalenie terminu (kiedy zadzwonić, kiedy się spotkać, kiedy wrócić do tematu). Ta fraza jest wiążąca. Grzecznościowe zakończenia rozmowy ("dziękuję", "do widzenia", "pozdrawiam") nie są frazami terminowymi i należy je pominąć. Wcześniejsze propozycje terminów, które zostały odrzucone lub zastąpione przez późniejsze, są nieważne.
 2. Szukaj ostatecznego porozumienia: ostatnie słowo klienta LUB ostatnie potwierdzenie handlowca ("dobrze, to za dwa tygodnie", "umówmy się na koniec miesiąca") to wynik końcowy.
 3. Jeśli w rozmowie pada sekwencja negocjacji (np. handlowiec: "przyszły tydzień" → klient: "nie mogę, proszę o dwa tygodnie" → brak odpowiedzi), bierz ostatni niezanegowany termin — tutaj "za dwa tygodnie".
@@ -49,8 +51,15 @@ Pole "follow_up_date_hint" ustaw na krótką frazę opisującą KIEDY nastąpi k
 Przykłady wyników: "za 2 tygodnie", "za dwa tygodnie", "w piątek", "25 września", "10 października", "koniec miesiąca", "koniec tygodnia", "połowa tygodnia", "na początku tygodnia", "pod koniec tygodnia", "z końcem tygodnia", "w marcu", "za 3 miesiące", "przyszły tydzień", "na początku przyszłego miesiąca", "połowa miesiąca", "połowa przyszłego miesiąca", "pierwsza połowa miesiąca", "pierwsza połowa przyszłego miesiąca", "druga połowa miesiąca", "druga połowa przyszłego miesiąca".
 Ustaw null gdy follow_up_required=false lub gdy brak jakiejkolwiek wzmianki o terminie.
 
+Pole "follow_up_date_iso" ustaw na KONKRETNĄ datę kolejnego kontaktu w formacie RRRR-MM-DD. To pole jest NIEZALEŻNE OD JĘZYKA ROZMOWY — wypełniasz je identycznie niezależnie od tego, czy notatki są po polsku, rosyjsku, angielsku czy w jakimkolwiek innym języku, i nawet wtedy, gdy "follow_up_date_hint" zostawiasz w brzmieniu oryginalnym. Zasady:
+1. Punktem odniesienia jest [CALL_DATE:RRRR-MM-DD] z notatek, a NIE dzisiejsza data. "завтра" przy [CALL_DATE:2026-10-12] to 2026-10-13.
+2. Licz tę datę z tej samej frazy, którą opisuje "follow_up_date_hint" — oba pola muszą wskazywać ten sam termin.
+3. Data musi być równa [CALL_DATE] lub późniejsza i nie dalsza niż 18 miesięcy od niej.
+4. Gdy termin jest nieostry ("koniec miesiąca", "po wakacjach"), podaj najlepsze przybliżenie konkretnym dniem.
+5. Ustaw null gdy follow_up_required=false albo gdy w rozmowie nie pada żadna wzmianka o terminie.
+
 Zwróć WYŁĄCZNIE poprawny obiekt JSON w dokładnie takim formacie (bez markdown, bez tekstu przed/po):
-{"score":<liczba całkowita 0-100>,"summary":"<2-3 zdania po polsku: postawa firmy, kluczowe sygnały, rekomendowane następne kroki>","signals":["<pozytywny sygnał 1>","<pozytywny sygnał 2>"],"objections":["<obiekcja 1>","<obiekcja 2>"],"follow_up_required":<true|false>,"follow_up_date_hint":<"krótka fraza"|null>}`;
+{"score":<liczba całkowita 0-100>,"summary":"<2-3 zdania W JĘZYKU ROZMOWY: postawa firmy, kluczowe sygnały, rekomendowane następne kroki>","signals":["<pozytywny sygnał 1>","<pozytywny sygnał 2>"],"objections":["<obiekcja 1>","<obiekcja 2>"],"follow_up_required":<true|false>,"follow_up_date_hint":<"krótka fraza"|null>,"follow_up_date_iso":<"RRRR-MM-DD"|null>}`;
 
 let batchRunning = false;
 let batchProgress = { total: 0, done: 0, errors: 0, running: false };
@@ -85,6 +94,36 @@ function toDateStr(d) {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+// Data policzona przez model (pole follow_up_date_iso), niezależna od języka
+// rozmowy. computeFollowUpDate rozumie wyłącznie polskie frazy, więc przy
+// rozmowie po białorusku, rosyjsku czy angielsku termin wcześniej wpadał w ślepy
+// fallback „+5 dni roboczych" i zadanie dostawało datę z sufitu. Model zwraca
+// tu konkretny dzień, ale jest to dane wejście jak każde inne — waliduj.
+const MAX_FOLLOW_UP_MONTHS = 18;
+
+function parseIsoFollowUpDate(raw, refDate) {
+  if (typeof raw !== 'string') return null;
+  const parts = raw.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!parts) return null;
+
+  const year = Number(parts[1]);
+  const month = Number(parts[2]);
+  const day = Number(parts[3]);
+  const target = new Date(year, month - 1, day);
+  // Odrzuca daty nieistniejące — "2026-02-31" sam Date przesunąłby na 3 marca.
+  if (target.getFullYear() !== year || target.getMonth() !== month - 1 || target.getDate() !== day) {
+    return null;
+  }
+
+  const ref = new Date(refDate.getFullYear(), refDate.getMonth(), refDate.getDate());
+  if (target < ref) return null;
+  const latest = new Date(ref);
+  latest.setMonth(latest.getMonth() + MAX_FOLLOW_UP_MONTHS);
+  if (target > latest) return null;
+
+  return toDateStr(nextBusinessDay(target));
 }
 
 function subBusinessDays(date, n) {
@@ -633,20 +672,30 @@ async function analyzeOne(tenantId, nip) {
     const score     = Math.max(0, Math.min(100, Math.round(parsed.score)));
     const followUp  = parsed.follow_up_required === true;
     const dateHint  = parsed.follow_up_date_hint || null;
+    const dateIso   = parsed.follow_up_date_iso || null;
 
     // Oblicz datę follow-up używając daty ostatniej rozmowy jako punktu odniesienia.
-    // Fallback 5 dni roboczych gdy follow_up_required=true, ale albo AI nie dał
-    // hinta (np. rozmowa mówi "wyślę ofertę dzisiaj" — to zobowiązanie do
-    // wysłania czegoś, nie do oddzwonienia w konkretnym terminie, więc AI
-    // słusznie zostawia hint=null), albo hint był ale się nie sparsował.
-    // Bez tego fallbacku follow_up_required=true z hint=null nigdy nie tworzył
-    // żadnego zadania — cichy, niewidoczny błąd (AI mówi "to wymaga
-    // follow-upu", a nic się nie dzieje).
+    // Kolejność źródeł, od najpewniejszego:
+    //   1. polski parser fraz — ma dostrojone reguły biznesowe ("koniec
+    //      miesiąca" = 2 dni robocze przed końcem), więc dla rozmów po polsku
+    //      zostaje źródłem prawdy i jego zachowanie się nie zmienia;
+    //   2. data policzona przez model — ratuje rozmowy w językach, których
+    //      parser nie rozumie (białoruski, rosyjski, angielski);
+    //   3. fallback 5 dni roboczych, gdy follow_up_required=true, ale terminu
+    //      nie da się ustalić (np. "wyślę ofertę dzisiaj" — zobowiązanie do
+    //      wysłania czegoś, nie do oddzwonienia w konkretnym dniu). Bez niego
+    //      follow_up_required=true bez terminu nie tworzył żadnego zadania:
+    //      cichy błąd, w którym AI mówi "to wymaga follow-upu", a nic się nie
+    //      dzieje. Ta gałąź zgaduje, więc zostawia ślad w logu.
     let followUpDate = null;
     if (followUp) {
-      followUpDate = computeFollowUpDate(dateHint, refDate);
+      followUpDate = computeFollowUpDate(dateHint, refDate)
+        || parseIsoFollowUpDate(dateIso, refDate);
       if (!followUpDate) {
         followUpDate = toDateStr(addBusinessDays(refDate, 5));
+        logger.warn('[CallAnalysis] Termin nierozpoznany — fallback 5 dni roboczych', {
+          tenantId, nip, dateHint, dateIso, followUpDate,
+        });
       }
     }
 
@@ -770,4 +819,4 @@ function isBatchRunning() {
 
 function getSystemPrompt() { return SYSTEM_PROMPT; }
 
-module.exports = { runBatch, runBatchForNips, getBatchProgress, isBatchRunning, analyzeOne, getSystemPrompt, computeFollowUpDate, computeFollowUpReminder };
+module.exports = { runBatch, runBatchForNips, getBatchProgress, isBatchRunning, analyzeOne, getSystemPrompt, computeFollowUpDate, computeFollowUpReminder, parseIsoFollowUpDate };
