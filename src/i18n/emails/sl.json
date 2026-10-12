@@ -43,6 +43,27 @@
     "subjectLead": "[CRMtree] Nov lead: {sourceName}",
     "subjectPartner": "[CRMtree] Nov partner: {sourceName}"
   },
+  "digest": {
+    "cta": "Pojdi v CRMtree →",
+    "heading": "Vaše naloge — {date}",
+    "intro": "Spodaj so naloge, ki vas čakajo v CRMtree.",
+    "onboardingSteps": {
+      "0": "Podpis pogodbe",
+      "1": "Konfiguracija",
+      "2": "Usposabljanje",
+      "3": "Zagon"
+    },
+    "open": "Odpri",
+    "optOut": "Ta obvestila lahko izklopite v",
+    "optOutLink": "Mojih nastavitvah",
+    "sections": {
+      "noDate": "Brez roka",
+      "overdue": "Zapadle",
+      "today": "Za danes",
+      "unread": "Neprebrana e-pošta"
+    },
+    "subject": "Vaše naloge — {date}"
+  },
   "documentSigned": {
     "heading": "Dokument je podpisan",
     "intro": "Dokument <strong>{documentName}</strong> je bil uspešno elektronsko podpisan.",

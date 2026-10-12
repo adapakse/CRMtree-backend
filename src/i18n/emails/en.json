@@ -43,6 +43,27 @@
     "subjectLead": "[CRMtree] New lead: {sourceName}",
     "subjectPartner": "[CRMtree] New partner: {sourceName}"
   },
+  "digest": {
+    "cta": "Go to CRMtree →",
+    "heading": "Your tasks — {date}",
+    "intro": "Here are the tasks waiting for you in CRMtree.",
+    "onboardingSteps": {
+      "0": "Contract signing",
+      "1": "Configuration",
+      "2": "Training",
+      "3": "Go-live"
+    },
+    "open": "Open",
+    "optOut": "You can turn these notifications off in",
+    "optOutLink": "My settings",
+    "sections": {
+      "noDate": "No due date",
+      "overdue": "Overdue",
+      "today": "Due today",
+      "unread": "Unread emails"
+    },
+    "subject": "Your tasks — {date}"
+  },
   "documentSigned": {
     "heading": "The document has been signed",
     "intro": "The document <strong>{documentName}</strong> has been signed electronically.",
