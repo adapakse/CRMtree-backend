@@ -2,18 +2,17 @@
 // ─────────────────────────────────────────────────────────────────
 // services/callAnalysisService.js
 //
-// Analizuje notatki z rozmów telefonicznych per-NIP za pomocą
-// DeepSeek i oblicza score skłonności do zakupu 0-100.
+// Analizuje notatki z rozmów telefonicznych per-NIP za pomocą AI
+// i oblicza score skłonności do zakupu 0-100.
 //
-// Env: DEEPSEEK_API_KEY
+// AI: dostawca, klucz i model z konfiguracji tenanta (tenant_ai_config, 0327)
 // ─────────────────────────────────────────────────────────────────
 
 const axios  = require('axios');
 const db     = require('../config/database');
 const logger = require('../utils/logger');
+const { callAi } = require('./ai/aiClient');
 
-const DEEPSEEK_API        = 'https://api.deepseek.com/chat/completions';
-const DEEPSEEK_MODEL      = 'deepseek-chat';
 const BATCH_CONCURRENCY   = 3;
 
 // ── System prompt ──────────────────────────────────────────────────
@@ -586,39 +585,26 @@ async function createFollowUpActivity(tenantId, nip, followUpDate, salespersonId
     logger.warn('[CallAnalysis] createFollowUpActivity error', { nip, error: err.message });
   }
 }
-
-// ── DeepSeek call ──────────────────────────────────────────────────
-
-async function callDeepSeek(notesText) {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
-
+// ── Wywołanie AI ──────────────────────────────────────────────────
+// Dostawca, klucz i model pochodzą z konfiguracji TENANTA (tenant_ai_config,
+// migracja 0327) — ten serwis nie wie, czy pod spodem jest DeepSeek, Anthropic,
+// OpenAI czy Gemini, i nie czyta klucza z env. Tenant bez skonfigurowanego AI
+// nie ma analizatora rozmów: callAi rzuca wtedy AiNotConfiguredError, które
+// analyzeOne zapisuje jako analysis_error.
+async function callAiForNotes(tenantId, notesText) {
   const userMessage =
     'Przeanalizuj poniższe notatki z rozmów telefonicznych z potencjalnym klientem ' +
     'i oceń jego skłonność do zakupu usług CRM:\n\n' +
     notesText;
 
-  const { data } = await axios.post(
-    DEEPSEEK_API,
-    {
-      model:       DEEPSEEK_MODEL,
-      max_tokens:  1000,
-      temperature: 0,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user',   content: userMessage },
-      ],
-    },
-    {
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 30_000,
-    }
-  );
-
-  return data?.choices?.[0]?.message?.content || '{}';
+  const { content } = await callAi({
+    tenantId,
+    system: SYSTEM_PROMPT,
+    user: userMessage,
+    maxTokens: 1000,
+    purpose: 'call_analysis',
+  });
+  return content || '{}';
 }
 
 // ── Analiza pojedynczego NIP ───────────────────────────────────────
@@ -650,7 +636,7 @@ async function analyzeOne(tenantId, nip) {
     // Punkt odniesienia dla dat: data ostatniej rozmowy (jeśli znana), w p.p. dziś.
     // Dzięki temu "pod koniec sierpnia" z rozmowy 11.08 → 27.08, nie data analizy.
     const refDate = last_call_date ? new Date(last_call_date) : new Date();
-    const raw = await callDeepSeek(notes_text);
+    const raw = await callAiForNotes(tenantId, notes_text);
 
     let parsed;
     try {

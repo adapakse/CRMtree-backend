@@ -15,6 +15,7 @@ const projectCrmLinkService = require('../services/projectCrmLinkService');
 const salesMetrics   = require('../services/crmSalesMetricsService');
 const testAccountSvc = require('../services/testAccountService');
 const crmLeadHoldSvc = require('../services/crmLeadHoldService');
+const tenantFields   = require('../services/tenantFieldService');
 const leadStageSvc   = require('../services/leadStageService');
 const email          = require('../utils/email');
 const pushService    = require('../services/pushService');
@@ -1183,7 +1184,11 @@ router.get('/:id',
         `SELECT * FROM crm_lead_contacts WHERE lead_id=$1 AND tenant_id=$2 ORDER BY created_at`,
         [parseInt(req.params.id), req.tenantId]
       );
-      res.json({ ...lead, extra_contacts: extraContacts, can_edit });
+      // Pola dodatkowe tenanta: definicje razem z wartościami, żeby formatka
+      // wiedziała co narysować bez drugiego żądania (migracja 0328).
+      const customFields = await tenantFields.describeValues(req.tenantId, 'lead', lead.custom_values);
+
+      res.json({ ...lead, extra_contacts: extraContacts, custom_fields: customFields, can_edit });
     } catch (err) { next(err); }
   }
 );
@@ -1265,6 +1270,22 @@ router.patch('/:id',
           params.push(req.body[field]);
         }
       }
+
+      // Pola dodatkowe tenanta (migracja 0328). Scalane z tym, co już jest na
+      // rekordzie, więc formatka może przysłać tylko zmienione pole. Walidacja
+      // pod typ definicji siedzi w serwisie — błąd wraca jako 400 z nazwą pola.
+      if (req.body.custom_values !== undefined) {
+        try {
+          const merged = await tenantFields.buildCustomValues(
+            req.tenantId, 'lead', req.body.custom_values, existing[0].custom_values,
+          );
+          setClauses.push(`custom_values = $${p++}::jsonb`);
+          params.push(JSON.stringify(merged));
+        } catch (e) {
+          return res.status(e.status || 400).json({ error: e.message });
+        }
+      }
+
       if (!setClauses.length) return res.status(400).json({ error: 'Brak pól do aktualizacji' });
 
       setClauses.push(`updated_at = $${p++}`);
@@ -1325,7 +1346,12 @@ router.patch('/:id',
         });
       }
 
-      res.json(rows[0]);
+      // Pola dodatkowe idą też w odpowiedzi zapisu, tak samo jak w GET /:id —
+      // karta podmienia u siebie wynik PATCH-a i bez tego pokazywałaby stare
+      // wartości aż do przeładowania.
+      const customFields = await tenantFields.describeValues(req.tenantId, 'lead', rows[0].custom_values);
+
+      res.json({ ...rows[0], custom_fields: customFields });
     } catch (err) { next(err); }
   }
 );

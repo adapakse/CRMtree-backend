@@ -9,6 +9,7 @@ const { injectAuditContext, validate } = require("../middleware/errorHandler");
 const { clearTrainingModeCache } = require("../utils/trainingMode");
 const { SUPPORTED_LOCALES } = require("../config/locales");
 const leadStageService = require("../services/leadStageService");
+const aiConfigService = require("../services/ai/aiConfigService");
 
 // ─── GET /api/admin/settings ──────────────────────────────────────────────────
 // Returns all settings as a flat key→value object.
@@ -434,5 +435,122 @@ router.delete("/groups/:id", requireAuth, requireAdmin, async (req, res, next) =
     res.status(204).end();
   } catch (err) { next(err); }
 });
+
+// ─── /api/admin/settings/ai ──────────────────────────────────────────────────
+// Dostawca AI, klucz API i model — OSOBNO DLA KAŻDEJ FUNKCJI (migracja 0327).
+// Celowo BRAK :tenantId w URL — zawsze req.tenantId z JWT, więc admin tenanta
+// nie ma jak zaadresować cudzego tenanta (ten sam wzorzec co etapy leada i ICP).
+//
+// GET    /ai                 — konfiguracja wszystkich funkcji + rejestr dostawców
+// PUT    /ai/:purpose        — zapis jednej funkcji (weryfikacja przed zapisem)
+// DELETE /ai/:purpose        — wyłączenie jednej funkcji
+// POST   /ai/:purpose/recheck
+// POST   /ai/models          — modele dostępne na koncie u danego dostawcy
+//
+// Klucz API nigdy nie wraca z GET — tylko api_key_hint (4 ostatnie znaki).
+// Reguły (weryfikacja przed zapisem, dziedziczenie klucza między funkcjami tego
+// samego dostawcy, brak fallbacku na klucz systemowy): aiConfigService.js.
+
+router.get("/ai", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    res.json(await aiConfigService.getConfig(req.tenantId));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Lista modeli dostępnych na koncie u wskazanego dostawcy. POST, nie GET, bo w
+// ciele może jechać świeżo wklejony klucz (jeszcze nie zapisany) — nie wolno mu
+// wylądować w URL-u, logach dostępu ani historii przeglądarki. Zarejestrowane
+// PRZED /ai/:purpose, żeby "models" nie zostało wzięte za nazwę funkcji.
+router.post("/ai/models",
+  requireAuth, requireAdmin,
+  [
+    body("provider").optional({ nullable: true }).isString().trim(),
+    body("api_key").optional({ nullable: true }).isString(),
+    body("base_url").optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      res.json(await aiConfigService.listModels(req.tenantId, {
+        provider: req.body.provider,
+        apiKey: req.body.api_key,
+        baseUrl: req.body.base_url,
+      }));
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+router.put("/ai/:purpose",
+  requireAuth, requireAdmin, injectAuditContext,
+  [
+    param("purpose").isString().trim().notEmpty(),
+    // Dostawca jest OPCJONALNY — backend rozpoznaje go z klucza i potwierdza
+    // odpytaniem. Podaje się go tylko wtedy, gdy rozpoznanie nie wystarcza.
+    body("provider").optional({ nullable: true }).isString().trim(),
+    // Klucz opcjonalny: admin zmieniający sam model nie musi (i nie może) wklejać
+    // go ponownie, a przy nowej funkcji tego samego dostawcy klucz jest dziedziczony.
+    body("api_key").optional({ nullable: true }).isString(),
+    // Pusty model = domyślny dla tego dostawcy i tej funkcji.
+    body("model").optional({ nullable: true }).isString().trim().isLength({ max: 128 }),
+    body("base_url").optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const config = await aiConfigService.saveConfig(req.tenantId, req.params.purpose, {
+        provider: req.body.provider,
+        apiKey: req.body.api_key,
+        model: req.body.model,
+        baseUrl: req.body.base_url,
+      }, { actorUserId: req.user?.id ?? null });
+
+      if (req.auditLog) {
+        // Logujemy funkcję, dostawcę i model, NIGDY klucza ani jego fragmentu.
+        await req.auditLog("settings_updated", null, null, {
+          ai_purpose: config.purpose,
+          ai_provider: config.provider,
+          ai_model: config.model,
+        });
+      }
+      res.json({ config });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+router.post("/ai/:purpose/recheck",
+  requireAuth, requireAdmin,
+  [param("purpose").isString().trim().notEmpty()], validate,
+  async (req, res, next) => {
+    try {
+      res.json(await aiConfigService.recheckConfig(req.tenantId, req.params.purpose));
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+router.delete("/ai/:purpose",
+  requireAuth, requireAdmin, injectAuditContext,
+  [param("purpose").isString().trim().notEmpty()], validate,
+  async (req, res, next) => {
+    try {
+      const result = await aiConfigService.deleteConfig(req.tenantId, req.params.purpose);
+      if (req.auditLog) {
+        await req.auditLog("settings_updated", null, null, { ai_config_deleted: req.params.purpose });
+      }
+      res.json(result);
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
 
 module.exports = router;
