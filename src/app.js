@@ -27,6 +27,7 @@ const settingsRoutes      = require('./routes/settings');
 const adminDataRoutes 	  = require('./routes/admin-data');
 const adminTenantsRoutes  = require('./routes/admin-tenants');
 const adminBillingRoutes  = require('./routes/admin-billing');
+const adminDigestTestRoutes = require('./routes/admin-digest-test'); // TYMCZASOWE — do usunięcia po teście raportu 09:00
 const onboardingSurveyRoutes = require('./routes/onboarding-survey');
 const adminProspectsRoutes        = require('./routes/admin-prospects');
 const crmProspectsDashboardRoutes = require('./routes/crm-prospects-dashboard');
@@ -201,6 +202,7 @@ app.use('/api/admin/settings',  settingsRoutes);
 app.use('/api/admin/data',     adminDataRoutes);
 app.use('/api/admin/tenants', adminTenantsRoutes);
 app.use('/api/admin/billing', adminBillingRoutes);
+app.use('/api/admin/notifications/digest', adminDigestTestRoutes); // TYMCZASOWE — do usunięcia po teście raportu 09:00
 app.use('/api/admin/onboarding-survey', onboardingSurveyRoutes);
 app.use('/api/admin/prospects', adminProspectsRoutes);
 app.use('/api/profile',         profileRoutes);
