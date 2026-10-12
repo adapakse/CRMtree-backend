@@ -1,18 +1,29 @@
 'use strict';
 // services/assistant/assistantClient.js — the language model behind the
-// mobile app's form assistants: Azure OpenAI, a small model (Adam,
-// 2026-10-08: gpt-4.1-mini, the task is simple).
+// mobile app's form assistants.
 //
-// The model answers in strict JSON of a given schema. Other modules call
-// `assistantClient.ask(...)` through this object so tests can replace it.
+// Provider, key and model come from the TENANT's configuration
+// (tenant_ai_config, migration 0327), purpose 'assistant'. Until 2026-10-08 this
+// ran on OUR shared Azure OpenAI deployment from env (Adam: gpt-4.1-mini, the
+// task is simple), which meant we paid for every tenant's assistant. The Azure
+// deployment and its AZURE_OPENAI_* variables are no longer read here; a tenant
+// who wants a small cheap model simply picks one.
+//
+// The assistant needs STRICT JSON of a given schema, which only Anthropic and
+// OpenAI can enforce — a tenant on Gemini or DeepSeek has no assistant, and gets
+// the same 503 as any other outage, so the app falls back to the plain form.
+//
+// Other modules call `assistantClient.ask(...)` through this object so tests can
+// replace it.
 
-const config = require('../../config');
 const logger = require('../../utils/logger');
+const { callAiStructured, isPurposeAvailable } = require('../ai/aiClient');
+
+const AI_PURPOSE = 'assistant';
 
 // A reply is two sentences plus the form as JSON; this leaves room without
 // letting a runaway answer cost much.
 const MAX_OUTPUT_TOKENS = 800;
-const REQUEST_TIMEOUT_MS = 30000;
 
 function unavailable(message) {
   const error = new Error(message);
@@ -21,41 +32,36 @@ function unavailable(message) {
 }
 
 const assistantClient = {
-  isConfigured() {
-    const { endpoint, apiKey, deployment } = config.azureOpenAi;
-    return Boolean(endpoint && apiKey && deployment);
+  /** Whether this tenant has AI able to run the assistant. */
+  async isConfigured(tenantId) {
+    return isPurposeAvailable(tenantId, AI_PURPOSE);
   },
 
   /**
    * The model's answer to `messages` under the rules of `system`, as a JSON
    * string of `schema`. Throws an error with status 503 when the assistant
    * is not configured, too busy or down — the app falls back to the form.
+   *
+   * Returns a JSON STRING, not an object: the callers run it through
+   * parseAnswer(), and keeping that boundary means this swap did not touch them.
    */
-  async ask({ name, schema, system, messages }) {
-    if (!assistantClient.isConfigured()) throw unavailable('Asystent nie jest skonfigurowany.');
-    const { endpoint, apiKey, deployment, apiVersion } = config.azureOpenAi;
-    const url = `${endpoint.replace(/\/+$/, '')}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
+  async ask({ tenantId, name, schema, system, messages }) {
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'api-key': apiKey, 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        body: JSON.stringify({
-          temperature: 0.2,
-          max_tokens: MAX_OUTPUT_TOKENS,
-          response_format: { type: 'json_schema', json_schema: { name, strict: true, schema } },
-          messages: [{ role: 'system', content: system }, ...messages],
-        }),
+      const { content, parsed } = await callAiStructured({
+        tenantId,
+        purpose: AI_PURPOSE,
+        system,
+        messages,
+        jsonSchema: schema,
+        schemaName: name,
+        maxTokens: MAX_OUTPUT_TOKENS,
+        temperature: 0.2,
       });
-      if (!response.ok) {
-        logger.warn('[assistant] Azure OpenAI refused the request', { status: response.status, response: (await response.text()).slice(0, 300) });
-        throw unavailable('Asystent jest chwilowo niedostępny, spróbuj ponownie.');
-      }
-      const completion = await response.json();
-      return completion.choices?.[0]?.message?.content ?? null;
+      return content ?? (parsed ? JSON.stringify(parsed) : null);
     } catch (error) {
-      if (error.status === 503) throw error;
-      logger.warn('[assistant] Azure OpenAI call failed', { error: error.message });
+      logger.warn('[assistant] AI call failed', {
+        tenantId, status: error.status ?? null, error: error.message,
+      });
       throw unavailable('Asystent jest chwilowo niedostępny, spróbuj ponownie.');
     }
   },

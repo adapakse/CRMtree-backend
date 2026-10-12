@@ -34,7 +34,7 @@ async function createLead(owner, company) {
 
 const EMPTY_INTENT = {
   title: null, body: null, activityAt: null, meetingLocation: null,
-  reminder: null, priority: null, assigneeNumber: null, companyName: null,
+  reminder: null, priority: null, assigneeNumber: null, participantNames: [], companyName: null,
 };
 
 /** The model's next answer. */
@@ -52,6 +52,7 @@ const askActivity = (user, body) => request(app).post("/api/assistant/activity")
 });
 
 async function cleanUp() {
+  await db.query(`DELETE FROM crm_lead_contacts WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM crm_leads WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM audit_logs WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM users WHERE email LIKE $1`, [`%@${DOMAIN}`]);
@@ -101,11 +102,16 @@ describe("POST /api/assistant/activity", () => {
         meeting_location: null, reminder: "1d_before", priority: "asap",
         assigned_to: users.colleague.id, assigned_to_name: expect.any(String), company_name: null,
       },
+      participants: [],
+      unknown_participants: [],
       companies: [],
     });
     const sent = askSpy.mock.calls[0][0];
     expect(sent.system).toContain("Today is 2026-10-08 (Thursday), the time is 14:20");
     expect(sent.system).toContain("Reply in Polish");
+    // An example with a person in it made the model address every task "to Kacper".
+    expect(sent.system).not.toMatch(/Kacp|dla Anny|Ewą/);
+    expect(sent.system).toContain("never take a name");
     expect(sent.messages).toEqual([{ role: "user", content: "cokolwiek" }]);
   });
 
@@ -151,7 +157,9 @@ describe("POST /api/assistant/activity", () => {
     expect(several.body.complete).toBe(true);
     // The colleague's "Vantex Trade" is not the salesperson's to see.
     expect(several.body.companies.map((company) => company.name)).toEqual(["Vantex Logistics", "Vantex Sp. z o.o."]);
-    expect(several.body.companies[1]).toEqual({ source_type: "lead", source_id: String(users.vantex), name: "Vantex Sp. z o.o." });
+    expect(several.body.companies[1]).toEqual({
+      source_type: "lead", source_id: String(users.vantex), name: "Vantex Sp. z o.o.", participants: [], unknown_participants: [],
+    });
 
     // The full name is rarely said exactly; its first word still finds it.
     modelSays({ ...complete, companyName: "Kolmex Polska" });
@@ -165,6 +173,57 @@ describe("POST /api/assistant/activity", () => {
     modelSays(complete);
     const unnamed = await askActivity(users.rep, { needs_company: true });
     expect(unnamed.body).toMatchObject({ complete: false, reply: "Zrozumiałem. Której firmy to dotyczy?" });
+  });
+
+  describe("meeting participants, matched by first name and surname", () => {
+    const meeting = { title: "Prezentacja", activityAt: "2026-10-09T11:00", reminder: "none" };
+
+    beforeAll(async () => {
+      await db.query(`UPDATE crm_leads SET contact_name = 'Ewa Nowak', email = 'ewa@vantex.pl' WHERE id = $1`, [users.vantex]);
+      await db.query(
+        `INSERT INTO crm_lead_contacts (lead_id, contact_name, email, tenant_id) VALUES
+           ($1, 'Piotr Żółć', 'piotr@vantex.pl', $2),
+           ($1, 'Piotr Lis', 'lis@vantex.pl', $2),
+           ($1, 'Bez Maila', NULL, $2)`,
+        [users.vantex, tenantId],
+      );
+    });
+
+    test("inside a card: the company's contacts and the team, whatever the word order or accents", async () => {
+      modelSays({ ...meeting, participantNames: ["pani Ewa", "Zolc Piotr", "colleague", "Piotr", "Bez Maila", "Jan Obcy"] });
+      const res = await askActivity(users.rep, { type: "meeting", source_type: "lead", source_id: String(users.vantex) });
+
+      expect(res.body.participants).toEqual([
+        { name: "Ewa Nowak", email: "ewa@vantex.pl" },
+        { name: "Piotr Żółć", email: "piotr@vantex.pl" },
+        { name: expect.stringContaining("colleague"), email: users.colleague.email },
+      ]);
+      // Two Piotrs fit "Piotr"; no address to invite; nobody of that name.
+      expect(res.body.unknown_participants).toEqual(["Piotr", "Bez Maila", "Jan Obcy"]);
+      expect(res.body.intent).not.toHaveProperty("participant_names");
+      // The model sees the customer's people, to write their names as they are.
+      expect(askSpy.mock.calls[0][0].system).toContain("Contact people at the customer:\nEwa Nowak");
+    });
+
+    test("a colleague's lead gives no contacts; only a meeting has participants", async () => {
+      modelSays({ ...meeting, participantNames: ["Ewa Nowak"] });
+      const foreign = await askActivity(users.colleague, { type: "meeting", source_type: "lead", source_id: String(users.vantex) });
+      expect(foreign.body).toMatchObject({ participants: [], unknown_participants: ["Ewa Nowak"] });
+
+      modelSays({ title: "Oferta", activityAt: "2026-10-09T11:00", reminder: "none", participantNames: ["Ewa Nowak"] });
+      const task = await askActivity(users.rep, { source_type: "lead", source_id: String(users.vantex) });
+      expect(task.body).toMatchObject({ participants: [], unknown_participants: [] });
+    });
+
+    test("from the start screen each matching company carries its own participants", async () => {
+      modelSays({ ...meeting, companyName: "Vantex", participantNames: ["Ewa Nowak"] });
+      const res = await askActivity(users.rep, { type: "meeting", needs_company: true });
+
+      const byName = Object.fromEntries(res.body.companies.map((company) => [company.name, company]));
+      expect(byName["Vantex Sp. z o.o."].participants).toEqual([{ name: "Ewa Nowak", email: "ewa@vantex.pl" }]);
+      expect(byName["Vantex Logistics"]).toMatchObject({ participants: [], unknown_participants: ["Ewa Nowak"] });
+      expect(res.body.participants).toEqual([]);
+    });
   });
 
   test("inside a card the company is not asked for, even when the model names one", async () => {
@@ -201,34 +260,58 @@ describe("POST /api/assistant/project-task", () => {
   const taskSays = (intent, summary = "Zrozumiałem.") => askSpy.mockResolvedValueOnce(JSON.stringify({
     summary,
     question: null,
-    intent: { name: null, description: null, startDate: null, endDate: null, typeNumber: null, priorityNumber: null, assigneeNumbers: [], ...intent },
+    intent: { name: null, description: null, startDate: null, endDate: null, durationDays: null, typeNumber: null, priorityNumber: null, assigneeNumbers: [], ...intent },
   }));
 
   test("list items picked by number come back as their ids", async () => {
-    taskSays({ name: "Poprawić logowanie", endDate: "2026-10-16", typeNumber: 1, priorityNumber: 1, assigneeNumbers: [2, 2, 7] });
+    taskSays({ name: "Poprawić logowanie", startDate: "2026-10-12", endDate: "2026-10-16", typeNumber: 1, priorityNumber: 1, assigneeNumbers: [2, 2, 7] });
     const res = await askTask();
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       reply: "Zrozumiałem.",
       complete: true,
       intent: {
-        name: "Poprawić logowanie", description: null, start_date: null, end_date: "2026-10-16",
+        name: "Poprawić logowanie", description: null, start_date: "2026-10-12", end_date: "2026-10-16",
         type_id: "type-bug", priority_id: "prio-high", assignee_ids: ["member-jan"],
       },
     });
     expect(askSpy.mock.calls[0][0].system).toContain("1: Bug\n2: Feature");
   });
 
-  test("without a name it asks what the task is; a start after the due date is dropped", async () => {
+  test("asks what the task is, then when it starts; a start after the due date is dropped", async () => {
     taskSays({});
     expect((await askTask()).body).toMatchObject({ complete: false, reply: "Zrozumiałem. Czego ma dotyczyć zadanie?" });
 
+    taskSays({ name: "Import" });
+    expect((await askTask()).body).toMatchObject({ complete: false, reply: "Zrozumiałem. Kiedy zadanie ma się zacząć?" });
+
     taskSays({ name: "Import", startDate: "2026-10-20", endDate: "2026-10-16" });
-    expect((await askTask()).body.intent).toMatchObject({ start_date: null, end_date: "2026-10-16" });
+    const reversed = await askTask();
+    expect(reversed.body.intent).toMatchObject({ start_date: null, end_date: "2026-10-16" });
+    expect(reversed.body.complete).toBe(false);
+  });
+
+  test("a start and a duration give the due date; the first day counts", async () => {
+    taskSays({ name: "Import", startDate: "2026-10-09", durationDays: 5 });
+    const fiveDays = await askTask();
+    expect(fiveDays.body.complete).toBe(true);
+    expect(fiveDays.body.intent).toMatchObject({ start_date: "2026-10-09", end_date: "2026-10-13" });
+
+    // Over the end of a month, and a one-day task ends the day it starts.
+    taskSays({ name: "Import", startDate: "2026-10-30", durationDays: 4 });
+    expect((await askTask()).body.intent.end_date).toBe("2026-11-02");
+    taskSays({ name: "Import", startDate: "2026-10-09", durationDays: 1 });
+    expect((await askTask()).body.intent.end_date).toBe("2026-10-09");
+
+    // A due day the person named wins; a nonsense duration is ignored.
+    taskSays({ name: "Import", startDate: "2026-10-09", endDate: "2026-10-20", durationDays: 3 });
+    expect((await askTask()).body.intent.end_date).toBe("2026-10-20");
+    taskSays({ name: "Import", startDate: "2026-10-09", durationDays: 0 });
+    expect((await askTask()).body.intent.end_date).toBeNull();
   });
 
   test("works without the lists, and rejects a malformed one", async () => {
-    taskSays({ name: "Import", typeNumber: 1 });
+    taskSays({ name: "Import", startDate: "2026-10-09", typeNumber: 1 });
     const bare = await askTask({ types: undefined, priorities: undefined, members: undefined });
     expect(bare.body.intent).toMatchObject({ name: "Import", type_id: null });
 

@@ -17,6 +17,7 @@ const audit = require('../services/auditService');
 const { requireAuth }                  = require('../middleware/auth');
 const { injectAuditContext }           = require('../middleware/errorHandler');
 const { crmAuth, requireCrmManager }   = require('../middleware/crm-rbac');
+const leadStageSvc                     = require('../services/leadStageService');
 
 router.use(requireAuth, injectAuditContext, crmAuth);
 
@@ -99,7 +100,6 @@ const nDate  = v => { if (!v) return null; const d = new Date(v); return isNaN(d
 const nBool  = v => ['1','true','yes','tak','t'].includes((v || '').toLowerCase().trim());
 const nTags  = v => v ? v.split(/[,;|]/).map(t => t.trim()).filter(Boolean) : [];
 
-const LEAD_STAGES = ['new','qualification','presentation','offer','negotiation','closed_won','closed_lost'];
 const PARTNER_STATUSES = ['onboarding','active','inactive','churned'];
 
 // ── POST /api/crm/import/leads ────────────────────────────────────
@@ -131,6 +131,10 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
   let imported = 0, skipped = 0;
   const errors = [];
 
+  // Etapy są konfigurowalne per tenant — import przyjmuje dokładnie te kody,
+  // które tenant ma u siebie (leadStageService.js).
+  const stageConfig = await leadStageSvc.getStageConfig(req.tenantId);
+
   for (let i = 0; i < records.length; i++) {
     const row    = records[i];
     const rowNum = i + 2;
@@ -143,8 +147,8 @@ router.post('/leads', upload.single('file'), async (req, res, next) => {
       continue;
     }
 
-    const stage = nStr(row.stage || row.etap) || 'new';
-    if (!LEAD_STAGES.includes(stage)) {
+    const stage = nStr(row.stage || row.etap) || stageConfig.entryKey;
+    if (!stageConfig.selectableKeys.includes(stage)) {
       errors.push({ row: rowNum, field: 'stage', error: `Nieznany etap: ${stage}` });
       skipped++;
       continue;

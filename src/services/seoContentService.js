@@ -5,16 +5,20 @@
 // 5-stage pipeline per article, gated by automatic pre-checks before it
 // ever reaches a human editor (crm-seo.js still owns the mandatory human
 // approval gate — this only decides in_review vs needs_update):
-//   1. Keyword research   (Sonnet 5) — picks a phrase within the least-
+//   1. Keyword research   ['seo_research'] — picks a phrase within the least-
 //      covered content pillar (see seoStrategyService), plus the entity
 //      graph (main + related + contextual entities) that phrase sits in.
-//   2. Facts research      (Sonnet 5 + web_search) — 0-4 real, cited
+//   2. Facts research      ['seo_facts' + web_search] — 0-4 real, cited
 //      numeric data points (seoFactsService). Never invents statistics;
 //      this is how real numbers get in instead (see BANNED_PATTERNS).
-//   3. Outline             (Sonnet 5)
-//   4. Draft                (Opus 4.8, adaptive thinking)
-//   5. Critique/revise      (Opus 4.8) — mandatory quality pass, always run
+//   3. Outline             ['seo_research']
+//   4. Draft                ['seo_content']
+//   5. Critique/revise      ['seo_content'] — mandatory quality pass, always run
 //      once; re-run again (max 2 extra attempts) if pre-gate checks fail.
+//
+// The names in brackets are AI purposes: the tenant admin picks the model for
+// each in Settings → AI provider, and the key is the tenant's own. Model names
+// are deliberately NOT in this file any more — see services/ai/aiProviders.js.
 //
 // Structure and validation here follow two source documents Adam supplied
 // 2026-09-25 (classic on-page SEO + an AI-Overview/GEO citation strategy).
@@ -34,11 +38,12 @@
 // ─────────────────────────────────────────────────────────────────
 
 const { z } = require('zod');
-const Anthropic = require('@anthropic-ai/sdk');
+// Kept only as a Zod → JSON Schema converter; no Anthropic client lives here any
+// more, because the provider is the tenant's choice (see aiProviders.js).
 const { zodOutputFormat } = require('@anthropic-ai/sdk/helpers/zod');
 const db = require('../config/database');
-const config = require('../config');
 const logger = require('../utils/logger');
+const { callAiStructured } = require('./ai/aiClient');
 const strategyService = require('./seoStrategyService');
 const factsService = require('./seoFactsService');
 const pexelsService = require('./pexelsService');
@@ -46,17 +51,34 @@ const gscService = require('./gscService');
 const { ensureValidSlug } = require('../utils/slugify');
 const slots = require('../utils/seoSlots');
 
-const client = new Anthropic({ apiKey: config.anthropic.apiKey });
+// The provider, key and models come from the TENANT's configuration
+// (tenant_ai_config, migration 0327) through services/ai/aiClient. This service
+// no longer reads ANTHROPIC_API_KEY, and the model names are not its business.
+//
+// Two purposes, not one: 'seo_research' drives the cheap stages (keyword
+// research, outline) and 'seo_content' the expensive ones (draft, revision).
+// A tenant admin sets both in Settings → AI provider.
+//
+// The pipeline needs schema-enforced JSON, which only Anthropic and OpenAI can
+// do, so a tenant on Gemini or DeepSeek gets a clear 409 from aiClient rather
+// than a half-parsed article.
+const RESEARCH_PURPOSE = 'seo_research';
+const CONTENT_PURPOSE  = 'seo_content';
 
-const RESEARCH_MODEL  = 'claude-sonnet-5';
-const OUTLINE_MODEL   = 'claude-sonnet-5';
-const DRAFT_MODEL     = 'claude-opus-4-8';
-const CRITIQUE_MODEL  = 'claude-opus-4-8';
-
-// USD per 1M tokens — approximate, for the generation_cost_usd visibility column only.
+// USD per 1M tokens — approximate, for the generation_cost_usd visibility column
+// only. Every model that can land here needs a row: a missing one silently
+// counts the stage as free. Prices checked 2026-10-08 against the pricing docs.
 const PRICING = {
-  'claude-sonnet-5': { input: 3, output: 15 },
+  'claude-opus-5-5': { input: 4, output: 20 },
+  'claude-sonnet-5-5': { input: 2, output: 10 },
+  'claude-haiku-5-5': { input: 0.1, output: 0.5 },
+  'claude-opus-5': { input: 5, output: 25 },
+  'claude-sonnet-5': { input: 2, output: 10 },
   'claude-opus-4-8': { input: 5, output: 25 },
+  'claude-sonnet-4-6': { input: 3, output: 15 },
+  'claude-haiku-4-5': { input: 1, output: 5 },
+  'gpt-4.1': { input: 2, output: 8 },
+  'gpt-4.1-mini': { input: 0.4, output: 1.6 },
 };
 
 const BRAND_VOICE = `Ton: profesjonalny, konkretny, B2B, bez sprzedażowego przegięcia i banalnych wstępów (unikaj fraz typu "W dzisiejszych czasach…", "Warto zauważyć, że…", ogólników i metafor).
@@ -210,9 +232,18 @@ const DEMO_CTA = '[Nie masz konta? Zamów demo](https://crmtree.pl/#contact)';
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function costOf(model, usage) {
+  if (!usage) return 0;
   const pricing = PRICING[model];
-  if (!pricing || !usage) return 0;
-  return (usage.input_tokens || 0) * (pricing.input / 1e6) + (usage.output_tokens || 0) * (pricing.output / 1e6);
+  // A tenant may point a stage at any model its provider offers, so an unpriced
+  // model is expected rather than a bug — but it must be visible, otherwise the
+  // stage silently counts as free and generation_cost_usd quietly understates.
+  if (!pricing) {
+    logger.warn('[SEO] no price known for model — stage counted as 0 in generation_cost_usd', { model });
+    return 0;
+  }
+  const inputTokens = usage.input_tokens ?? usage.prompt_tokens ?? 0;
+  const outputTokens = usage.output_tokens ?? usage.completion_tokens ?? 0;
+  return inputTokens * (pricing.input / 1e6) + outputTokens * (pricing.output / 1e6);
 }
 
 function countWords(text) {
@@ -470,17 +501,40 @@ function renderBody(article, pillar) {
 
 // ── Pipeline stages ─────────────────────────────────────────────────────
 
-async function researchKeyword({ pillar, existingPhrases, gapQueries = [] }) {
-  const response = await client.messages.parse({
-    model: RESEARCH_MODEL,
-    max_tokens: 2000,
+/**
+ * One schema-enforced call on the tenant's key. The provider guarantees valid
+ * JSON of the schema's shape; we still re-check it with Zod, because that check
+ * is what the SDK's `messages.parse` used to give us and losing it would turn a
+ * shape mismatch into a confusing failure deep in validateArticle.
+ */
+async function callStage(tenantId, purpose, { schema, schemaName, system, user, maxTokens }) {
+  const { parsed, usage, model } = await callAiStructured({
+    tenantId,
+    purpose,
+    system,
+    user,
+    jsonSchema: zodOutputFormat(schema).schema,
+    schemaName,
+    maxTokens,
+  });
+  const checked = schema.safeParse(parsed);
+  if (!checked.success) {
+    const issues = checked.error.issues.slice(0, 3)
+      .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+    throw new Error(`Model returned JSON that does not match the ${schemaName} schema: ${issues}`);
+  }
+  return { result: checked.data, usage, model };
+}
+
+async function researchKeyword(tenantId, { pillar, existingPhrases, gapQueries = [] }) {
+  return callStage(tenantId, RESEARCH_PURPOSE, {
+    schema: KeywordResearchSchema,
+    schemaName: 'keyword_research',
+    maxTokens: 2000,
     system:
       'You are an SEO/entity-graph keyword researcher for a B2B CRM company blog. Given a content pillar, propose ONE new target keyword phrase that fits within it, is distinct from already-used phrases, and has realistic search intent. Also map the entity graph around that phrase: related entities (closely tied concepts) and contextual entities (broader business context) it should naturally cover — not just synonyms. ' +
       'If a real Google Search Console query is provided and fits the pillar well, strongly prefer reusing it verbatim — it is a confirmed, real search, not a guess. Write the phrase, entities, and reasoning in Polish.',
-    messages: [
-      {
-        role: 'user',
-        content: [
+    user: [
           `Filar: ${pillar.name}`,
           `Opis filaru: ${pillar.description}`,
           `Tematyka fraz dla tego filaru: ${pillar.target_keyword_theme}`,
@@ -490,28 +544,19 @@ async function researchKeyword({ pillar, existingPhrases, gapQueries = [] }) {
           gapQueries.length
             ? `Realne zapytania z Google Search Console — ludzie już ich szukają, ale strona słabo się na nie pozycjonuje (szansa na treść):\n${gapQueries.map((q) => `- "${q.phrase}" (${q.impressions} wyświetleń, śr. pozycja ${q.position})`).join('\n')}`
             : null,
-        ]
-          .filter(Boolean)
-          .join('\n\n'),
-      },
-    ],
-    output_config: { format: zodOutputFormat(KeywordResearchSchema) },
+    ].filter(Boolean).join('\n\n'),
   });
-  if (!response.parsed_output) throw new Error('Keyword research failed to parse.');
-  return { result: response.parsed_output, usage: response.usage, model: RESEARCH_MODEL };
 }
 
-async function generateOutline({ keyword, pillar, publishedArticles, facts, product }) {
-  const response = await client.messages.parse({
-    model: OUTLINE_MODEL,
-    max_tokens: 6000,
+async function generateOutline(tenantId, { keyword, pillar, publishedArticles, facts, product }) {
+  return callStage(tenantId, RESEARCH_PURPOSE, {
+    schema: OutlineSchema,
+    schemaName: 'article_outline',
+    maxTokens: 6000,
     system: `You are an SEO content outline writer, building outlines that are both keyword-optimized and structured for AI Overview/RAG citation (self-contained, chunkable sections). ${BRAND_VOICE}
 
 ${productContextBlock(product)}`,
-    messages: [
-      {
-        role: 'user',
-        content: [
+    user: [
           `Fraza kluczowa: ${keyword.phrase} (intencja: ${keyword.intent}, sugerowana długość: ~${keyword.recommended_word_count} słów)`,
           `Encje powiązane do naturalnego uwzględnienia: ${keyword.related_entities.join(', ')}`,
           `Filar tematyczny: ${pillar.name} — ${pillar.description}`,
@@ -522,27 +567,19 @@ ${productContextBlock(product)}`,
             ? `Już opublikowane artykuły (kandydaci do linkowania wewnętrznego):\n${publishedArticles.map((a) => `- ${a.slug}: ${a.title}`).join('\n')}`
             : 'Brak jeszcze opublikowanych artykułów do linkowania wewnętrznego — zostaw internal_link_candidates puste.',
           `Zaproponuj: lead (3-4 zdania), sekcję "W skrócie" (5-8 punktów pod chunking AI), strukturę sekcji H2/H3 (6-8 łącznie, patrz opis pola sections co jest obowiązkowe), pytania FAQ (5-8), szkic meta title/description, kandydatów na linki wewnętrzne. Cały artykuł ma zmieścić się w ok. ${keyword.recommended_word_count} słowach (maks. 1600).`,
-        ].join('\n\n'),
-      },
-    ],
-    output_config: { format: zodOutputFormat(OutlineSchema) },
+    ].join('\n\n'),
   });
-  if (!response.parsed_output) throw new Error('Outline generation failed to parse.');
-  return { result: response.parsed_output, usage: response.usage, model: OUTLINE_MODEL };
 }
 
-async function generateDraft({ outline, keyword, facts, product, quotes, screenshots }) {
-  const response = await client.messages.parse({
-    model: DRAFT_MODEL,
-    max_tokens: 12000,
-    thinking: { type: 'adaptive' },
+async function generateDraft(tenantId, { outline, keyword, facts, product, quotes, screenshots }) {
+  return callStage(tenantId, CONTENT_PURPOSE, {
+    schema: ArticleSchema,
+    schemaName: 'article',
+    maxTokens: 12000,
     system: `You are an expert B2B content writer, writing for both classic SEO and AI Overview citation. ${BRAND_VOICE}
 
 ${productContextBlock(product)}`,
-    messages: [
-      {
-        role: 'user',
-        content: [
+    user: [
           "Napisz pełny artykuł na podstawie tego outline'u.",
           `Twardy limit długości: cały artykuł (lead + sekcje, bez FAQ) maksymalnie ${keyword.recommended_word_count} słów, w żadnym razie więcej niż 1600 słów łącznie.`,
           `H1: ${outline.h1}`,
@@ -565,38 +602,25 @@ ${productContextBlock(product)}`,
             : 'Brak kandydatów na linki wewnętrzne — zostaw internal_link_suggestions puste.',
           slotInstructions({ screenshots, quotes }),
           'Zwróć kompletny artykuł: title, slug (kebab-case, ASCII, zawierający rdzeń frazy kluczowej), meta_title (55-70 znaków), meta_description (150-160 znaków), primary_keyword, lead, tldr_bullets, sections (z pełną treścią w content_markdown), faq (5-8 pozycji), internal_link_suggestions, enrichment_slots.',
-        ].join('\n\n'),
-      },
-    ],
-    output_config: { format: zodOutputFormat(ArticleSchema) },
+    ].join('\n\n'),
   });
-  if (!response.parsed_output) throw new Error('Draft generation failed to parse.');
-  return { result: response.parsed_output, usage: response.usage, model: DRAFT_MODEL };
 }
 
-async function reviseArticle({ article, instructions, product }) {
-  const response = await client.messages.parse({
-    model: CRITIQUE_MODEL,
-    max_tokens: 12000,
-    thinking: { type: 'adaptive' },
+async function reviseArticle(tenantId, { article, instructions, product }) {
+  return callStage(tenantId, CONTENT_PURPOSE, {
+    schema: ArticleSchema,
+    schemaName: 'article',
+    maxTokens: 12000,
     system: `You are an expert SEO/AI-citation content editor. ${BRAND_VOICE}
 
 ${productContextBlock(product)}`,
-    messages: [
-      {
-        role: 'user',
-        content: [
-          'Oto wersja robocza artykułu w formacie JSON:',
-          JSON.stringify(article),
-          instructions,
-          'Zwróć poprawioną, kompletną wersję artykułu w tym samym formacie (wszystkie pola, nie tylko zmienione).',
-        ].join('\n\n'),
-      },
-    ],
-    output_config: { format: zodOutputFormat(ArticleSchema) },
+    user: [
+      'Oto wersja robocza artykułu w formacie JSON:',
+      JSON.stringify(article),
+      instructions,
+      'Zwróć poprawioną, kompletną wersję artykułu w tym samym formacie (wszystkie pola, nie tylko zmienione).',
+    ].join('\n\n'),
   });
-  if (!response.parsed_output) throw new Error('Article revision failed to parse.');
-  return { result: response.parsed_output, usage: response.usage, model: CRITIQUE_MODEL };
 }
 
 // ── Orchestration ───────────────────────────────────────────────────────
@@ -678,7 +702,7 @@ async function generateArticle(tenantId) {
     logger.info('SEO keyword research: no GSC content-gap data', { tenantId, reason: err.message });
   }
 
-  const research = await researchKeyword({ pillar, existingPhrases: existingKeywords.map((k) => k.phrase), gapQueries });
+  const research = await researchKeyword(tenantId, { pillar, existingPhrases: existingKeywords.map((k) => k.phrase), gapQueries });
   track(research);
   const keyword = research.result;
   const usedGscQuery = gapQueries.some((q) => q.phrase.trim().toLowerCase() === keyword.phrase.trim().toLowerCase());
@@ -692,7 +716,7 @@ async function generateArticle(tenantId) {
   let facts = [];
   let quotes = [];
   try {
-    const factsResp = await factsService.findFacts({ keyword: keyword.phrase, pillar, isExpertTopic: keyword.is_expert_topic });
+    const factsResp = await factsService.findFacts(tenantId, { keyword: keyword.phrase, pillar, isExpertTopic: keyword.is_expert_topic });
     track(factsResp);
     facts = factsResp.facts;
     quotes = factsResp.quotes;
@@ -700,15 +724,15 @@ async function generateArticle(tenantId) {
     logger.info('SEO facts research failed — proceeding without cited data', { tenantId, reason: err.message });
   }
 
-  const outlineResp = await generateOutline({ keyword, pillar, publishedArticles: published, facts, product });
+  const outlineResp = await generateOutline(tenantId, { keyword, pillar, publishedArticles: published, facts, product });
   track(outlineResp);
   const outline = outlineResp.result;
 
-  const draftResp = await generateDraft({ outline, keyword, facts, product, quotes, screenshots });
+  const draftResp = await generateDraft(tenantId, { outline, keyword, facts, product, quotes, screenshots });
   track(draftResp);
   let article = draftResp.result;
 
-  const critiqueResp = await reviseArticle({ article, instructions: CRITIQUE_INSTRUCTIONS, product });
+  const critiqueResp = await reviseArticle(tenantId, { article, instructions: CRITIQUE_INSTRUCTIONS, product });
   track(critiqueResp);
   article = critiqueResp.result;
   article.slug = ensureValidSlug(article.slug, article.title);
@@ -724,7 +748,7 @@ async function generateArticle(tenantId) {
   let validation = validateArticle(article, keyword.phrase, validSlugs, validationOpts);
   let attempts = 0;
   while (!validation.ok && attempts < 2) {
-    const fixResp = await reviseArticle({
+    const fixResp = await reviseArticle(tenantId, {
       article,
       product,
       instructions: `Ten artykuł nie przeszedł automatycznej walidacji. Popraw dokładnie te problemy:\n${validation.errors.map((e) => `- ${e}`).join('\n')}`,
@@ -839,7 +863,7 @@ async function refreshArticle(contentId, tenantId) {
 
   let facts = [];
   try {
-    const factsResp = await factsService.findFacts({ keyword, pillar });
+    const factsResp = await factsService.findFacts(tenantId, { keyword, pillar });
     track(factsResp);
     facts = factsResp.facts;
   } catch (err) {
@@ -848,15 +872,12 @@ async function refreshArticle(contentId, tenantId) {
 
   const reasonText = REFRESH_REASON_TEXT[current.refresh_reason]?.(current.refresh_signal || {}) ?? REFRESH_REASON_TEXT.manual();
 
-  const response = await client.messages.parse({
-    model: DRAFT_MODEL,
-    max_tokens: 12000,
-    thinking: { type: 'adaptive' },
+  const refreshResp = await callStage(tenantId, CONTENT_PURPOSE, {
+    schema: ArticleSchema,
+    schemaName: 'article',
+    maxTokens: 12000,
     system: `You are an expert B2B content editor refreshing an already-published, already-indexed article — improve it, don't discard what already works. ${BRAND_VOICE}\n\n${productContextBlock(product)}`,
-    messages: [
-      {
-        role: 'user',
-        content: [
+    user: [
           'Odśwież ten opublikowany artykuł. Zachowaj temat, główną frazę i to, co w nim dobre — to aktualizacja, nie nowy tekst od zera.',
           `Powód odświeżenia: ${reasonText}`,
           `Obecny tytuł: ${current.title}`,
@@ -876,16 +897,12 @@ async function refreshArticle(contentId, tenantId) {
             ? `Kandydaci na linki wewnętrzne (użyj 2-5 pasujących):\n${published.map((p) => `- ${p.slug}: ${p.title}`).join('\n')}`
             : 'Brak innych opublikowanych artykułów — zostaw internal_link_suggestions puste.',
           'Zwróć kompletny artykuł: title, slug, meta_title (55-70 znaków), meta_description (150-160 znaków), primary_keyword, lead, tldr_bullets, sections, faq, internal_link_suggestions.',
-        ].join('\n\n'),
-      },
-    ],
-    output_config: { format: zodOutputFormat(ArticleSchema) },
+    ].join('\n\n'),
   });
-  if (!response.parsed_output) throw new Error('Refresh generation failed to parse.');
-  track({ model: DRAFT_MODEL, usage: response.usage });
-  let article = { ...response.parsed_output, slug: current.slug };
+  track(refreshResp);
+  let article = { ...refreshResp.result, slug: current.slug };
 
-  const critiqueResp = await reviseArticle({ article, instructions: CRITIQUE_INSTRUCTIONS, product });
+  const critiqueResp = await reviseArticle(tenantId, { article, instructions: CRITIQUE_INSTRUCTIONS, product });
   track(critiqueResp);
   article = { ...critiqueResp.result, slug: current.slug };
 
@@ -897,7 +914,7 @@ async function refreshArticle(contentId, tenantId) {
   let validation = validateArticle(article, keyword, validSlugs, validationOpts);
   let attempts = 0;
   while (!validation.ok && attempts < 2) {
-    const fixResp = await reviseArticle({
+    const fixResp = await reviseArticle(tenantId, {
       article,
       product,
       instructions: `Ten artykuł nie przeszedł automatycznej walidacji. Popraw dokładnie te problemy (slug zostaw bez zmian):\n${validation.errors.map((e) => `- ${e}`).join('\n')}`,

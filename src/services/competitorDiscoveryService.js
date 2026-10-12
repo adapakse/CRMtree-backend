@@ -6,9 +6,11 @@
  * Pipeline jest ten sam, zmiany dotyczą WYŁĄCZNIE rzeczy, których aplikacja
  * jednotenantowa nie musiała rozwiązywać:
  *
- *   1. Claude — identyfikuje branżę + listuje do MAX_RESULTS polskich konkurentów
+ *   1. AI — identyfikuje branżę + listuje do MAX_RESULTS polskich konkurentów
  *   2. GUS REGON BIR1.1 — waliduje NIP, pobiera oficjalną nazwę + kody PKD
  *   3. SQL — sprawdza obecność firm W ZASOBACH TEGO TENANTA (prospekty/leady/partnerzy)
+ *
+ * Klucz i model są TENANTA (tenant_ai_config, migracja 0327) — nie nasze z env.
  *
  * RÓŻNICE WZGLĘDEM WORKTRIPS (świadome, nie przeoczenia):
  *   - `checkTenantPresence` filtruje po tenant_id. W worktrips-doc te same trzy
@@ -30,18 +32,23 @@
  * a nie spójności danych.
  */
 
-const axios    = require('axios');
 const gusRegon = require('./gusRegonService');
 const db       = require('../config/database');
 const logger   = require('../utils/logger');
 const { normalizeName } = require('./prospectEnrichmentService');
+const { callAi, callAiWithWebSearch } = require('./ai/aiClient');
 
-const ANTHROPIC_API    = 'https://api.anthropic.com/v1/messages';
-const DISCOVERY_MODEL  = 'claude-sonnet-4-6';
-const NIP_SEARCH_MODEL = 'claude-haiku-4-5-20251001';
-const PAGE_SIZE        = 5;
-const MAX_RESULTS      = 15;
-const CACHE_TTL_MS     = 24 * 60 * 60 * 1000; // 24 h
+// DOSTAWCA, KLUCZ I MODEL POCHODZĄ Z KONFIGURACJI TENANTA — tenant_ai_config
+// (migracja 0327), funkcja 'competitor_discovery'. Ten serwis nie czyta już
+// ANTHROPIC_API_KEY z env ani nie zna nazwy modelu.
+//
+// Funkcja wymaga ANTHROPICA, bo stoi na jego serwerowym web_search. Tenant z
+// innym dostawcą dostaje z aiClient AiPurposeUnsupportedError (409) z jawnym
+// komunikatem — pilnuje tego warstwa AI, nie ten plik.
+const AI_PURPOSE   = 'competitor_discovery';
+const PAGE_SIZE    = 5;
+const MAX_RESULTS  = 15;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 h
 
 
 // ── In-memory cache ────────────────────────────────────────────────
@@ -67,67 +74,52 @@ function setCache(tenantId, seedNip, companies) {
 
 // ── Rozpoznanie błędu "brak środków" ──────────────────────────────
 // Anthropic zwraca w tym przypadku 400, nie 402 — bez rozpoznania komunikatu
-// user widzi w UI surowe "Request failed with status code 400".
+// user widzi w UI surowe "Request failed with status code 400". Od przejścia na
+// klucz tenanta komunikat dostawcy jest już w err.message (AiProviderError
+// wyciąga go z odpowiedzi), więc sprawdzamy sam tekst, nie surową odpowiedź HTTP.
+// Teraz dotyczy to KLUCZA TENANTA, nie naszego — stąd zmiana treści komunikatu.
 
 function isLowBalanceError(err) {
-  if (err.response?.status !== 400) return false;
-  const payload = `${JSON.stringify(err.response?.data ?? '')} ${err.message ?? ''}`;
+  // Rozpoznanie siedzi w aiProviders.classify() (wspólne dla wszystkich funkcji
+  // AI) i przychodzi tu jako flaga; test treści zostaje dla błędów, które nie
+  // przeszły przez tę warstwę.
+  if (err?.isLowBalance) return true;
+  const payload = `${err.message ?? ''} ${JSON.stringify(err.response?.data ?? '')}`;
   return /credit balance is too low|insufficient\s+(credit|balance|funds)/i.test(payload);
 }
 
 function toBillingError() {
-  const err = new Error('Brak środków na koncie AI — uzupełnij saldo w Anthropic API.');
+  const err = new Error('Brak środków na koncie AI — uzupełnij saldo u swojego dostawcy AI.');
   err.isBillingError = true;
   err.status = 402;
   return err;
 }
 
-// ── Helper: pętla Claude z web_search ─────────────────────────────
+// ── Helper: wyszukiwanie w internecie kluczem tenanta ─────────────
+// Pętla po turach `pause_turn` siedzi w adapterze (services/ai/aiProviders.js);
+// dawna lokalna pętla sprawdzała `stop_reason === 'tool_use'`, które przy
+// narzędziu serwerowym nigdy nie przychodzi, więc kończyła po pierwszej turze.
 
-async function claudeWebSearch(prompt, maxTokens, maxUses, timeoutMs, model = DISCOVERY_MODEL) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
-
-  const headers = {
-    'x-api-key':         apiKey,
-    'anthropic-version': '2023-06-01',
-    'Content-Type':      'application/json',
-  };
-
-  const messages = [{ role: 'user', content: prompt }];
-  let finalText  = null;
-
-  for (let turn = 0; turn < 8; turn++) {
-    let data;
-    try {
-      ({ data } = await axios.post(ANTHROPIC_API, {
-        model,
-        max_tokens: maxTokens,
-        tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: maxUses, allowed_callers: ['direct'] }],
-        messages,
-      }, { headers, timeout: timeoutMs }));
-    } catch (axiosErr) {
-      logger.error('[Discovery] Anthropic API error', {
-        status: axiosErr.response?.status, message: axiosErr.message,
-      });
-      throw isLowBalanceError(axiosErr) ? toBillingError() : axiosErr;
-    }
-
-    const { stop_reason, content } = data;
-    finalText = content?.filter(b => b.type === 'text').map(b => b.text).join('\n') || finalText;
-    if (stop_reason !== 'tool_use') break;
-    messages.push({ role: 'assistant', content });
+async function searchWeb(tenantId, prompt, maxTokens, maxUses, timeoutMs) {
+  try {
+    const { content } = await callAiWithWebSearch({
+      tenantId,
+      purpose: AI_PURPOSE,
+      user: prompt,
+      maxTokens,
+      maxUses,
+      timeoutMs,
+    });
+    return content || '';
+  } catch (err) {
+    logger.error('[Discovery] AI web search error', { tenantId, message: err.message });
+    throw isLowBalanceError(err) ? toBillingError() : err;
   }
-
-  return finalText || '';
 }
 
 // ── Claude: generuj listę konkurentów ─────────────────────────────
 
-async function askClaude(companyName, seedNip, seedPkd) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
-
+async function askAi(tenantId, companyName, seedNip, seedPkd) {
   const pkdLine = seedPkd ? `Kody PKD (z rejestru GUS): ${seedPkd}\n` : '';
 
   const prompt =
@@ -152,28 +144,19 @@ async function askClaude(companyName, seedNip, seedPkd) {
     `Odpowiedz WYŁĄCZNIE jako JSON (bez markdown, bez komentarzy):\n` +
     `{"industry":"krótki opis profilu firmy (2-5 słów)","companies":[{"company_name":"Przykład Sp. z o.o.","nip":"1234567890","website_url":"https://www.przyklad.pl"}]}`;
 
-  let data;
+  let text;
   try {
-    ({ data } = await axios.post(ANTHROPIC_API, {
-      model:      DISCOVERY_MODEL,
-      max_tokens: 2000,
-      messages:   [{ role: 'user', content: prompt }],
-    }, {
-      headers: {
-        'x-api-key':         apiKey,
-        'anthropic-version': '2023-06-01',
-        'Content-Type':      'application/json',
-      },
-      timeout: 30_000,
+    ({ content: text } = await callAi({
+      tenantId,
+      purpose: AI_PURPOSE,
+      system: 'Jesteś ekspertem ds. analizy rynku B2B w Polsce. Odpowiadasz wyłącznie poprawnym JSON-em.',
+      user: prompt,
+      maxTokens: 2000,
     }));
-  } catch (axiosErr) {
-    logger.error('[Discovery] Anthropic API error', {
-      status: axiosErr.response?.status, message: axiosErr.message,
-    });
-    throw isLowBalanceError(axiosErr) ? toBillingError() : axiosErr;
+  } catch (err) {
+    logger.error('[Discovery] AI error', { tenantId, message: err.message });
+    throw isLowBalanceError(err) ? toBillingError() : err;
   }
-
-  const text = data.content?.find(b => b.type === 'text')?.text || '';
 
   try {
     const cleaned = text.replace(/^```json\s*|```\s*$/g, '').trim();
@@ -183,14 +166,14 @@ async function askClaude(companyName, seedNip, seedPkd) {
       companies: Array.isArray(json.companies) ? json.companies.slice(0, MAX_RESULTS) : [],
     };
   } catch (err) {
-    logger.warn('[Discovery] Claude JSON parse error', { preview: text.slice(0, 300), error: err.message });
+    logger.warn('[Discovery] AI JSON parse error', { preview: text.slice(0, 300), error: err.message });
     return { industry: null, companies: [] };
   }
 }
 
 // ── Web search: znajdź NIP firmy ──────────────────────────────────
 
-async function findNipViaSearch(companyName) {
+async function findNipViaSearch(tenantId, companyName) {
   try {
     const prompt =
       `Znajdź dane rejestrowe polskiej firmy "${companyName}".\n` +
@@ -199,7 +182,7 @@ async function findNipViaSearch(companyName) {
       `{"nip":"1234567890","website_url":"https://..."}\n\n` +
       `Jeśli nie znalazłeś pewnego NIP, wpisz null. Jeśli nie znalazłeś strony WWW, wpisz null.`;
 
-    const text = await claudeWebSearch(prompt, 300, 3, 30_000, NIP_SEARCH_MODEL);
+    const text = await searchWeb(tenantId, prompt, 300, 3, 30_000);
 
     try {
       const cleaned = text.replace(/^```json\s*|```\s*$/g, '').trim();
@@ -312,8 +295,8 @@ async function validateWithGus(raw) {
  * Web search po NIP JEDNEJ firmy — wyłącznie na żądanie użytkownika (przycisk
  * w wierszu wyników), nigdy automatycznie dla całej listy.
  */
-async function resolveNipOnDemand(companyName) {
-  const found = await findNipViaSearch(companyName);
+async function resolveNipOnDemand(tenantId, companyName) {
+  const found = await findNipViaSearch(tenantId, companyName);
 
   if (!found?.nip) {
     return {
@@ -414,7 +397,7 @@ async function resolveSeedPkd(seedNip) {
  */
 async function discoverStream(tenantId, userId, companyName, seedNip, { onIndustry, onCompany }) {
   const seedPkd = await resolveSeedPkd(seedNip);
-  const { industry, companies: rawList } = await askClaude(companyName, seedNip, seedPkd);
+  const { industry, companies: rawList } = await askAi(tenantId, companyName, seedNip, seedPkd);
   logger.info('[Discovery] Claude returned', { tenantId, count: rawList.length, industry });
   onIndustry(industry);
 
@@ -446,7 +429,7 @@ async function discover(tenantId, userId, companyName, seedNip, offset = 0) {
 
   if (!allCompanies) {
     const seedPkd = await resolveSeedPkd(seedNip);
-    const { industry: aiIndustry, companies: rawList } = await askClaude(companyName, seedNip, seedPkd);
+    const { industry: aiIndustry, companies: rawList } = await askAi(tenantId, companyName, seedNip, seedPkd);
     industry = aiIndustry;
     logger.info('[Discovery] Claude returned', { tenantId, count: rawList.length, industry: aiIndustry });
 
