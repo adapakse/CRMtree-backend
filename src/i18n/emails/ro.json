@@ -43,6 +43,27 @@
     "subjectLead": "[CRMtree] Lead nou: {sourceName}",
     "subjectPartner": "[CRMtree] Partener nou: {sourceName}"
   },
+  "digest": {
+    "cta": "Mergi la CRMtree →",
+    "heading": "Sarcinile tale — {date}",
+    "intro": "Mai jos sunt sarcinile care te așteaptă în CRMtree.",
+    "onboardingSteps": {
+      "0": "Semnarea contractului",
+      "1": "Configurare",
+      "2": "Instruire",
+      "3": "Lansare"
+    },
+    "open": "Deschide",
+    "optOut": "Poți dezactiva aceste notificări în",
+    "optOutLink": "Setările mele",
+    "sections": {
+      "noDate": "Fără termen",
+      "overdue": "Întârziate",
+      "today": "Pentru azi",
+      "unread": "E-mailuri necitite"
+    },
+    "subject": "Sarcinile tale — {date}"
+  },
   "documentSigned": {
     "heading": "Documentul a fost semnat",
     "intro": "Documentul <strong>{documentName}</strong> a fost semnat electronic cu succes.",

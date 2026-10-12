@@ -11,7 +11,7 @@ const { google } = require("googleapis");
 const path = require("path");
 const config = require("../config");
 const logger = require("./logger");
-const { translate, formatDate, formatDateTime, supportedOrDefault } = require("./i18n");
+const { translate, formatDate, formatDateOnly, formatDateTime, supportedOrDefault } = require("./i18n");
 
 // ─── Inicjalizacja klienta Gmail ─────────────────────────────────────────────
 
@@ -867,7 +867,109 @@ async function sendProjectTaskReminder({
   });
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dzienny raport zadań („digest")
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Jeden zbiorczy mail z zadaniami wymagającymi uwagi. Sekcje puste nie są
+ * rysowane, a całkiem pusty raport w ogóle nie trafia do tej funkcji — pilnuje
+ * tego dailyDigestService (zasada z worktrips: pusta lista = brak maila).
+ */
+async function sendDailyDigest({ to, locale, recipientName, digest, date }) {
+  if (!to) return;
+
+  const t = emailTexts(locale);
+  const { overdue, unread, today, noDate } = digest;
+
+  const SOURCE_ICON = {
+    lead: '🎯', partner: '🤝', onboarding: '🚀', workflow: '📄', project: '📋',
+  };
+
+  // Adres rekordu. Zadanie projektowe trafia wprost w panel zadania (?task=),
+  // bo na ten sam adres prowadzą linki z pozostałych maili o zadaniach.
+  const itemUrl = (item) => {
+    if (item.source === 'lead')       return `${BASE_URL}/crm/leads/${item.source_id}`;
+    if (item.source === 'partner')    return `${BASE_URL}/crm/partners/${item.source_id}`;
+    if (item.source === 'onboarding') return `${BASE_URL}/crm/onboarding`;
+    if (item.source === 'workflow')   return `${BASE_URL}/documents`;
+    if (item.source === 'project')    return `${BASE_URL}/projects/${item.source_id}?task=${item.task_id}`;
+    return BASE_URL;
+  };
+
+  // Typy biorą się z istniejących słowników, a nie z nowych kluczy pod
+  // `digest.*`: obieg dokumentów ma własne nazwy zadań (do akceptacji, do
+  // podpisania), a pozostałe źródła używają typów aktywności CRM. Dublowanie
+  // ich w dziesięciu językach byłoby drugim miejscem do rozjechania.
+  // translate() przy braku klucza zwraca SAM KLUCZ, więc typ spoza słownika
+  // pokazujemy w surowej postaci z bazy.
+  const TYPE_ALIAS = { doc_sent: 'docSent' };
+  const typeLabel = (item) => {
+    const raw = item.type || '';
+    if (!raw) return '';
+    const scope = item.source === 'workflow' ? 'documentTaskTypes' : 'activityTypes';
+    const key = `${scope}.${TYPE_ALIAS[raw] || raw}`;
+    const label = t(key);
+    return label === key || label === `emails.${key}` ? raw : label;
+  };
+  const stepLabel = (item) => (item.step === null || item.step === undefined)
+    ? '' : t(`digest.onboardingSteps.${item.step}`);
+
+  const renderRow = (item) => `
+    <tr>
+      <td style="padding:7px 6px;border-bottom:1px solid #F4F4F5;font-size:12px;color:#18181B;vertical-align:top">
+        ${SOURCE_ICON[item.source] || '•'}&nbsp;<strong>${escapeHtml(item.source_name || '—')}</strong>
+        ${item.source === 'onboarding' ? `&nbsp;<span style="font-size:10px;background:#E6F4EA;color:#2F8F4D;border-radius:4px;padding:1px 5px">${escapeHtml(stepLabel(item))}</span>` : ''}
+      </td>
+      <td style="padding:7px 6px;border-bottom:1px solid #F4F4F5;font-size:12px;color:#374151;vertical-align:top">
+        ${escapeHtml(item.title || '—')}
+      </td>
+      <td style="padding:7px 6px;border-bottom:1px solid #F4F4F5;font-size:11px;color:#71717A;white-space:nowrap;vertical-align:top">
+        ${escapeHtml(typeLabel(item))}
+        ${item.due_date ? `<br><span style="color:#BE123C">${formatDateOnly(locale, item.due_date)}</span>` : ''}
+      </td>
+      <td style="padding:7px 6px;border-bottom:1px solid #F4F4F5;text-align:right;vertical-align:top">
+        <a href="${itemUrl(item)}" style="color:var(--orange,#3BAA5D);color:#3BAA5D;font-size:11px;font-weight:600;text-decoration:none">${t('digest.open')}&nbsp;→</a>
+      </td>
+    </tr>`;
+
+  const renderSection = (icon, title, badgeBg, items) => items.length ? `
+      <h3 style="font-size:13px;font-weight:700;color:#18181B;margin:22px 0 6px">
+        ${icon}&nbsp;${title}&nbsp;<span style="background:${badgeBg};color:white;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:600">${items.length}</span>
+      </h3>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:4px">
+        <colgroup><col style="width:30%"><col style="width:40%"><col style="width:18%"><col style="width:12%"></colgroup>
+        <tbody>${items.map(renderRow).join('')}</tbody>
+      </table>` : '';
+
+  const dateLabel = formatDateOnly(locale, date);
+
+  await module.exports.sendMail({
+    to,
+    subject: t('digest.subject', { date: dateLabel }),
+    html: template(locale, `
+      <h2>${t('digest.heading', { date: dateLabel })}</h2>
+      <p>${t('common.greeting', { name: recipientName || '' })}</p>
+      <p style="font-size:12px;color:#71717A;margin:0 0 8px">${t('digest.intro')}</p>
+
+      ${renderSection('❌', t('digest.sections.overdue'), '#BE123C', overdue)}
+      ${renderSection('📧', t('digest.sections.unread'), '#1D4ED8', unread)}
+      ${renderSection('📅', t('digest.sections.today'), '#D97706', today)}
+      ${renderSection('📋', t('digest.sections.noDate'), '#71717A', noDate)}
+
+      <div style="margin-top:20px">
+        <a href="${BASE_URL}/crm/dashboard" class="btn">${t('digest.cta')}</a>
+      </div>
+      <p style="font-size:11px;color:#A1A1AA;margin-top:14px">
+        ${t('digest.optOut')} <a href="${BASE_URL}/my-settings" style="color:#3BAA5D">${t('digest.optOutLink')}</a>.
+      </p>
+    `),
+  });
+}
+
 module.exports = {
+  sendDailyDigest,
   sendProjectTaskReminder,
   sendProjectTaskAssigned,
   sendMail,

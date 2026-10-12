@@ -15,6 +15,7 @@ const { startSeoContentRefreshJob } = require("./jobs/seo-content-refresh");
 const { startSeoCalendarSchedulerJob } = require("./jobs/seo-calendar-scheduler");
 const { startBillingRunJob } = require("./jobs/billing-run");
 const { startCrmRemindersJob } = require("./jobs/crm-reminders");
+const { startDailyDigestJob } = require("./jobs/daily-digest");
 const { startSmsPollerJob } = require("./jobs/sms-poller");
 const { startCrmHoldExpiryJob } = require("./jobs/crm-hold-expiry");
 const { startExchangeRatesSyncJob } = require("./jobs/exchange-rates-sync");
@@ -54,6 +55,7 @@ async function start() {
     startSeoCalendarSchedulerJob();
     startBillingRunJob();
     startCrmRemindersJob();
+    startDailyDigestJob();
     startSmsPollerJob();
     startCrmHoldExpiryJob();
     startExchangeRatesSyncJob();
