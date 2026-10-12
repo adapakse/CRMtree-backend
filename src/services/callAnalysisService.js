@@ -465,17 +465,35 @@ function computeFollowUpDate(hint, today = new Date()) {
 }
 
 // ── Activity creation on Lead/Partner ─────────────────────────────
-// Notatka bez daty/statusu/przypomnienia — świadome odejście od worktrips
-// (tam to zawsze zadanie z terminem, przypisaniem, priorytetem). Zmiana na
-// żądanie Angeliki/Adama (mail 26.08): AI-wygenerowane podsumowanie ma nie
-// zaśmiecać kalendarza/listy zadań, tylko być widoczne jako kontekst na
-// leadzie/partnerze. Sugerowany termin, który AI wykrył, zostaje w treści
-// notatki — nic go już automatycznie nie przypomina. Mechanizm przypomnień
-// (migracja 0277, crmReminderService.js, jobs/crm-reminders.js, próg 3 dni
-// at_due/1d_before) zostaje NIETKNIĘTY i dalej działa dla zadań tworzonych
-// ręcznie przez usera w UI (dropdown Przypomnienie na karcie leada/partnera).
+// Follow-up po analizie AI to zadanie (type='task') z terminem, przypisaniem
+// i przypomnieniem — przez istniejący mechanizm przypomnień (migracja 0277,
+// crmReminderService.js, jobs/crm-reminders.js). Między 26.08 a 12.10.2026 była
+// to notatka bez daty (żądanie Angeliki/Adama, mail 26.08) — powodem było
+// śmiecenie w kalendarzu, a nie sama koncepcja zadania; ten powód odpadł, bo
+// widok kalendarza pokazuje tylko spotkania i OTWARTE zadania, więc zamknięty
+// follow-up z niego znika. Przywrócone na prośbę Adama (mail 12.10.2026).
 
-async function createAnalysisNote(tenantId, nip, followUpDate, salespersonId, summary) {
+// Próg bliskiego terminu: termin za tyle dni lub mniej → przypomnienie w dniu
+// terminu, dalszy termin → dzień wcześniej (reguła Adama z 12.10.2026).
+const REMINDER_NEAR_TERM_DAYS = 3;
+
+// Zadanie i przypomnienie stają na 07:00 UTC = rano czasu polskiego.
+function computeFollowUpReminder(followUpDate, today = new Date()) {
+  const activityAt = `${followUpDate}T07:00:00Z`;
+  const due  = new Date(`${followUpDate}T00:00:00`);
+  const base = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const daysAhead = Math.round((due - base) / 86400000);
+
+  if (daysAhead <= REMINDER_NEAR_TERM_DAYS) {
+    return { activityAt, reminderType: 'at_due', reminderAt: activityAt };
+  }
+
+  const dayBefore = new Date(due);
+  dayBefore.setDate(dayBefore.getDate() - 1);
+  return { activityAt, reminderType: '1d_before', reminderAt: `${toDateStr(dayBefore)}T07:00:00Z` };
+}
+
+async function createFollowUpActivity(tenantId, nip, followUpDate, salespersonId, summary) {
   try {
     const digits = String(nip).replace(/\D/g, '');
     if (!digits || digits.length !== 10) return;
@@ -490,19 +508,20 @@ async function createAnalysisNote(tenantId, nip, followUpDate, salespersonId, su
       [digits, tenantId]
     );
 
-    const title = 'Podsumowanie rozmowy (AI)';
-    const body  = summary
-      ? `${summary}\n\nSugerowany termin kontaktu: ${followUpDate}`
-      : `Sugerowany termin kontaktu: ${followUpDate}`;
+    const title = 'Follow-up telefoniczny';
+    const body  = summary || null;
+    const { activityAt, reminderType, reminderAt } = computeFollowUpReminder(followUpDate);
 
     if (partnerRows.length) {
       await db.query(
         `INSERT INTO crm_partner_activities
-           (partner_id, tenant_id, type, title, body, created_by, assigned_to, call_analysis_nip)
-         VALUES ($1, $2, 'note', $3, $4, $5::uuid, $5::uuid, $6)`,
-        [partnerRows[0].id, tenantId, title, body, salespersonId ?? null, digits]
+           (partner_id, tenant_id, type, title, body, created_by, assigned_to, call_analysis_nip,
+            activity_at, status, priority, reminder_type, reminder_at)
+         VALUES ($1, $2, 'task', $3, $4, $5::uuid, $5::uuid, $6,
+                 $7::timestamptz, 'new', 'medium', $8, $9::timestamptz)`,
+        [partnerRows[0].id, tenantId, title, body, salespersonId ?? null, digits, activityAt, reminderType, reminderAt]
       );
-      logger.info('[CallAnalysis] Analysis note created on partner', { tenantId, nip: digits, followUpDate, partnerId: partnerRows[0].id });
+      logger.info('[CallAnalysis] Follow-up task created on partner', { tenantId, nip: digits, followUpDate, reminderType, partnerId: partnerRows[0].id });
       return;
     }
 
@@ -516,14 +535,16 @@ async function createAnalysisNote(tenantId, nip, followUpDate, salespersonId, su
     if (leadRows.length) {
       await db.query(
         `INSERT INTO crm_lead_activities
-           (lead_id, tenant_id, type, title, body, created_by, assigned_to, call_analysis_nip)
-         VALUES ($1, $2, 'note', $3, $4, $5::uuid, $5::uuid, $6)`,
-        [leadRows[0].id, tenantId, title, body, salespersonId ?? null, digits]
+           (lead_id, tenant_id, type, title, body, created_by, assigned_to, call_analysis_nip,
+            activity_at, status, priority, reminder_type, reminder_at)
+         VALUES ($1, $2, 'task', $3, $4, $5::uuid, $5::uuid, $6,
+                 $7::timestamptz, 'new', 'medium', $8, $9::timestamptz)`,
+        [leadRows[0].id, tenantId, title, body, salespersonId ?? null, digits, activityAt, reminderType, reminderAt]
       );
-      logger.info('[CallAnalysis] Analysis note created on lead', { tenantId, nip: digits, followUpDate, leadId: leadRows[0].id });
+      logger.info('[CallAnalysis] Follow-up task created on lead', { tenantId, nip: digits, followUpDate, reminderType, leadId: leadRows[0].id });
     }
   } catch (err) {
-    logger.warn('[CallAnalysis] createAnalysisNote error', { nip, error: err.message });
+    logger.warn('[CallAnalysis] createFollowUpActivity error', { nip, error: err.message });
   }
 }
 
@@ -584,9 +605,9 @@ async function analyzeOne(tenantId, nip) {
     }
 
     const { notes_text, salesperson_id, imported_by, last_call_date } = rows[0];
-    // Właściciel notatki AI = osoba, która wykonała połączenie (salesperson_id),
+    // Właściciel zadania follow-up = osoba, która wykonała połączenie (salesperson_id),
     // a gdy jej brak (np. firma z importu zbiorczego) — kto dodał wpis.
-    const noteOwnerId = salesperson_id || imported_by || null;
+    const taskOwnerId = salesperson_id || imported_by || null;
     // Punkt odniesienia dla dat: data ostatniej rozmowy (jeśli znana), w p.p. dziś.
     // Dzięki temu "pod koniec sierpnia" z rozmowy 11.08 → 27.08, nie data analizy.
     const refDate = last_call_date ? new Date(last_call_date) : new Date();
@@ -670,9 +691,9 @@ async function analyzeOne(tenantId, nip) {
       return { status: 'stale' };
     }
 
-    // Utwórz notatkę z podsumowaniem AI na Lead/Partner (jeśli jest data i istnieje encja)
+    // Utwórz zadanie follow-up na Lead/Partner (jeśli jest data i istnieje encja)
     if (followUpDate) {
-      await createAnalysisNote(tenantId, nip, followUpDate, noteOwnerId, parsed.summary || null);
+      await createFollowUpActivity(tenantId, nip, followUpDate, taskOwnerId, parsed.summary || null);
     }
 
     logger.info('[CallAnalysis] Done', { tenantId, nip, score, followUpDate });
@@ -749,4 +770,4 @@ function isBatchRunning() {
 
 function getSystemPrompt() { return SYSTEM_PROMPT; }
 
-module.exports = { runBatch, runBatchForNips, getBatchProgress, isBatchRunning, analyzeOne, getSystemPrompt, computeFollowUpDate };
+module.exports = { runBatch, runBatchForNips, getBatchProgress, isBatchRunning, analyzeOne, getSystemPrompt, computeFollowUpDate, computeFollowUpReminder };
