@@ -34,6 +34,7 @@ const projectRoutes            = require('./routes/projects');
 const projectTaskRoutes        = require('./routes/project-tasks');
 const projectFinanceRoutes     = require('./routes/project-finance');
 const adminProjectConfigRoutes = require('./routes/admin-project-config');
+const adminFieldDefinitionRoutes = require('./routes/admin-field-definitions');
 const adminKsefRoutes          = require('./routes/admin-ksef');
 const ksefRoutes               = require('./routes/ksef');
 const profileRoutes       = require('./routes/profile');
@@ -240,6 +241,7 @@ app.use('/api/projects/:id/tasks',   projectTaskRoutes);
 app.use('/api/projects/:id/finance', projectFinanceRoutes);
 app.use('/api/projects',             projectRoutes);
 app.use('/api/admin/project-config', adminProjectConfigRoutes);
+app.use('/api/admin/field-definitions', adminFieldDefinitionRoutes);
 app.use('/api/admin/ksef',           adminKsefRoutes);
 app.use('/api/ksef',                 ksefRoutes);
 

@@ -8,6 +8,7 @@ const { pool } = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
 const { crmAuth, loadCrmScope, loadCrmModuleGrants, canOperateForOwner, requireFeature } = require("../middleware/crm-rbac");
 const projectCrmLinkService = require("../services/projectCrmLinkService");
+const tenantFields = require("../services/tenantFieldService");
 const calendarService = require("../services/calendarService");
 const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
@@ -499,6 +500,10 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
               p.website, p.source, p.first_contact_date, p.logo_url,
               p.agent_name, p.agent_email, p.agent_phone,
               p.created_by, p.created_at, p.updated_at, p.dwh_partner_id,
+              -- Pola dodatkowe tenanta (migracja 0328). Ta lista kolumn jest
+              -- jawna, nie SELECT * — bez tego wpisu wartości zapisywały się,
+              -- ale wracały jako puste.
+              p.custom_values,
               -- Dane DWH dla identyfikacji
               COALESCE(dm.company_name, dm.name) AS dwh_company_name,
               dm.tax_numbers                     AS dwh_nip,
@@ -603,6 +608,11 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
     } catch (_) {
       partner.extra_contacts = [];
     }
+
+    // Pola dodatkowe tenanta: definicje razem z wartościami (migracja 0328).
+    partner.custom_fields = await tenantFields.describeValues(
+      req.tenantId, 'partner', partner.custom_values,
+    );
 
     res.json(partner);
   } catch (err) {
@@ -784,6 +794,23 @@ router.patch("/:id", requireAuth, crmAuth, async (req, res) => {
       if (key in req.body) {
         params.push(req.body[key] === "" ? null : req.body[key]);
         sets.push(`${key} = $${params.length}`);
+      }
+    }
+
+    // Pola dodatkowe tenanta (migracja 0328). Scalane z tym, co już jest na
+    // rekordzie, więc formatka może przysłać tylko zmienione pole.
+    if (req.body.custom_values !== undefined) {
+      try {
+        const { rows: cvRows } = await pool.query(
+          'SELECT custom_values FROM crm_partners WHERE id = $1 AND tenant_id = $2', [id, req.tenantId],
+        );
+        const merged = await tenantFields.buildCustomValues(
+          req.tenantId, 'partner', req.body.custom_values, cvRows[0]?.custom_values,
+        );
+        params.push(JSON.stringify(merged));
+        sets.push(`custom_values = $${params.length}::jsonb`);
+      } catch (e) {
+        return res.status(e.status || 400).json({ error: e.message });
       }
     }
 
