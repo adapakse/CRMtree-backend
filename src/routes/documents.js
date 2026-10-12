@@ -11,6 +11,7 @@ const { requireAuth } = require("../middleware/auth");
 const { validate, injectAuditContext } = require("../middleware/errorHandler");
 const upload = require("../middleware/upload");
 const invoiceDocuments = require("../services/invoiceDocumentService");
+const tenantFields = require("../services/tenantFieldService");
 
 // Largest value a NUMERIC(14,2) column holds.
 const MAX_AMOUNT = 999999999999.99;
@@ -490,6 +491,8 @@ router.get("/:id", [param("id").isUUID()], validate, async (req, res, next) => {
           tenantId: req.tenantId, user: req.user, document: doc,
         }),
       }),
+      // Pola dodatkowe tenanta: definicje razem z wartościami (migracja 0328).
+      custom_fields: await tenantFields.describeValues(req.tenantId, "document", doc.custom_values),
       _access: accessLevel,
       _task_access: !groupCanRead && !!taskAccess,
     });
@@ -521,6 +524,7 @@ router.patch(
     body("contact_name").optional({ nullable: true }).isString().trim().isLength({ max: 200 }),
     body("contact_email").optional({ nullable: true }).isEmail().normalizeEmail(),
     body("contact_phone").optional({ nullable: true }).isString().trim().isLength({ max: 50 }),
+    body("custom_values").optional().isObject(),
     ...invoiceFieldRules,
   ],
   validate,
@@ -582,6 +586,20 @@ router.patch(
         params.push(value === "" ? null : value);
       }
 
+      // Pola dodatkowe tenanta (migracja 0328). Poza pętlą `updates`, bo wymagają
+      // scalenia z obecną wartością i rzutowania na jsonb.
+      if (req.body.custom_values !== undefined) {
+        try {
+          const merged = await tenantFields.buildCustomValues(
+            req.tenantId, "document", req.body.custom_values, doc.custom_values,
+          );
+          setClauses.push(`custom_values = $${p++}::jsonb`);
+          params.push(JSON.stringify(merged));
+        } catch (e) {
+          return res.status(e.status || 400).json({ error: e.message });
+        }
+      }
+
       if (setClauses.length === 0)
         return res.status(400).json({ error: "No fields to update" });
       params.push(req.params.id, req.tenantId);
@@ -619,7 +637,14 @@ router.patch(
         [req.params.id, req.tenantId],
       );
 
-      res.json(full[0] ?? updated[0]);
+      const saved = full[0] ?? updated[0];
+      // Pola dodatkowe idą też w odpowiedzi zapisu, tak samo jak w GET /:id —
+      // panel podmienia u siebie wynik PATCH-a i bez tego pokazywałby stare
+      // wartości aż do przeładowania.
+      res.json({
+        ...saved,
+        custom_fields: await tenantFields.describeValues(req.tenantId, "document", saved.custom_values),
+      });
     } catch (err) {
       next(err);
     }
