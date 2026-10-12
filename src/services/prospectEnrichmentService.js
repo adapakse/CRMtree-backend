@@ -4108,7 +4108,6 @@ async function analyzeWithAi(company, krsData, websiteText, activeSignals, fbDat
     tenantId: company.tenant_id,
     system: systemPrompt,
     user: userMessage,
-    tier: 'fast',
     maxTokens: 3000,
     purpose: 'enrichment',
   });

@@ -24,13 +24,18 @@
 // pattern already used for GSC content-gap queries.
 // ─────────────────────────────────────────────────────────────────
 
-const Anthropic = require('@anthropic-ai/sdk');
-const config = require('../config');
 const logger = require('../utils/logger');
+const { callAiWithWebSearch } = require('./ai/aiClient');
 
-const client = new Anthropic({ apiKey: config.anthropic.apiKey });
-const FACTS_MODEL = 'claude-sonnet-5';
-const MAX_PAUSE_RESUMES = 3;
+// Provider, key and model come from the TENANT's configuration (tenant_ai_config,
+// migration 0327), purpose 'seo_facts'. The multi-turn pause_turn loop that the
+// server-side web_search needs now lives in the provider adapter.
+//
+// This purpose REQUIRES Anthropic: web_search is its server-side tool and the
+// other providers have no equivalent with the same contract. A tenant on another
+// provider gets a 409 from aiClient, which findFacts treats like any other
+// failure — going numbers-free is an acceptable degraded mode.
+const AI_PURPOSE = 'seo_facts';
 const QUOTE_FETCH_TIMEOUT_MS = 10000;
 
 function parseJsonObject(text) {
@@ -100,13 +105,10 @@ async function verifyQuoteOnPage(url, quote) {
  * Expert topics (law, AI, security, finance) get more facts: the expert review
  * of 2026-09-28 asked for noticeably more sourcing on those.
  */
-async function findFacts({ keyword, pillar, isExpertTopic = false }) {
+async function findFacts(tenantId, { keyword, pillar, isExpertTopic = false }) {
   const factRange = isExpertTopic ? '4-6' : '2-4';
   const maxFacts = isExpertTopic ? 6 : 4;
-  const messages = [
-    {
-      role: 'user',
-      content: [
+  const prompt = [
         `Wyszukaj ${factRange} prawdziwe, aktualne dane liczbowe (widełki cenowe, procenty, wyniki badań, konkretne wartości) związane z tematem: "${keyword}".`,
         isExpertTopic
           ? 'To temat ekspercki — preferuj źródła pierwotne: akty prawne, oficjalne wytyczne, raporty badawcze, dane instytucji publicznych. Unikaj blogów marketingowych.'
@@ -115,36 +117,31 @@ async function findFacts({ keyword, pillar, isExpertTopic = false }) {
         'Dla KAŻDEGO znalezionego faktu podaj: samo stwierdzenie w jednym zdaniu po polsku (bez marketingowego tonu, sama liczba/dana) oraz URL źródła, z którego pochodzi.',
         'Znajdź też 1-3 dosłowne cytaty na ten temat z wiarygodnych źródeł (raport, badanie, regulacja, wypowiedź rozpoznawalnego eksperta lub instytucji). Cytat przepisz DOKŁADNIE tak, jak brzmi na stronie źródłowej, w oryginalnym języku, bez skracania i parafrazy (40-400 znaków). Podaj autora (osobę lub instytucję), jego rolę, tytuł źródła i URL strony, na której cytat się znajduje.',
         'Odpowiedz WYŁĄCZNIE obiektem JSON w formacie: {"facts": [{"claim": "...", "source_url": "https://..."}], "quotes": [{"quote": "...", "author": "...", "author_role": "...", "source_title": "...", "source_url": "https://..."}]}. Bez żadnego innego tekstu przed ani po. Jeśli nie znajdziesz nic wiarygodnego, zwróć puste tablice.',
-      ].filter(Boolean).join('\n\n'),
-    },
-  ];
+  ].filter(Boolean).join('\n\n');
 
-  const tools = [{ type: 'web_search_20260209', name: 'web_search', max_uses: isExpertTopic ? 6 : 4 }];
-  const usage = { input_tokens: 0, output_tokens: 0 };
   let finalText = '';
+  let usage = { input_tokens: 0, output_tokens: 0 };
+  let model = null;
 
   try {
-    for (let i = 0; i <= MAX_PAUSE_RESUMES; i++) {
-      const response = await client.messages.create({
-        model: FACTS_MODEL,
-        max_tokens: 3000,
-        tools,
-        messages,
-      });
-      usage.input_tokens += response.usage?.input_tokens || 0;
-      usage.output_tokens += response.usage?.output_tokens || 0;
-
-      if (response.stop_reason === 'pause_turn' && i < MAX_PAUSE_RESUMES) {
-        messages.push({ role: 'assistant', content: response.content });
-        continue;
-      }
-      const textBlock = response.content.find((b) => b.type === 'text');
-      finalText = textBlock?.text || '';
-      break;
-    }
+    const response = await callAiWithWebSearch({
+      tenantId,
+      purpose: AI_PURPOSE,
+      user: prompt,
+      maxTokens: 3000,
+      maxUses: isExpertTopic ? 6 : 4,
+    });
+    finalText = response.content || '';
+    model = response.model;
+    // Reported under the names the rest of the SEO pipeline already uses; the
+    // provider adapter normalises every provider to prompt_/completion_tokens.
+    usage = {
+      input_tokens: response.usage?.prompt_tokens || 0,
+      output_tokens: response.usage?.completion_tokens || 0,
+    };
   } catch (err) {
-    logger.info('SEO facts research failed — proceeding without cited data', { reason: err.message });
-    return { facts: [], quotes: [], usage, model: FACTS_MODEL };
+    logger.info('SEO facts research failed — proceeding without cited data', { tenantId, reason: err.message });
+    return { facts: [], quotes: [], usage, model };
   }
 
   const parsed = parseJsonObject(finalText);
@@ -157,7 +154,7 @@ async function findFacts({ keyword, pillar, isExpertTopic = false }) {
     });
   }
 
-  return { facts: parseFacts(parsed, maxFacts), quotes, usage, model: FACTS_MODEL };
+  return { facts: parseFacts(parsed, maxFacts), quotes, usage, model };
 }
 
 module.exports = { findFacts, verifyQuoteOnPage, normalizeForMatch };

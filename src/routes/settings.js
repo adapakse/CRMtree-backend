@@ -3,7 +3,7 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
-const { body } = require("express-validator");
+const { body, param } = require("express-validator");
 const { requireAuth, requireAdmin } = require("../middleware/auth");
 const { injectAuditContext, validate } = require("../middleware/errorHandler");
 const aiConfigService = require("../services/ai/aiConfigService");
@@ -134,13 +134,19 @@ router.put(
 
 
 // ─── /api/admin/settings/ai ──────────────────────────────────────────────────
-// Dostawca AI, klucz API i modele tenanta (migracja 0327). Celowo BRAK :tenantId
-// w URL — zawsze req.tenantId z JWT, więc admin tenanta nie ma jak zaadresować
-// cudzego tenanta (ten sam wzorzec co etapy leada i ICP).
+// Dostawca AI, klucz API i model — OSOBNO DLA KAŻDEJ FUNKCJI (migracja 0327).
+// Celowo BRAK :tenantId w URL — zawsze req.tenantId z JWT, więc admin tenanta
+// nie ma jak zaadresować cudzego tenanta (ten sam wzorzec co etapy leada i ICP).
+//
+// GET    /ai                 — konfiguracja wszystkich funkcji + rejestr dostawców
+// PUT    /ai/:purpose        — zapis jednej funkcji (weryfikacja przed zapisem)
+// DELETE /ai/:purpose        — wyłączenie jednej funkcji
+// POST   /ai/:purpose/recheck
+// POST   /ai/models          — modele dostępne na koncie u danego dostawcy
 //
 // Klucz API nigdy nie wraca z GET — tylko api_key_hint (4 ostatnie znaki).
-// Reguły (weryfikacja przed zapisem, brak fallbacku na klucz systemowy):
-// services/ai/aiConfigService.js i aiClient.js.
+// Reguły (weryfikacja przed zapisem, dziedziczenie klucza między funkcjami tego
+// samego dostawcy, brak fallbacku na klucz systemowy): aiConfigService.js.
 
 router.get("/ai", requireAuth, requireAdmin, async (req, res, next) => {
   try {
@@ -150,33 +156,60 @@ router.get("/ai", requireAuth, requireAdmin, async (req, res, next) => {
   }
 });
 
-router.put("/ai",
-  requireAuth, requireAdmin, injectAuditContext,
+// Lista modeli dostępnych na koncie u wskazanego dostawcy. POST, nie GET, bo w
+// ciele może jechać świeżo wklejony klucz (jeszcze nie zapisany) — nie wolno mu
+// wylądować w URL-u, logach dostępu ani historii przeglądarki. Zarejestrowane
+// PRZED /ai/:purpose, żeby "models" nie zostało wzięte za nazwę funkcji.
+router.post("/ai/models",
+  requireAuth, requireAdmin,
   [
-    body("provider").isString().trim().notEmpty(),
-    // Klucz opcjonalny przy aktualizacji: admin zmieniający tylko model nie musi
-    // (i nie może) wklejać go ponownie, bo API mu go nie zwraca.
+    body("provider").optional({ nullable: true }).isString().trim(),
     body("api_key").optional({ nullable: true }).isString(),
-    body("model_fast").isString().trim().notEmpty().isLength({ max: 128 }),
-    body("model_quality").optional({ nullable: true }).isString().trim().isLength({ max: 128 }),
     body("base_url").optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
   ], validate,
   async (req, res, next) => {
     try {
-      const config = await aiConfigService.saveConfig(req.tenantId, {
+      res.json(await aiConfigService.listModels(req.tenantId, {
         provider: req.body.provider,
         apiKey: req.body.api_key,
-        modelFast: req.body.model_fast,
-        modelQuality: req.body.model_quality,
+        baseUrl: req.body.base_url,
+      }));
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  },
+);
+
+router.put("/ai/:purpose",
+  requireAuth, requireAdmin, injectAuditContext,
+  [
+    param("purpose").isString().trim().notEmpty(),
+    // Dostawca jest OPCJONALNY — backend rozpoznaje go z klucza i potwierdza
+    // odpytaniem. Podaje się go tylko wtedy, gdy rozpoznanie nie wystarcza.
+    body("provider").optional({ nullable: true }).isString().trim(),
+    // Klucz opcjonalny: admin zmieniający sam model nie musi (i nie może) wklejać
+    // go ponownie, a przy nowej funkcji tego samego dostawcy klucz jest dziedziczony.
+    body("api_key").optional({ nullable: true }).isString(),
+    // Pusty model = domyślny dla tego dostawcy i tej funkcji.
+    body("model").optional({ nullable: true }).isString().trim().isLength({ max: 128 }),
+    body("base_url").optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+  ], validate,
+  async (req, res, next) => {
+    try {
+      const config = await aiConfigService.saveConfig(req.tenantId, req.params.purpose, {
+        provider: req.body.provider,
+        apiKey: req.body.api_key,
+        model: req.body.model,
         baseUrl: req.body.base_url,
       }, { actorUserId: req.user?.id ?? null });
 
       if (req.auditLog) {
-        // Logujemy dostawcę i modele, NIGDY klucza ani jego fragmentu.
+        // Logujemy funkcję, dostawcę i model, NIGDY klucza ani jego fragmentu.
         await req.auditLog("settings_updated", null, null, {
+          ai_purpose: config.purpose,
           ai_provider: config.provider,
-          ai_model_fast: config.model_fast,
-          ai_model_quality: config.model_quality,
+          ai_model: config.model,
         });
       }
       res.json({ config });
@@ -187,174 +220,34 @@ router.put("/ai",
   },
 );
 
-router.post("/ai/recheck", requireAuth, requireAdmin, async (req, res, next) => {
-  try {
-    res.json(await aiConfigService.recheckConfig(req.tenantId));
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    next(err);
-  }
-});
-
-router.delete("/ai", requireAuth, requireAdmin, injectAuditContext, async (req, res, next) => {
-  try {
-    const result = await aiConfigService.deleteConfig(req.tenantId);
-    if (req.auditLog) await req.auditLog("settings_updated", null, null, { ai_config_deleted: true });
-    res.json(result);
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    next(err);
-  }
-});
-
-// ─── POST /api/admin/settings/tooltips ───────────────────────────────────────
-// Upsert tooltip (create or update). Admin only.
-// Body: { key, label, value }
-// PUT /api/admin/settings/default-locale — language of users who have not
-// picked their own. Lives on the tenant row, not in app_settings, because the
-// reminder job reads it by joining tenants.
-router.put("/default-locale", requireAuth, requireAdmin, async (req, res, next) => {
-  try {
-    const { locale } = req.body;
-    if (!SUPPORTED_LOCALES.includes(locale)) {
-      return res.status(400).json({ error: "Unsupported locale" });
+router.post("/ai/:purpose/recheck",
+  requireAuth, requireAdmin,
+  [param("purpose").isString().trim().notEmpty()], validate,
+  async (req, res, next) => {
+    try {
+      res.json(await aiConfigService.recheckConfig(req.tenantId, req.params.purpose));
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
     }
-    await db.query("UPDATE tenants SET default_locale = $1 WHERE id = $2", [locale, req.tenantId]);
-    res.json({ default_locale: locale });
-  } catch (err) {
-    next(err);
-  }
-});
+  },
+);
 
-router.post("/tooltips", requireAuth, requireAdmin, async (req, res, next) => {
-  try {
-    const { key, label, value } = req.body;
-    if (!key?.trim())   return res.status(400).json({ error: "'key' jest wymagany" });
-    if (!value?.trim()) return res.status(400).json({ error: "'value' (treść tooltip) jest wymagana" });
-
-    await db.query(
-      `INSERT INTO app_settings (key, value, label, description, value_type, category, updated_by, updated_at, tenant_id)
-       VALUES ($1, $2, $3, '', 'string', 'tooltip', $4, now(), $5)
-       ON CONFLICT (tenant_id, key) DO UPDATE
-         SET value = EXCLUDED.value, label = EXCLUDED.label,
-             updated_by = EXCLUDED.updated_by, updated_at = now()`,
-      [key.trim(), value.trim(), label?.trim() || key.trim(), req.user?.id || null, req.tenantId]
-    );
-
-    const { rows } = await db.query(
-      `SELECT key, value, label, description, value_type, category,
-              s.updated_at, u.display_name AS updated_by_name
-       FROM app_settings s LEFT JOIN users u ON u.id = s.updated_by
-       WHERE s.tenant_id = $1 AND s.key = $2`,
-      [req.tenantId, key.trim()]
-    );
-    res.status(200).json(rows[0]);
-  } catch (err) { next(err); }
-});
-
-// ─── DELETE /api/admin/settings/tooltips/:key ─────────────────────────────────
-// Usuwa tooltip. Admin only.
-router.delete("/tooltips/:key", requireAuth, requireAdmin, async (req, res, next) => {
-  try {
-    const { rowCount } = await db.query(
-      `DELETE FROM app_settings WHERE tenant_id = $1 AND key = $2 AND category = 'tooltip'`,
-      [req.tenantId, req.params.key]
-    );
-    if (!rowCount) return res.status(404).json({ error: "Tooltip nie znaleziony" });
-    res.status(204).end();
-  } catch (err) { next(err); }
-});
-
-// ─── GET /api/admin/settings/groups ──────────────────────────────────────────
-// Lista grup użytkowników (group_profiles). Tylko admin.
-router.get("/groups", requireAuth, requireAdmin, async (req, res, next) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT id, name, display_name, description, has_owner_restriction, is_active,
-              (SELECT COUNT(*) FROM user_group_roles ugr WHERE ugr.group_id = gp.id AND ugr.tenant_id = $1)::int AS member_count,
-              (SELECT COUNT(*) FROM documents d WHERE d.group_id = gp.id AND d.deleted_at IS NULL AND d.tenant_id = $1)::int AS document_count
-       FROM group_profiles gp
-       WHERE gp.tenant_id = $1
-       ORDER BY name`,
-      [req.tenantId]
-    );
-    res.json(rows);
-  } catch (err) { next(err); }
-});
-
-// ─── POST /api/admin/settings/groups ─────────────────────────────────────────
-// Tworzy nową grupę użytkowników. Tylko admin.
-router.post("/groups", requireAuth, requireAdmin, injectAuditContext, async (req, res, next) => {
-  try {
-    const { name, display_name, description, has_owner_restriction } = req.body;
-    if (!name?.trim()) return res.status(400).json({ error: "Pole 'name' jest wymagane" });
-    if (!display_name?.trim()) return res.status(400).json({ error: "Pole 'display_name' jest wymagane" });
-
-    const { rows } = await db.query(
-      `INSERT INTO group_profiles (name, display_name, description, has_owner_restriction, is_active, tenant_id)
-       VALUES ($1, $2, $3, $4, true, $5)
-       RETURNING *`,
-      [name.trim(), display_name.trim(), description?.trim() || null, has_owner_restriction === true, req.tenantId]
-    );
-    res.status(201).json(rows[0]);
-  } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: `Grupa o nazwie '${req.body.name}' już istnieje` });
-    next(err);
-  }
-});
-
-// ─── PATCH /api/admin/settings/groups/:id ────────────────────────────────────
-// Aktualizuje grupę. Tylko admin.
-router.patch("/groups/:id", requireAuth, requireAdmin, injectAuditContext, async (req, res, next) => {
-  try {
-    const { display_name, description, has_owner_restriction, is_active } = req.body;
-    const { rows: existing } = await db.query(
-      "SELECT * FROM group_profiles WHERE id = $1 AND tenant_id = $2", [req.params.id, req.tenantId]
-    );
-    if (!existing.length) return res.status(404).json({ error: "Grupa nie znaleziona" });
-
-    const { rows } = await db.query(
-      `UPDATE group_profiles
-       SET display_name          = COALESCE($1, display_name),
-           description           = COALESCE($2, description),
-           has_owner_restriction = COALESCE($3, has_owner_restriction),
-           is_active             = COALESCE($4, is_active)
-       WHERE id = $5 AND tenant_id = $6
-       RETURNING *`,
-      [
-        display_name?.trim() ?? null,
-        description?.trim() ?? null,
-        has_owner_restriction ?? null,
-        is_active ?? null,
-        req.params.id,
-        req.tenantId,
-      ]
-    );
-    res.json(rows[0]);
-  } catch (err) { next(err); }
-});
-
-// ─── DELETE /api/admin/settings/groups/:id ───────────────────────────────────
-// Usuwa grupę. Blokuje usunięcie jeśli są przypisani użytkownicy lub dokumenty.
-router.delete("/groups/:id", requireAuth, requireAdmin, async (req, res, next) => {
-  try {
-    const { rows: existing } = await db.query(
-      `SELECT gp.*,
-              (SELECT COUNT(*) FROM user_group_roles WHERE group_id = gp.id AND tenant_id = $2)::int AS member_count,
-              (SELECT COUNT(*) FROM documents WHERE group_id = gp.id AND deleted_at IS NULL AND tenant_id = $2)::int AS document_count
-       FROM group_profiles gp WHERE id = $1 AND tenant_id = $2`,
-      [req.params.id, req.tenantId]
-    );
-    if (!existing.length) return res.status(404).json({ error: "Grupa nie znaleziona" });
-    const g = existing[0];
-    if (g.member_count > 0 || g.document_count > 0) {
-      return res.status(409).json({
-        error: `Nie można usunąć grupy — ma ${g.member_count} użytkowników i ${g.document_count} dokumentów.`,
-      });
+router.delete("/ai/:purpose",
+  requireAuth, requireAdmin, injectAuditContext,
+  [param("purpose").isString().trim().notEmpty()], validate,
+  async (req, res, next) => {
+    try {
+      const result = await aiConfigService.deleteConfig(req.tenantId, req.params.purpose);
+      if (req.auditLog) {
+        await req.auditLog("settings_updated", null, null, { ai_config_deleted: req.params.purpose });
+      }
+      res.json(result);
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      next(err);
     }
-    await db.query("DELETE FROM group_profiles WHERE id = $1 AND tenant_id = $2", [req.params.id, req.tenantId]);
-    res.status(204).end();
-  } catch (err) { next(err); }
-});
+  },
+);
 
 module.exports = router;

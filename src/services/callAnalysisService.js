@@ -541,7 +541,6 @@ async function callAiForNotes(tenantId, notesText) {
     tenantId,
     system: SYSTEM_PROMPT,
     user: userMessage,
-    tier: 'fast',
     maxTokens: 1000,
     purpose: 'call_analysis',
   });
