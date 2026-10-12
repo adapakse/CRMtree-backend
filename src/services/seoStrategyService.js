@@ -11,18 +11,18 @@
 // ─────────────────────────────────────────────────────────────────
 
 const { z } = require('zod');
-const Anthropic = require('@anthropic-ai/sdk');
+// Kept only as a Zod -> JSON Schema converter; the provider is the tenant's choice.
 const { zodOutputFormat } = require('@anthropic-ai/sdk/helpers/zod');
 const db = require('../config/database');
-const config = require('../config');
 const logger = require('../utils/logger');
 const { slugify } = require('../utils/slugify');
+const { callAiStructured } = require('./ai/aiClient');
 
-const client = new Anthropic({ apiKey: config.anthropic.apiKey });
-
-// Cheaper model — strategy is a one-time (or rarely-refreshed) step, not
-// per-article, and doesn't need Opus-level writing quality.
-const STRATEGY_MODEL = 'claude-sonnet-5';
+// Provider, key and model come from the TENANT's configuration (tenant_ai_config,
+// migration 0327). Shares the 'seo_research' purpose with keyword research and
+// outlining: building the strategy map is a one-off, cheap step, not per-article
+// writing, so it belongs with them rather than with 'seo_content'.
+const AI_PURPOSE = 'seo_research';
 
 const PillarsSchema = z.object({
   pillars: z
@@ -117,21 +117,24 @@ async function generatePillars(tenantId) {
     .filter(Boolean)
     .join('\n\n');
 
-  const response = await client.messages.parse({
-    model: STRATEGY_MODEL,
-    max_tokens: 4000,
+  const response = await callAiStructured({
+    tenantId,
+    purpose: AI_PURPOSE,
     system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: userContent }],
-    output_config: { format: zodOutputFormat(PillarsSchema) },
+    user: userContent,
+    jsonSchema: zodOutputFormat(PillarsSchema).schema,
+    schemaName: 'content_pillars',
+    maxTokens: 4000,
   });
 
-  if (!response.parsed_output) {
-    throw new Error('Content strategy map generation failed to parse.');
+  const checked = PillarsSchema.safeParse(response.parsed);
+  if (!checked.success) {
+    throw new Error('Content strategy map generation returned JSON that does not match the schema.');
   }
 
   const inserted = [];
   const usedSlugs = new Set();
-  const { pillars } = response.parsed_output;
+  const { pillars } = checked.data;
   for (let i = 0; i < pillars.length; i++) {
     const p = pillars[i];
     let slug = slugify(p.name) || `filar-${i}`;

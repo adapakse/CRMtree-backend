@@ -15,19 +15,22 @@
 // ─────────────────────────────────────────────────────────────────
 
 const { z } = require('zod');
-const Anthropic = require('@anthropic-ai/sdk');
+// Kept only as a Zod -> JSON Schema converter; the provider is the tenant's choice.
 const { zodOutputFormat } = require('@anthropic-ai/sdk/helpers/zod');
 const db = require('../config/database');
-const config = require('../config');
 const logger = require('../utils/logger');
+const { callAiStructured } = require('./ai/aiClient');
 const { BRAND_VOICE } = require('./seoContentService');
 const { renderBodyHtml } = require('../utils/seoMarkdown');
 const linkedinService = require('./socialPublish/linkedinService');
 const metaService = require('./socialPublish/metaService');
 const wordpressService = require('./socialPublish/wordpressService');
 
-const client = new Anthropic({ apiKey: config.anthropic.apiKey });
-const MODEL = 'claude-sonnet-5';
+// Provider, key and model come from the TENANT's configuration (tenant_ai_config,
+// migration 0327). Shares 'seo_content' with the article pipeline: it is the same
+// writing voice on the same published article, so splitting it into its own
+// setting would be one more field for no decision the admin actually makes.
+const AI_PURPOSE = 'seo_content';
 
 const SocialCopySchema = z.object({
   linkedin: z.string().describe('Post na LinkedIn: hook w pierwszej linii, 3-6 krótkich akapitów, max ok. 1200 znaków, link do artykułu na końcu.'),
@@ -35,38 +38,38 @@ const SocialCopySchema = z.object({
   instagram: z.string().describe('Opis pod Instagram: 2-3 krótkie zdania/akapity, max ok. 300 znaków, BEZ oczekiwania że link będzie klikalny (nie jest w opisie IG) — nie zachęcaj do klikania linku w tekście, zamiast tego napisz coś w stylu "link w bio". Zakończ 3-5 trafnymi hashtagami.'),
 });
 
-async function generateCopyVariants({ title, metaDescription, articleUrl }) {
-  const response = await client.messages.parse({
-    model: MODEL,
-    max_tokens: 2000,
+async function generateCopyVariants(tenantId, { title, metaDescription, articleUrl }) {
+  const response = await callAiStructured({
+    tenantId,
+    purpose: AI_PURPOSE,
     system:
       `You write social media posts promoting B2B blog articles for a CRM company, across LinkedIn, Facebook and Instagram. ${BRAND_VOICE} ` +
       'Each platform gets its own tone and constraints — do not just copy-paste the same text three times. No more than 2 emoji total per post. Write in Polish.',
-    messages: [
-      {
-        role: 'user',
-        content: [
-          `Tytuł artykułu: ${title}`,
-          `Opis: ${metaDescription}`,
-          `Link do artykułu: ${articleUrl}`,
-        ].join('\n'),
-      },
-    ],
-    output_config: { format: zodOutputFormat(SocialCopySchema) },
+    user: [
+      `Tytuł artykułu: ${title}`,
+      `Opis: ${metaDescription}`,
+      `Link do artykułu: ${articleUrl}`,
+    ].join('\n'),
+    jsonSchema: zodOutputFormat(SocialCopySchema).schema,
+    schemaName: 'social_copy',
+    maxTokens: 2000,
   });
-  if (!response.parsed_output) throw new Error('Social copy generation failed to parse.');
-  return response.parsed_output;
+  const checked = SocialCopySchema.safeParse(response.parsed);
+  if (!checked.success) throw new Error('Social copy generation returned JSON that does not match the schema.');
+  return checked.data;
 }
 
 // Publishing must not depend on the LLM being reachable: when the API was over
 // its usage limit (2026-09-28) the whole publish silently did nothing. A plain
 // title + description post is worse copy but still a real post the editor can
 // see, edit and re-send.
-async function copyVariantsOrFallback({ title, metaDescription, articleUrl }) {
+async function copyVariantsOrFallback(tenantId, { title, metaDescription, articleUrl }) {
   try {
-    return await generateCopyVariants({ title, metaDescription, articleUrl });
+    return await generateCopyVariants(tenantId, { title, metaDescription, articleUrl });
   } catch (err) {
-    logger.warn('SEO social copy generation failed — using plain fallback copy', { error: err.message });
+    // Covers a tenant with no AI configured and one whose provider cannot enforce
+    // a schema, not just a provider outage — in every case a plain post beats none.
+    logger.warn('SEO social copy generation failed — using plain fallback copy', { tenantId, error: err.message });
     const summary = [title, metaDescription].filter(Boolean).join('\n\n');
     return {
       linkedin: `${summary}\n\n${articleUrl}`,
@@ -121,7 +124,7 @@ async function publishToConnectedPlatforms(contentId, tenantId, siteUrl) {
 
     const needsSocialCopy = connected.has('linkedin') || connected.has('facebook') || connected.has('instagram');
     if (!needsSocialCopy) return;
-    const copy = await copyVariantsOrFallback({ title: article.title, metaDescription: article.meta_description, articleUrl });
+    const copy = await copyVariantsOrFallback(tenantId, { title: article.title, metaDescription: article.meta_description, articleUrl });
 
     if (connected.has('linkedin')) {
       await publishOne(tenantId, contentId, 'linkedin', copy.linkedin, () =>
@@ -169,7 +172,7 @@ async function retryPlatform(contentId, tenantId, platform, siteUrl) {
 
   let body = existing[0]?.body;
   if (!body) {
-    body = platform === 'wordpress' ? article.body : (await copyVariantsOrFallback({ title: article.title, metaDescription: article.meta_description, articleUrl }))[platform];
+    body = platform === 'wordpress' ? article.body : (await copyVariantsOrFallback(tenantId, { title: article.title, metaDescription: article.meta_description, articleUrl }))[platform];
   }
 
   const publishFn = {

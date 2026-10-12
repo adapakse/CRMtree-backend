@@ -181,6 +181,10 @@ module.exports = {
     apiKey: optional("HTCD_API_KEY"),
   },
 
+  // NOTE: unused since migration 0327 (2026-10-08) — every AI call now runs on
+  // the tenant's own key (tenant_ai_config). Kept for one release so a code
+  // rollback still finds its configuration; remove it, and the Key Vault secret
+  // reference, afterwards.
   anthropic: {
     apiKey: optional("ANTHROPIC_API_KEY"),
   },
@@ -216,8 +220,11 @@ module.exports = {
   push: {
     firebaseServiceAccountJson: optional("FIREBASE_SERVICE_ACCOUNT_JSON", ""),
   },
-  // The form assistants of the mobile app (services/assistant). Without
-  // these the assistant endpoints answer 503 and the app keeps its forms.
+  // NOTE: the mobile form assistants ran on this shared Azure OpenAI deployment
+  // until migration 0327 (2026-10-08). They now use the TENANT's own provider,
+  // key and model (tenant_ai_config, purpose 'assistant'), so nothing reads these
+  // variables any more. Kept for one release so a code rollback still finds its
+  // configuration; delete them, and the Container App variables, afterwards.
   azureOpenAi: {
     endpoint: optional("AZURE_OPENAI_ENDPOINT", ""),
     apiKey: optional("AZURE_OPENAI_API_KEY", ""),

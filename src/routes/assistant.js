@@ -133,6 +133,7 @@ router.post('/activity',
         : [];
 
       const content = await assistantClient.ask({
+        tenantId: req.tenantId,
         name: 'activity_intent',
         schema: ACTIVITY_INTENT_SCHEMA,
         system: activitySystemPrompt({ type, today, now, language, users, contacts, needsCompany }),
@@ -189,6 +190,7 @@ router.post('/project-task',
         members: req.body.members ?? [],
       };
       const content = await assistantClient.ask({
+        tenantId: req.tenantId,
         name: 'project_task_intent',
         schema: PROJECT_TASK_INTENT_SCHEMA,
         system: projectTaskSystemPrompt({ today, language, ...lists }),

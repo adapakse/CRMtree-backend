@@ -1050,12 +1050,15 @@ router.get('/discover-competitors/resolve-nip',
   validate,
   async (req, res, next) => {
     try {
-      const result = await discoverySvc.resolveNipOnDemand(req.query.company_name);
+      const result = await discoverySvc.resolveNipOnDemand(req.tenantId, req.query.company_name);
       res.json(result);
     } catch (err) {
       if (err.isBillingError) {
         return res.status(402).json({ error: err.message, billing: true });
       }
+      // Tenant bez skonfigurowanego AI albo z dostawcą bez web_search — 409 z
+      // czytelnym komunikatem, nie 500 (aiClient nadaje status).
+      if (err.status === 409) return res.status(409).json({ error: err.message });
       next(err);
     }
   },
