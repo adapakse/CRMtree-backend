@@ -545,7 +545,14 @@ router.get('/me', requireAuth, async (req, res, next) => {
                 (SELECT jsonb_object_agg(feature, is_enabled)
                  FROM tenant_features WHERE tenant_id = u.tenant_id),
                 '{}'::jsonb
-              ) AS tenant_features
+              ) AS tenant_features,
+              -- Uprawnienia nadane imiennie (migracja 0330). Front musi je znać,
+              -- żeby ukryć moduł w menu, zamiast prowadzić usera do 403.
+              COALESCE(
+                (SELECT jsonb_object_agg(feature_name, granted)
+                 FROM user_feature_access WHERE user_id = u.id AND tenant_id = u.tenant_id),
+                '{}'::jsonb
+              ) AS user_features
        FROM users u
        LEFT JOIN user_group_roles ugr ON ugr.user_id = u.id
        LEFT JOIN group_profiles gp    ON gp.id = ugr.group_id AND gp.is_active = TRUE

@@ -299,9 +299,19 @@ function canOperateForOwner(req, ownerId) {
   return Array.isArray(writeScope) && writeScope.includes(ownerId);
 }
 
+// Moduły, do których admin tenanta nadaje dostęp pojedynczym osobom
+// (user_feature_access, migracja 0330). Pozostałe moduły zostają wyłącznie na
+// fladze tenanta — dopisanie tu kolejnej nazwy włącza dla niej drugą bramkę,
+// więc rób to razem z backfillem w migracji, inaczej wszyscy stracą dostęp.
+const USER_MANAGED_FEATURES = new Set(['call_analysis']);
+
 /**
- * Middleware factory: blokuje endpoint jeśli dany moduł nie jest włączony dla tenanta.
+ * Middleware factory: blokuje endpoint, jeśli moduł nie jest włączony dla
+ * tenanta ALBO (dla modułów z USER_MANAGED_FEATURES) pytający nie ma
+ * uprawnienia nadanego imiennie.
+ *
  * Tenanci bez wiersza w tenant_features (np. gold) mają dostęp do wszystkiego.
+ * Admin tenanta przechodzi drugą bramkę zawsze — tak samo jak w worktrips.
  */
 function requireFeature(feature) {
   return async (req, res, next) => {
@@ -315,9 +325,20 @@ function requireFeature(feature) {
       if (rows.length && rows[0].is_enabled === false) {
         return res.status(403).json({ error: `Moduł '${feature}' nie jest aktywny dla tego tenanta.` });
       }
+
+      if (!USER_MANAGED_FEATURES.has(feature) || req.user.is_admin) return next();
+
+      const { rows: grantRows } = await db.query(
+        `SELECT granted FROM user_feature_access
+          WHERE user_id = $1 AND feature_name = $2 AND tenant_id = $3`,
+        [req.user.id, feature, tenantId]
+      );
+      if (!grantRows.length || grantRows[0].granted !== true) {
+        return res.status(403).json({ error: `Brak dostępu do funkcji: ${feature}` });
+      }
       next();
     } catch (err) { next(err); }
   };
 }
 
-module.exports = { crmAuth, loadCrmScope, loadCrmModuleGrants, requireCrmManager, crmScope, assertOwnership, canOperateForOwner, requireFeature };
+module.exports = { crmAuth, loadCrmScope, loadCrmModuleGrants, requireCrmManager, crmScope, assertOwnership, canOperateForOwner, requireFeature, USER_MANAGED_FEATURES };
