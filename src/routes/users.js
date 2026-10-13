@@ -642,4 +642,83 @@ router.delete(
   },
 );
 
+// ────────────────────────────────────────────────────────────
+// Uprawnienia do modułów nadawane imiennie (user_feature_access, migracja 0330)
+//
+// Port z worktrips-doc. Druga bramka obok flagi modułu na tenancie: superadmin
+// włącza moduł całemu tenantowi, admin tenanta rozdaje go konkretnym osobom.
+// Admin tenanta ma dostęp zawsze i nie potrzebuje wiersza — dlatego jego
+// przełącznik we froncie nic nie zmienia i nie ma go po co pokazywać.
+// ────────────────────────────────────────────────────────────
+
+const { USER_MANAGED_FEATURES } = require("../middleware/crm-rbac");
+const MANAGEABLE_FEATURES = [...USER_MANAGED_FEATURES];
+
+// GET /api/admin/users/:id/features — mapa { nazwa_modułu: czy_ma_dostęp }
+router.get(
+  "/:id/features",
+  requireAdminOnly,
+  [isAnyUUID(param("id"))],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT feature_name, granted FROM user_feature_access
+          WHERE user_id = $1 AND tenant_id = $2`,
+        [req.params.id, req.tenantId],
+      );
+      const granted = Object.fromEntries(rows.map((r) => [r.feature_name, r.granted]));
+      // Moduł bez wiersza = brak dostępu. Front dostaje komplet kluczy, żeby nie
+      // musiał znać listy modułów zarządzalnych imiennie.
+      const result = {};
+      for (const feature of MANAGEABLE_FEATURES) result[feature] = granted[feature] === true;
+      res.json(result);
+    } catch (err) { next(err); }
+  },
+);
+
+// PUT /api/admin/users/:id/features/:feature — nadaj lub odbierz dostęp
+router.put(
+  "/:id/features/:feature",
+  requireAdminOnly,
+  [
+    isAnyUUID(param("id")),
+    param("feature").isIn(MANAGEABLE_FEATURES),
+    body("granted").isBoolean(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      // tenant_id z sesji, nie z żądania — inaczej admin jednego tenanta
+      // nadawałby uprawnienia userowi innego.
+      const { rows: targetRows } = await db.query(
+        "SELECT id FROM users WHERE id = $1 AND tenant_id = $2",
+        [req.params.id, req.tenantId],
+      );
+      if (!targetRows.length) return res.status(404).json({ error: "User not found" });
+
+      const granted = Boolean(req.body.granted);
+      await db.query(
+        `INSERT INTO user_feature_access (tenant_id, user_id, feature_name, granted, granted_by, granted_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())
+         ON CONFLICT (user_id, feature_name) DO UPDATE
+           SET granted = EXCLUDED.granted, granted_by = EXCLUDED.granted_by, granted_at = NOW()`,
+        [req.tenantId, req.params.id, req.params.feature, granted, req.user.id],
+      );
+
+      await audit.log({
+        userId: req.user.id,
+        action: "user_updated",
+        entityType: "user",
+        entityId: req.params.id,
+        afterState: { feature_name: req.params.feature, granted },
+        metadata: { target_user_id: req.params.id, feature_name: req.params.feature },
+        ipAddress: req.auditContext?.ipAddress,
+      });
+
+      res.json({ user_id: req.params.id, feature_name: req.params.feature, granted });
+    } catch (err) { next(err); }
+  },
+);
+
 module.exports = router;
