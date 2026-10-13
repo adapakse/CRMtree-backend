@@ -81,11 +81,17 @@ async function loadCrmScope(req, res, next) {
     req.crmSubstituteForIds = [];
     if (!req.user) return next();
 
-    // Czytaj ustawienie crm_global_read z bazy (raz per request)
+    // Czytaj ustawienie crm_global_read TEGO tenanta (raz per request).
+    // Filtr po tenant_id jest konieczny: app_settings trzyma wiersz na tenanta,
+    // a zapytanie bez niego zwracało wiersz losowego klienta (bez ORDER BY i
+    // LIMIT). Dopóki wszyscy mieli tę samą wartość, wynik był przypadkowo
+    // poprawny — pierwszy tenant, który przestawiłby ten przełącznik, zmieniłby
+    // widoczność leadów komuś zupełnie innemu.
     let globalRead = false;
     try {
       const { rows: settingRows } = await db.query(
-        `SELECT value FROM app_settings WHERE key = 'crm_global_read'`,
+        `SELECT value FROM app_settings WHERE key = 'crm_global_read' AND tenant_id = $1`,
+        [req.user.tenant_id],
       );
       globalRead = settingRows[0]?.value === 'true';
     } catch { /* brak ustawienia = false */ }
