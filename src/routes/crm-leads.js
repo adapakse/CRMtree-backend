@@ -10,7 +10,7 @@ const audit  = require('../services/auditService');
 const logger = require('../utils/logger');
 const { requireAuth }                     = require('../middleware/auth');
 const { validate, injectAuditContext }    = require('../middleware/errorHandler');
-const { crmAuth, loadCrmScope, loadCrmModuleGrants, crmScope, requireCrmManager, assertOwnership, canOperateForOwner, requireFeature } = require('../middleware/crm-rbac');
+const { crmAuth, loadCrmScope, loadCrmModuleGrants, crmScope, requireCrmManager, assertOwnership, canOperateForOwner, requireFeature, pushCrmScopeCondition } = require('../middleware/crm-rbac');
 const projectCrmLinkService = require('../services/projectCrmLinkService');
 const salesMetrics   = require('../services/crmSalesMetricsService');
 const testAccountSvc = require('../services/testAccountService');
@@ -435,9 +435,9 @@ router.get('/tasks', async (req, res, next) => {
     } else if (req.user.crm_role === 'sales_manager') {
       if (assignedIds.length) {
         pushAssignedFilter('COALESCE(a.assigned_to, l.assigned_to)');
-      } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-        params.push(req.crmScopeUserIds); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = ANY($${params.length}::uuid[])`);
-      } else { conds.push('1=0'); }
+      } else {
+        pushCrmScopeCondition(req.crmScopeUserIds, 'COALESCE(a.assigned_to, l.assigned_to)', params, conds);
+      }
     } else {
       params.push(req.user.id); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = $${params.length}`);
     }
@@ -497,9 +497,9 @@ router.get('/calendar', async (req, res, next) => {
     } else if (req.user.crm_role === 'sales_manager') {
       if (assigned_to) {
         params.push(assigned_to); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = $${params.length}`);
-      } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-        params.push(req.crmScopeUserIds); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = ANY($${params.length}::uuid[])`);
-      } else { conds.push('1=0'); }
+      } else {
+        pushCrmScopeCondition(req.crmScopeUserIds, 'COALESCE(a.assigned_to, l.assigned_to)', params, conds);
+      }
     } else {
       params.push(req.user.id); conds.push(`COALESCE(a.assigned_to, l.assigned_to) = $${params.length}`);
     }
@@ -540,9 +540,9 @@ router.get('/calendar', async (req, res, next) => {
     } else if (req.user.crm_role === 'sales_manager') {
       if (assigned_to) {
         paramsPart.push(assigned_to); condsPart.push(`COALESCE(a.assigned_to, p.manager_id) = $${paramsPart.length}`);
-      } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-        paramsPart.push(req.crmScopeUserIds); condsPart.push(`COALESCE(a.assigned_to, p.manager_id) = ANY($${paramsPart.length}::uuid[])`);
-      } else { condsPart.push('1=0'); }
+      } else {
+        pushCrmScopeCondition(req.crmScopeUserIds, 'COALESCE(a.assigned_to, p.manager_id)', paramsPart, condsPart);
+      }
     } else {
       paramsPart.push(req.user.id); condsPart.push(`COALESCE(a.assigned_to, p.manager_id) = $${paramsPart.length}`);
     }
@@ -614,10 +614,7 @@ router.get('/report',
       } else if (req.user.crm_role === 'sales_manager') {
         // ekspansja gdy jawny filtr assigned_to; inaczej — scope grupy
         if (!req.query.assigned_to) {
-          if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-            params.push(req.crmScopeUserIds);
-            conditions.push(`l.assigned_to = ANY($${params.length}::uuid[])`);
-          } else { conditions.push('1=0'); }
+          pushCrmScopeCondition(req.crmScopeUserIds, 'l.assigned_to', params, conditions);
         }
       } else {
         params.push(req.user.id);
@@ -667,10 +664,7 @@ router.get('/report',
         // brak ograniczeń
       } else if (req.user.crm_role === 'sales_manager') {
         if (!req.query.assigned_to) {
-          if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-            trendParams.push(req.crmScopeUserIds);
-            trendConds.push(`l.assigned_to = ANY($${trendParams.length}::uuid[])`);
-          } else { trendConds.push('1=0'); }
+          pushCrmScopeCondition(req.crmScopeUserIds, 'l.assigned_to', trendParams, trendConds);
         }
       } else {
         trendParams.push(req.user.id);
@@ -698,10 +692,7 @@ router.get('/report',
         // brak ograniczeń
       } else if (req.user.crm_role === 'sales_manager') {
         if (!req.query.assigned_to) {
-          if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-            wonTrendParams.push(req.crmScopeUserIds);
-            wonTrendConds.push(`l.assigned_to = ANY($${wonTrendParams.length}::uuid[])`);
-          } else { wonTrendConds.push('1=0'); }
+          pushCrmScopeCondition(req.crmScopeUserIds, 'l.assigned_to', wonTrendParams, wonTrendConds);
         }
       } else {
         wonTrendParams.push(req.user.id);
@@ -734,10 +725,7 @@ router.get('/report',
         // brak ograniczeń
       } else if (req.user.crm_role === 'sales_manager') {
         if (!req.query.assigned_to) {
-          if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-            actParams.push(req.crmScopeUserIds);
-            actConds.push(`a.assigned_to = ANY($${actParams.length}::uuid[])`);
-          } else { actConds.push('1=0'); }
+          pushCrmScopeCondition(req.crmScopeUserIds, 'a.assigned_to', actParams, actConds);
         }
       } else {
         actParams.push(req.user.id);

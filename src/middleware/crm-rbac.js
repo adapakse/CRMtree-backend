@@ -157,6 +157,29 @@ async function loadCrmScope(req, res, next) {
 }
 
 /**
+ * Dokłada do zapytania warunek zakresu CRM managera. Trzy stany `scopeUserIds`
+ * znaczą trzy różne rzeczy i mylenie ich kosztowało już jeden incydent:
+ *
+ *   null            — BRAK OGRANICZEŃ (admin albo crm_global_read): żaden warunek
+ *   niepusta tablica — widzi tych userów
+ *   pusta tablica    — nie widzi nikogo: 1=0
+ *
+ * Wcześniej każde miejsce pisało `if (scope && scope.length > 0)`, przez co
+ * `null` wpadało w gałąź „pusty zakres" i manager z włączonym globalnym odczytem
+ * nie widział ANI JEDNEGO rekordu — globalny odczyt zabierał dostęp zamiast go
+ * dawać. Nie powielaj tego warunku ręcznie, używaj tej funkcji.
+ */
+function pushCrmScopeCondition(scopeUserIds, column, params, conds) {
+  if (scopeUserIds === null || scopeUserIds === undefined) return;
+  if (scopeUserIds.length > 0) {
+    params.push(scopeUserIds);
+    conds.push(`${column} = ANY($${params.length}::uuid[])`);
+    return;
+  }
+  conds.push('1=0');
+}
+
+/**
  * Middleware factory: dociąga granty widoczności CRM (crm_visibility_grants)
  * dla danego modułu ('leads' | 'partners'). Musi być wywołany PO loadCrmScope.
  *
@@ -341,4 +364,4 @@ function requireFeature(feature) {
   };
 }
 
-module.exports = { crmAuth, loadCrmScope, loadCrmModuleGrants, requireCrmManager, crmScope, assertOwnership, canOperateForOwner, requireFeature, USER_MANAGED_FEATURES };
+module.exports = { crmAuth, loadCrmScope, loadCrmModuleGrants, requireCrmManager, crmScope, assertOwnership, canOperateForOwner, requireFeature, USER_MANAGED_FEATURES, pushCrmScopeCondition };
