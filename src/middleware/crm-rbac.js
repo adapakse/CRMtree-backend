@@ -81,11 +81,17 @@ async function loadCrmScope(req, res, next) {
     req.crmSubstituteForIds = [];
     if (!req.user) return next();
 
-    // Czytaj ustawienie crm_global_read z bazy (raz per request)
+    // Czytaj ustawienie crm_global_read TEGO tenanta (raz per request).
+    // Filtr po tenant_id jest konieczny: app_settings trzyma wiersz na tenanta,
+    // a zapytanie bez niego zwracało wiersz losowego klienta (bez ORDER BY i
+    // LIMIT). Dopóki wszyscy mieli tę samą wartość, wynik był przypadkowo
+    // poprawny — pierwszy tenant, który przestawiłby ten przełącznik, zmieniłby
+    // widoczność leadów komuś zupełnie innemu.
     let globalRead = false;
     try {
       const { rows: settingRows } = await db.query(
-        `SELECT value FROM app_settings WHERE key = 'crm_global_read'`,
+        `SELECT value FROM app_settings WHERE key = 'crm_global_read' AND tenant_id = $1`,
+        [req.user.tenant_id],
       );
       globalRead = settingRows[0]?.value === 'true';
     } catch { /* brak ustawienia = false */ }
@@ -154,6 +160,29 @@ async function loadCrmScope(req, res, next) {
 
     next();
   } catch (err) { next(err); }
+}
+
+/**
+ * Dokłada do zapytania warunek zakresu CRM managera. Trzy stany `scopeUserIds`
+ * znaczą trzy różne rzeczy i mylenie ich kosztowało już jeden incydent:
+ *
+ *   null            — BRAK OGRANICZEŃ (admin albo crm_global_read): żaden warunek
+ *   niepusta tablica — widzi tych userów
+ *   pusta tablica    — nie widzi nikogo: 1=0
+ *
+ * Wcześniej każde miejsce pisało `if (scope && scope.length > 0)`, przez co
+ * `null` wpadało w gałąź „pusty zakres" i manager z włączonym globalnym odczytem
+ * nie widział ANI JEDNEGO rekordu — globalny odczyt zabierał dostęp zamiast go
+ * dawać. Nie powielaj tego warunku ręcznie, używaj tej funkcji.
+ */
+function pushCrmScopeCondition(scopeUserIds, column, params, conds) {
+  if (scopeUserIds === null || scopeUserIds === undefined) return;
+  if (scopeUserIds.length > 0) {
+    params.push(scopeUserIds);
+    conds.push(`${column} = ANY($${params.length}::uuid[])`);
+    return;
+  }
+  conds.push('1=0');
 }
 
 /**
@@ -341,4 +370,4 @@ function requireFeature(feature) {
   };
 }
 
-module.exports = { crmAuth, loadCrmScope, loadCrmModuleGrants, requireCrmManager, crmScope, assertOwnership, canOperateForOwner, requireFeature, USER_MANAGED_FEATURES };
+module.exports = { crmAuth, loadCrmScope, loadCrmModuleGrants, requireCrmManager, crmScope, assertOwnership, canOperateForOwner, requireFeature, USER_MANAGED_FEATURES, pushCrmScopeCondition };
