@@ -6,7 +6,7 @@ const express  = require("express");
 const router   = express.Router();
 const { pool } = require("../config/database");
 const { requireAuth } = require("../middleware/auth");
-const { crmAuth, loadCrmScope, loadCrmModuleGrants, canOperateForOwner, requireFeature } = require("../middleware/crm-rbac");
+const { crmAuth, loadCrmScope, loadCrmModuleGrants, canOperateForOwner, requireFeature, pushCrmScopeCondition } = require("../middleware/crm-rbac");
 const projectCrmLinkService = require("../services/projectCrmLinkService");
 const tenantFields = require("../services/tenantFieldService");
 const calendarService = require("../services/calendarService");
@@ -229,9 +229,9 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
     } else if (req.user.crm_role === 'sales_manager') {
       if (manager_id) {
         params.push(manager_id); where.push(`p.manager_id = $${params.length}`);
-      } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-        params.push(req.crmScopeUserIds); where.push(`p.manager_id = ANY($${params.length}::uuid[])`);
-      } else { where.push('1=0'); }
+      } else {
+        pushCrmScopeCondition(req.crmScopeUserIds, 'p.manager_id', params, where);
+      }
     } else {
       // own partners, plus partners of anyone this user is actively substituting
       const scopeIds = (req.crmScopeUserIds && req.crmScopeUserIds.length)
@@ -367,9 +367,9 @@ router.get("/tasks", requireAuth, crmAuth, async (req, res) => {
     } else if (req.user.crm_role === 'sales_manager') {
       if (assignedIds.length) {
         pushAssignedFilter('COALESCE(a.assigned_to, p.manager_id)');
-      } else if (req.crmScopeUserIds && req.crmScopeUserIds.length > 0) {
-        params.push(req.crmScopeUserIds); conds.push(`COALESCE(a.assigned_to, p.manager_id) = ANY($${params.length}::uuid[])`);
-      } else { conds.push('1=0'); }
+      } else {
+        pushCrmScopeCondition(req.crmScopeUserIds, 'COALESCE(a.assigned_to, p.manager_id)', params, conds);
+      }
     } else {
       params.push(req.user.id); conds.push(`COALESCE(a.assigned_to, p.manager_id) = $${params.length}`);
     }

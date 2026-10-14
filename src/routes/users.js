@@ -19,6 +19,13 @@ function requireAdminOrSalesManager(req, res, next) {
   return res.status(403).json({ error: 'Admin access required' });
 }
 
+// `normalizeEmail()` z express-validator domyślnie WYCINA KROPKI z adresów
+// Gmail i usuwa `+tagi`, więc zapisany adres różnił się od wpisanego
+// (jan.kowalski@gmail.com -> jankowalski@gmail.com). Dla użytkownika wyglądało
+// to jak „edycja e-maila nie działa". Logowanie i tak porównuje przez
+// lower(email), więc wystarczy przyciąć i sprowadzić do małych liter.
+const emailSanitizer = (value) => String(value || '').trim().toLowerCase();
+
 const contactFieldRules = [
   body('phone').optional({ nullable: true }).isString().trim().isLength({ max: 40 }),
   body('company').optional({ nullable: true }).isString().trim().isLength({ max: 200 }),
@@ -49,7 +56,7 @@ router.post(
   "/",
   requireAdminOnly,
   [
-    body('email').notEmpty().isEmail().normalizeEmail(),
+    body('email').notEmpty().isEmail().customSanitizer(emailSanitizer),
     body('first_name').notEmpty().isString().trim().isLength({ max: 100 }),
     body('last_name').notEmpty().isString().trim().isLength({ max: 100 }),
     body('is_active').optional({ nullable: true }).isBoolean(),
@@ -60,6 +67,8 @@ router.post(
     body('is_external').optional({ nullable: true }).isBoolean(),
     body('can_create_projects').optional({ nullable: true }).isBoolean(),
     body('can_view_ksef_invoices').optional({ nullable: true }).isBoolean(),
+    body('password').optional({ nullable: true }).isString().isLength({ min: 8 })
+      .withMessage('Password must be at least 8 characters'),
   ],
   validate,
   async (req, res, next) => {
@@ -75,15 +84,23 @@ router.post(
       });
       if (externalConflict) return res.status(400).json({ error: externalConflict });
 
+      // Hasło jest opcjonalne, ale bez niego nowe konto NIE ZALOGUJE SIĘ, dopóki
+      // admin nie ustawi hasła osobno na karcie użytkownika. Wcześniej nie dało
+      // się go podać w ogóle i nic o tym nie mówiło.
+      const passwordHash = req.body.password
+        ? await bcrypt.hash(String(req.body.password), 12)
+        : null;
+
       const { rows } = await db.query(
         `INSERT INTO users (email, first_name, last_name, is_active, is_admin, crm_role, tenant_id,
                             phone, company, department, is_external, can_create_projects,
-                            can_view_ksef_invoices)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                            can_view_ksef_invoices, password_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          RETURNING id, email, first_name, last_name, display_name, is_active, is_admin, crm_role, created_at,
                    phone, company, department, is_external, can_create_projects, can_view_ksef_invoices`,
         [email, first_name, last_name, is_active, is_admin, crm_role, req.tenantId,
-         phone, company, department, is_external, can_create_projects, can_view_ksef_invoices]
+         phone, company, department, is_external, can_create_projects, can_view_ksef_invoices,
+         passwordHash]
       );
 
       await audit.log({
@@ -258,7 +275,7 @@ router.patch(
   requireAdminOrSalesManager,
   [
     isAnyUUID(param('id')),
-    body('email').optional().isEmail().normalizeEmail(),
+    body('email').optional().isEmail().customSanitizer(emailSanitizer),
     body('first_name').optional().isString().trim().isLength({ max: 100 }),
     body('last_name').optional().isString().trim().isLength({ max: 100 }),
     body('is_active').optional().isBoolean(),
