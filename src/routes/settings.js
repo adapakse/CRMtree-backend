@@ -292,6 +292,8 @@ router.delete("/lead-stages/:id",
 // PUT /api/admin/settings/default-locale — language of users who have not
 // picked their own. Lives on the tenant row, not in app_settings, because the
 // reminder job reads it by joining tenants.
+// The admin's own choice is cleared too: otherwise it outranks the new default
+// and the admin sees nothing change after picking it.
 router.put("/default-locale", requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const { locale } = req.body;
@@ -299,6 +301,7 @@ router.put("/default-locale", requireAuth, requireAdmin, async (req, res, next) 
       return res.status(400).json({ error: "Unsupported locale" });
     }
     await db.query("UPDATE tenants SET default_locale = $1 WHERE id = $2", [locale, req.tenantId]);
+    await db.query("UPDATE users SET locale = NULL WHERE id = $1 AND tenant_id = $2", [req.user.id, req.tenantId]);
     res.json({ default_locale: locale });
   } catch (err) {
     next(err);
