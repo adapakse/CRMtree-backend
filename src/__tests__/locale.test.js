@@ -76,3 +76,14 @@ test('only the tenant admin changes the tenant default', async () => {
   expect((await api('put', '/api/admin/settings/default-locale', admin).send({ locale: 'en' })).status).toBe(200);
   expect((await api('get', '/api/auth/me', employee)).body.tenant_default_locale).toBe('en');
 });
+
+test('the public tenant lookup tells the login page the tenant default language', async () => {
+  await db.query("UPDATE tenants SET default_locale = 'ru' WHERE id = $1", [tenantId]);
+  try {
+    const res = await request(app).get(`/api/public/tenants/by-slug/${SLUG}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ name: 'Locale Test', slug: SLUG, is_active: true, default_locale: 'ru' });
+  } finally {
+    await db.query("UPDATE tenants SET default_locale = 'pl' WHERE id = $1", [tenantId]);
+  }
+});

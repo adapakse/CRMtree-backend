@@ -2,8 +2,10 @@
 // ─────────────────────────────────────────────────────────────────
 // routes/public-tenants.js — unauthenticated tenant lookup by subdomain
 // slug. Used by the login page to show the tenant's name when visited at
-// {slug}.crmtree.pl. Never returns anything beyond name/slug/is_active —
-// no features, no user counts, no provider config.
+// {slug}.crmtree.pl, and by the frontend to speak the tenant's default
+// language before anyone signs in. Never returns anything beyond
+// name/slug/is_active/default_locale — no features, no user counts, no
+// provider config.
 // ─────────────────────────────────────────────────────────────────
 
 const router = require('express').Router();
@@ -27,7 +29,7 @@ router.get('/by-slug/:slug',
       }
 
       const { rows } = await db.query(
-        `SELECT name, slug, is_active FROM tenants
+        `SELECT name, slug, is_active, default_locale FROM tenants
           WHERE slug = $1 AND is_active = true AND deleted_at IS NULL`,
         [slug],
       );
