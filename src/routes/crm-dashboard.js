@@ -444,4 +444,128 @@ router.get('/renewals', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── GET /api/crm/dashboard/my-calls — the signed-in user's own calls ──
+// Feeds the sales dashboard's "My phone calls" panel and the "Calls today" medal
+// (ported 1:1 from WorkTrips).
+function myCallsPeriodRange(period) {
+  const now = new Date();
+  const dow  = now.getDay();
+  const diff = (dow + 6) % 7; // days since Monday
+  switch (period) {
+    case 'prev_w': {
+      const thisMon = new Date(now); thisMon.setHours(0,0,0,0); thisMon.setDate(now.getDate() - diff);
+      const lastMon = new Date(thisMon); lastMon.setDate(thisMon.getDate() - 7);
+      const lastSun = new Date(thisMon); lastSun.setDate(thisMon.getDate() - 1); lastSun.setHours(23,59,59,999);
+      return { from: lastMon.toISOString(), to: lastSun.toISOString() };
+    }
+    case 'cm': {
+      const from = new Date(now.getFullYear(), now.getMonth(), 1);
+      const to   = new Date(now); to.setHours(23,59,59,999);
+      return { from: from.toISOString(), to: to.toISOString() };
+    }
+    case 'prev_1m': {
+      const from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const to   = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+      return { from: from.toISOString(), to: to.toISOString() };
+    }
+    case 'prev_q': {
+      const q  = Math.floor(now.getMonth() / 3);
+      const pq = q === 0 ? 3 : q - 1;
+      const py = q === 0 ? now.getFullYear() - 1 : now.getFullYear();
+      const from = new Date(py, pq * 3, 1);
+      const to   = new Date(py, pq * 3 + 3, 0, 23, 59, 59, 999);
+      return { from: from.toISOString(), to: to.toISOString() };
+    }
+    case 'prev_year': {
+      const y = now.getFullYear() - 1;
+      return { from: new Date(y, 0, 1).toISOString(), to: new Date(y, 11, 31, 23, 59, 59, 999).toISOString() };
+    }
+    default: { // 'cw' — current week
+      const mon = new Date(now); mon.setHours(0,0,0,0); mon.setDate(now.getDate() - diff);
+      const to  = new Date(now); to.setHours(23,59,59,999);
+      return { from: mon.toISOString(), to: to.toISOString() };
+    }
+  }
+}
+
+// Custom-range bound: 'YYYY-MM' means the whole month, 'YYYY-MM-DD' a single day.
+// The shared period-filter emits 'YYYY-MM' since it uses <input type="month">.
+// `isEnd` selects end-of-period; boundaries stay in server-local time to match
+// myCallsPeriodRange above. Returns null when the string is not one of those shapes.
+function parseMyCallsBound(raw, isEnd) {
+  const m = typeof raw === 'string' && raw.match(/^(\d{4})-(\d{2})(?:-(\d{2}))?$/);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const mon  = Number(m[2]) - 1;
+  if (m[3]) {
+    const day = Number(m[3]);
+    return isEnd ? new Date(year, mon, day, 23, 59, 59, 999)
+                 : new Date(year, mon, day, 0, 0, 0, 0);
+  }
+  return isEnd ? new Date(year, mon + 1, 0, 23, 59, 59, 999)
+               : new Date(year, mon, 1, 0, 0, 0, 0);
+}
+
+router.get('/my-calls',
+  [
+    query('period').optional().isString(),
+    query('from_date').optional().isISO8601(),
+    query('to_date').optional().isISO8601(),
+    query('min_duration_sec').optional().isInt({ min: 0 }).toInt(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const period = String(req.query.period || 'cw');
+      const params = [req.user.id, req.tenantId];
+      let dateSQL;
+
+      if (period === 'today') {
+        // Daily counter: the day is Europe/Warsaw regardless of the Node server's
+        // and the DB session's time zone (explicit zone name).
+        dateSQL = `started_at >= date_trunc('day', now() AT TIME ZONE 'Europe/Warsaw') AT TIME ZONE 'Europe/Warsaw'
+          AND started_at < (date_trunc('day', now() AT TIME ZONE 'Europe/Warsaw') + interval '1 day') AT TIME ZONE 'Europe/Warsaw'`;
+      } else {
+        let from, to;
+        if (period === 'custom') {
+          const start = parseMyCallsBound(req.query.from_date, false);
+          const end   = parseMyCallsBound(req.query.to_date, true);
+          if (!start || !end || start > end) {
+            return res.status(400).json({
+              error: 'Custom range needs valid dates (YYYY-MM or YYYY-MM-DD) with from <= to.',
+            });
+          }
+          from = start.toISOString();
+          to   = end.toISOString();
+        } else {
+          ({ from, to } = myCallsPeriodRange(period));
+        }
+        params.push(from, to);
+        dateSQL = `started_at BETWEEN $3 AND $4`;
+      }
+
+      const where = [];
+
+      if (req.query.min_duration_sec > 0) {
+        params.push(req.query.min_duration_sec);
+        where.push(`duration_sec >= $${params.length}`);
+      }
+
+      const whereSQL = where.length ? `AND ${where.join(' AND ')}` : '';
+
+      const { rows } = await db.query(`
+        SELECT direction, status, COUNT(*) AS count
+        FROM pbx_call_log
+        WHERE user_id = $1
+          AND tenant_id = $2
+          AND ${dateSQL}
+          ${whereSQL}
+        GROUP BY direction, status
+        ORDER BY direction, status
+      `, params);
+      res.json(rows);
+    } catch (err) { next(err); }
+  }
+);
+
 module.exports = router;
