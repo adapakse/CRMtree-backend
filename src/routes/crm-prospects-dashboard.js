@@ -348,6 +348,7 @@ router.get('/calls-by-salesperson',
     query('status').optional().isString(),
     query('from_date').optional().isISO8601(),
     query('to_date').optional().isISO8601(),
+    query('min_duration_sec').optional().isInt({ min: 0 }).toInt(),
   ],
   validate,
   async (req, res, next) => {
@@ -375,6 +376,11 @@ router.get('/calls-by-salesperson',
           params.push(statuses);
           where.push(`c.status = ANY($${params.length}::text[])`);
         }
+      }
+
+      if (req.query.min_duration_sec > 0) {
+        params.push(req.query.min_duration_sec);
+        where.push(`c.duration_sec >= $${params.length}`);
       }
 
       // Scope
