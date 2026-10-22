@@ -87,6 +87,7 @@ Aktualna lista (nazwa sekretu w Key Vault → zmienna env):
 - `serper-api-key` → `SERPER_API_KEY` (zmienna gotowa, kod jeszcze z niej nie korzysta)
 - `facebook-access-token` → `FACEBOOK_ACCESS_TOKEN` (zmienna gotowa, kod jeszcze z niej nie korzysta)
 - `gus-regon-key` → `GUS_REGON_KEY` (zmienna gotowa, kod jeszcze z niej nie korzysta)
+- `zeptomail-smtp-password` → `EMAIL_SMTP_PASSWORD` (token wysyłki ZeptoMail — patrz „Maile systemowe”)
 
 Celowy wyjątek: hasło do ACR (`crmtreeregistryazurecrio-crmtreeregistry`) zostaje jako
 zwykły sekret Container Appa, nie w Key Vault — to auto-zarządzane przez Azure poświadczenie
@@ -94,6 +95,44 @@ do pullowania obrazów Dockera, nie sekret aplikacji.
 
 Lokalnie: prawdziwe wartości w `.env.local` (gitignored — `.env.*` w `.gitignore`). Do repo
 trafia tylko `.env.example` z placeholderami.
+
+### Maile systemowe — ZeptoMail (decyzja Adama, 2026-10-22) — nie cofaj bez pytania
+
+Wszystkie maile, które wysyła sam CRMtree (przypomnienia, dzienny raport zadań o 09:00,
+przypisanie zadania i maile terminów w Projektach, dokumenty i podpisy), idą przez
+**ZeptoMail** — usługę Zoho do maili transakcyjnych — po SMTP, z adresu
+`noreply@crmtree.pl`. To nie dotyczy skrzynek handlowców podpiętych w module Email (Gmail,
+Outlook, Zoho per user) — to osobny mechanizm.
+
+- **Dlaczego:** do 2026-10 wysyłka szła przez Gmail API kontem serwisowym Google
+  „w imieniu” `noreply@worktrips.com` (relikt po Worktrips). Na PROD Google odrzucał token
+  (`unauthorized_client`), więc **żaden mail systemowy nie wychodził**. Poczta `crmtree.pl`
+  jest na Zoho Mail, nie w Google Workspace, więc tą drogą nie da się wysyłać z adresu CRMtree.
+  Zwykła skrzynka Zoho odpada przez limit 50–500 maili na godzinę — raporty o 09:00 wychodzą
+  wszystkie naraz. ZeptoMail jest płatny za liczbę maili (2,50 USD za 10 000).
+  **Nie wracaj do Gmail API ani nie wysyłaj z prywatnej skrzynki.**
+- **Kod:** jedno miejsce wysyłki — `sendMail()` w `src/utils/email.js` (nodemailer → SMTP).
+  `src/services/emailService.js` (dokumenty, podpisy) tylko trzyma własne szablony i woła
+  `sendMail()`. Błąd wysyłki jest logowany (`Błąd wysyłki emaila`) i nigdy nie psuje żądania
+  ani joba. Udana wysyłka loguje `Email wysłany`.
+- **Konfiguracja** (`config.email`): `EMAIL_SMTP_HOST` (z panelu ZeptoMail — zależy od
+  centrum danych Zoho, bez wartości domyślnej), `EMAIL_SMTP_PORT` (587, STARTTLS; 465 =
+  TLS od razu), `EMAIL_SMTP_USER` (`emailapikey`), `EMAIL_SMTP_PASSWORD` (token „Send Mail”
+  agenta — sekret w Key Vault), `EMAIL_FROM` (`noreply@crmtree.pl`), `EMAIL_FROM_NAME`
+  (`CRMtree`). Bez hosta albo tokenu każdy mail kończy się błędem w logu.
+- **Tryb deweloperski:** przy `NODE_ENV=development` (lokalnie i na **INT**) maile są tylko
+  logowane (`[DEV] Email NIE wysłany`), chyba że `EMAIL_SEND_IN_DEV=true`. Na INT jest to
+  włączone celowo, żeby testować maile przed produkcją — uważaj, bo idą do prawdziwych
+  adresów użytkowników bazy INT. Stara zmienna `GOOGLE_SEND_IN_DEV` dotyczy już tylko
+  zaproszeń kalendarza (`calendarService.js`).
+- **Domena:** `crmtree.pl` jest zweryfikowana w ZeptoMail rekordami DKIM (TXT) i CNAME
+  (adres odbić) w DNS; SPF nie jest potrzebny. Bez weryfikacji ZeptoMail odrzuca nadawcę.
+- **Diagnoza:** w logach Container Appa szukaj `Email wysłany` / `Błąd wysyłki emaila` /
+  `[Digest]`; w panelu ZeptoMail są logi doręczeń i odbić.
+- **Znana zaległość:** szablony w `emailService.js` (obieg dokumentu, podpis) mają jeszcze
+  branding „worktrips.doc” i angielskie teksty spoza i18n — do przerobienia osobno.
+- Testy: `src/__tests__/email-transport.test.js` (bez bazy; nodemailer podmieniony). Testy,
+  które sprawdzają treść maili, podmieniają `emailUtil.sendMail` przez `jest.spyOn`.
 
 ### Dostęp do bazy Azure Postgres z lokalnego komputera
 Serwer ma firewall — trzeba dodać regułę dla swojego IP, potem posprzątać:

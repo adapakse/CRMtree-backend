@@ -60,9 +60,21 @@ module.exports = {
     container: optional("AZURE_STORAGE_CONTAINER", "documents"),
   },
 
+  // System e-mails (reminders, daily digest, project notifications) go out
+  // through ZeptoMail (Zoho's transactional service) over SMTP. Host and the
+  // Send Mail token come from the Mail Agent's SMTP tab in ZeptoMail; the
+  // host differs per Zoho data centre, so it has no default.
   email: {
-    from: optional("EMAIL_FROM", "noreply@worktrips.com"),
+    from: optional("EMAIL_FROM", "noreply@crmtree.pl"),
     fromName: optional("EMAIL_FROM_NAME", "CRMtree"),
+    smtp: {
+      host: optional("EMAIL_SMTP_HOST", ""),
+      port: parseInt(optional("EMAIL_SMTP_PORT", "587"), 10),
+      user: optional("EMAIL_SMTP_USER", "emailapikey"),
+      password: optional("EMAIL_SMTP_PASSWORD", ""),
+    },
+    // Development environments (local, INT) only log e-mails unless this is on.
+    sendInDev: optional("EMAIL_SEND_IN_DEV", "false") === "true",
   },
 
   // ─── Google Workspace / Gmail API ─────────────────────────────────────────

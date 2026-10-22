@@ -1,99 +1,40 @@
 "use strict";
 
 /**
- * email.js — Gmail API via Service Account + Domain-Wide Delegation
+ * email.js — system e-mails of CRMtree, sent through ZeptoMail over SMTP.
  *
- * Wysyła maile z noreply@worktrips.com używając konta serwisowego Google.
- * Nie wymaga haseł ani OAuth per użytkownik.
+ * Every notification (reminders, the daily digest, project notifications,
+ * documents) goes through sendMail() below. Settings: config.email (EMAIL_*).
+ * Until 2026-10 this used the Gmail API with a Google service account
+ * impersonating noreply@worktrips.com; Google refused it in production
+ * (unauthorized_client), so no system e-mail went out. Adam chose ZeptoMail
+ * (decision of 2026-10-22): the crmtree.pl mailboxes stay on Zoho Mail, and a
+ * transactional service copes with the 09:00 peak of digests that would trip
+ * an ordinary mailbox's hourly limit.
  */
 
-const { google } = require("googleapis");
-const path = require("path");
+const nodemailer = require("nodemailer");
 const config = require("../config");
 const logger = require("./logger");
 const { translate, formatDate, formatDateOnly, formatDateTime, supportedOrDefault } = require("./i18n");
 
-// ─── Inicjalizacja klienta Gmail ─────────────────────────────────────────────
+let transporter = null;
 
-let _gmailClient = null;
-
-async function getGmailClient() {
-  if (_gmailClient) return _gmailClient;
-
-  // Klucz serwisowy: plik JSON lub JSON ze zmiennej środowiskowej
-  let credentials;
-  if (config.google.serviceAccountJson) {
-    credentials = JSON.parse(config.google.serviceAccountJson);
-  } else if (config.google.serviceAccountFile) {
-    credentials = require(path.resolve(config.google.serviceAccountFile));
-  } else {
-    throw new Error(
-      "Brak konfiguracji Google Service Account (GOOGLE_SERVICE_ACCOUNT_JSON lub GOOGLE_SERVICE_ACCOUNT_FILE)",
-    );
+function getTransporter() {
+  if (transporter) return transporter;
+  const { host, port, user, password } = config.email.smtp;
+  if (!host || !password) {
+    throw new Error("Brak konfiguracji wysyłki maili (EMAIL_SMTP_HOST, EMAIL_SMTP_PASSWORD)");
   }
-
-  const auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/gmail.send"],
+  transporter = nodemailer.createTransport({
+    host,
+    port,
+    // 465 is implicit TLS; 587 starts plain and must upgrade with STARTTLS.
+    secure: port === 465,
+    requireTLS: port !== 465,
+    auth: { user, pass: password },
   });
-
-  // Impersonacja — wysyłamy jako noreply@worktrips.com
-  const authClient = await auth.getClient();
-  authClient.subject = config.google.impersonateEmail;
-
-  _gmailClient = google.gmail({ version: "v1", auth: authClient });
-  return _gmailClient;
-}
-
-// ─── Helpers RFC 2047 / RFC 2045 ─────────────────────────────────────────────
-
-// RFC 2047: enkoduje display name gdy zawiera znaki spoza ASCII
-function encodeRfc2047(str) {
-  if (!str || !/[^\x00-\x7F]/.test(str)) return str;
-  return `=?UTF-8?B?${Buffer.from(str, "utf8").toString("base64")}?=`;
-}
-
-// RFC 2045: base64 body musi być zawijane co max 76 znaków
-function wrapBase64(b64) {
-  return b64.match(/.{1,76}/g).join("\r\n");
-}
-
-// ─── Budowanie wiadomości RFC 2822 ───────────────────────────────────────────
-
-function buildRawMessage({ to, subject, html, text }) {
-  const fromName = encodeRfc2047(config.email.fromName);
-  const from = fromName
-    ? `${fromName} <${config.email.from}>`
-    : config.email.from;
-  const boundary = `boundary_${Date.now()}`;
-
-  const headers = [
-    `From: ${from}`,
-    `To: ${to}`,
-    `Subject: =?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`,
-    "MIME-Version: 1.0",
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
-    "",
-  ].join("\r\n");
-
-  const textPart = [
-    `--${boundary}`,
-    "Content-Type: text/plain; charset=UTF-8",
-    "Content-Transfer-Encoding: base64",
-    "",
-    wrapBase64(Buffer.from(text || stripHtml(html), "utf8").toString("base64")),
-  ].join("\r\n");
-
-  const htmlPart = [
-    `--${boundary}`,
-    "Content-Type: text/html; charset=UTF-8",
-    "Content-Transfer-Encoding: base64",
-    "",
-    wrapBase64(Buffer.from(html, "utf8").toString("base64")),
-  ].join("\r\n");
-
-  const raw = `${headers}\r\n${textPart}\r\n\r\n${htmlPart}\r\n\r\n--${boundary}--`;
-  return Buffer.from(raw).toString("base64url");
+  return transporter;
 }
 
 function stripHtml(html) {
@@ -112,9 +53,9 @@ async function sendMail({ to, subject, html, text }) {
   }
 
   // W trybie dev tylko loguj — nie wysyłaj
-  if (config.isDev && !config.google.sendInDev) {
+  if (config.isDev && !config.email.sendInDev) {
     logger.info(
-      `[DEV] Email NIE wysłany (ustaw GOOGLE_SEND_IN_DEV=true aby wysyłać w dev)`,
+      `[DEV] Email NIE wysłany (ustaw EMAIL_SEND_IN_DEV=true aby wysyłać w dev)`,
       {
         to,
         subject,
@@ -124,12 +65,12 @@ async function sendMail({ to, subject, html, text }) {
   }
 
   try {
-    const gmail = await getGmailClient();
-    const raw = buildRawMessage({ to, subject, html, text });
-
-    await gmail.users.messages.send({
-      userId: "me",
-      requestBody: { raw },
+    await getTransporter().sendMail({
+      from: { name: config.email.fromName, address: config.email.from },
+      to,
+      subject,
+      html,
+      text: text || stripHtml(html),
     });
 
     logger.info(`Email wysłany`, { to, subject });
