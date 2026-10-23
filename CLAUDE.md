@@ -262,6 +262,26 @@ Przepływ POST:
 6. Zawsze `200 {"received":true}`, nawet przy błędzie własnego kodu — inaczej Meta wpada
    w retry storm.
 
+### Okno 24 h i szablony wiadomości
+
+Reguła Meta: zwykły tekst dochodzi tylko w ciągu 24 h od ostatniej wiadomości KLIENTA na
+numer firmy. Poza oknem (w tym pierwszy kontakt) jedyną drogą jest zatwierdzony szablon.
+Meta zwykle przyjmuje wysyłkę tekstu poza oknem i dopiero potem zwraca status `failed`
+(błąd 131047) w webhooku, więc bez sprawdzenia handlowiec widziałby „wysłano”.
+- `sendTextMessage` najpierw sprawdza `isCustomerWindowOpen` (incoming od tego numeru,
+  tenant-wide po cyfrach, `created_at` < 24 h) → `WHATSAPP_WINDOW_CLOSED` (400).
+- `GET /crm/whatsapp/templates` → zatwierdzone szablony z `/{waba_id}/message_templates`
+  (potrzebny `waba_id` + uprawnienie tokena `whatsapp_business_management`).
+- `POST /send/lead|partner` przyjmuje `message` ALBO `template: { name, language, params }`.
+  Szablon jest pobierany z Meta ponownie przy każdej wysyłce; do historii zapisujemy
+  wyrenderowaną treść (nagłówek + body + stopka).
+- Wspierane są tylko zmienne w BODY (pozycyjne `{{1}}` i nazwane `{{imie}}`). Szablony z
+  nagłówkiem media/ze zmienną albo z przyciskiem ze zmienną mają `supported: false`.
+- Szablony tworzy się w WhatsApp Manager (Meta), nie w CRM.
+- Webhook zapisuje też odpowiedzi przyciskami (`button`, `interactive`), bo tak klient
+  zwykle odpowiada na szablon i to też otwiera okno 24 h.
+- Testy: `src/__tests__/whatsappTemplates.test.js`.
+
 ### Dopasowanie do leada/partnera (`resolveIncomingSender`)
 
 Kolejność prób, pierwsza trafiona wygrywa:
