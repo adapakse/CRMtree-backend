@@ -149,3 +149,35 @@ describe('sendTemplateMessage', () => {
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/messages'))).toBe(false);
   });
 });
+
+describe('expired or revoked access token (Meta error 190)', () => {
+  const EXPIRED = { ok: false, status: 400, json: async () => ({ error: { code: 190, message: 'The token has expired on Saturday, 19-Sep-26.' } }) };
+
+  test('sending is reported as WHATSAPP_TOKEN_INVALID', async () => {
+    database({ windowOpen: true });
+    jest.spyOn(global, 'fetch').mockResolvedValue(EXPIRED);
+    await expect(whatsappService.sendTextMessage({ tenantId: 't1', to: '+48600100200', body: 'Hej' }))
+      .rejects.toMatchObject({ code: 'WHATSAPP_TOKEN_INVALID', status: 502 });
+  });
+
+  test('listing templates is reported as WHATSAPP_TOKEN_INVALID', async () => {
+    database({ windowOpen: false });
+    jest.spyOn(global, 'fetch').mockResolvedValue(EXPIRED);
+    await expect(whatsappService.listTemplates('t1')).rejects.toMatchObject({ code: 'WHATSAPP_TOKEN_INVALID' });
+  });
+
+  test('checkAccessToken tells the super admin why the token does not work', async () => {
+    database({ windowOpen: false });
+    jest.spyOn(global, 'fetch').mockResolvedValue(EXPIRED);
+    await expect(whatsappService.checkAccessToken('t1'))
+      .resolves.toEqual({ valid: false, error: 'The token has expired on Saturday, 19-Sep-26.' });
+  });
+
+  test('checkAccessToken accepts a working token and gives no verdict when Meta is unreachable', async () => {
+    database({ windowOpen: false });
+    jest.spyOn(global, 'fetch').mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ id: 'pn-1' }) });
+    await expect(whatsappService.checkAccessToken('t1')).resolves.toEqual({ valid: true, error: null });
+    jest.spyOn(global, 'fetch').mockRejectedValueOnce(new Error('ECONNRESET'));
+    await expect(whatsappService.checkAccessToken('t1')).resolves.toEqual({ valid: null, error: null });
+  });
+});

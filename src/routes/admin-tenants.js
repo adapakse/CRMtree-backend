@@ -1029,7 +1029,9 @@ router.get('/:id/whatsapp-config',
       }
 
       const cfg = await whatsappService.getTenantConfig(req.params.id);
-      res.json(cfg ? { ...cfg, configured: true } : { configured: false });
+      if (!cfg) return res.json({ configured: false });
+      const tokenCheck = await whatsappService.checkAccessToken(req.params.id);
+      res.json({ ...cfg, configured: true, token_check: tokenCheck });
     } catch (err) { next(err); }
   }
 );
