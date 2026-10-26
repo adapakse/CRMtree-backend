@@ -215,6 +215,7 @@ const KNOWN_WHATSAPP_ERROR_CODES = [
   'WHATSAPP_INVALID_PHONE',
   'WHATSAPP_WINDOW_CLOSED',
   'WHATSAPP_TEMPLATE_INVALID',
+  'WHATSAPP_TOKEN_INVALID',
 ];
 
 // A send is either free text (`message`) or an approved template

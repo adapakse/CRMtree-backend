@@ -237,7 +237,7 @@ admina → Tenants → zakładka „Moduły".
 |---|---|---|
 | WABA ID | Meta App Dashboard → WhatsApp → API Setup | id WhatsApp Business Account |
 | Phone Number ID | jw. | **nie mylić z samym numerem telefonu** — to id zasobu w Graph API |
-| Access Token | System User permanent token (Meta Business Suite) | wymagany, szyfrowany |
+| Access Token | System User permanent token (Meta Business Suite) | wymagany, szyfrowany. **Tylko stały token** (ważność „Nigdy”) — tymczasowy z „API Setup” wygasa i po cichu zatrzymuje wysyłkę (tak padł INT 19.09.2026). Martwy token (błąd Meta 190) daje `WHATSAPP_TOKEN_INVALID`, a zakładka WhatsApp w Tenants sprawdza go w Meta przy otwarciu (`token_check`) |
 | App Secret | Meta App Dashboard → Settings → Basic | opcjonalny przy pierwszym zapisie, ale wymagany do weryfikacji podpisu webhooka (`X-Hub-Signature-256`) |
 | Webhook Verify Token | **generowany automatycznie przez CRM** przy pierwszym zapisie | super admin tylko go odczytuje (przycisk „Pokaż”/„Kopiuj”) i wkleja do konfiguracji webhooka w Meta App — nigdy nie przychodzi jako input |
 

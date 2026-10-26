@@ -65,6 +65,21 @@ class WhatsappTemplateError extends Error {
   }
 }
 
+// Meta answers OAuthException code 190 once the stored access token has
+// expired or been revoked — typically a short-lived token copied from "API
+// Setup" instead of a permanent System User token. Every send fails until a
+// super admin saves a new one, so it gets its own code the UI can explain.
+class WhatsappTokenInvalidError extends Error {
+  constructor() {
+    super('The WhatsApp access token has expired or is invalid. A super admin must save a new permanent (System User) token in Tenant management → WhatsApp.');
+    this.name   = 'WhatsappTokenInvalidError';
+    this.status = 502;
+    this.code   = 'WHATSAPP_TOKEN_INVALID';
+  }
+}
+
+const META_INVALID_TOKEN_CODE = 190;
+
 class WhatsappMetaVerificationError extends Error {
   constructor(metaMessage) {
     super(`Nie udało się zweryfikować numeru w Meta: ${metaMessage}`);
@@ -134,6 +149,29 @@ async function getTenantConfig(tenantId) {
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+// Asks Meta whether the stored access token still works, for the super admin's
+// WhatsApp tab — a dead token otherwise only shows up as failed sends, while the
+// config itself still looks "configured". Not part of getTenantStatus, which
+// every lead/partner card calls: one Graph round-trip per card is too slow.
+// `valid: null` = Meta couldn't be asked (network), not a verdict on the token.
+async function checkAccessToken(tenantId) {
+  const { rows } = await pool.query(
+    'SELECT phone_number_id, access_token FROM tenant_whatsapp_config WHERE tenant_id = $1',
+    [tenantId],
+  );
+  if (!rows.length) return null;
+  try {
+    const res = await fetch(`${GRAPH_BASE}/${rows[0].phone_number_id}?fields=id`, {
+      headers: { Authorization: `Bearer ${decrypt(rows[0].access_token)}` },
+    });
+    if (res.ok) return { valid: true, error: null };
+    const data = await res.json().catch(() => ({}));
+    return { valid: false, error: data?.error?.message || `HTTP ${res.status}` };
+  } catch {
+    return { valid: null, error: null };
+  }
 }
 
 // Narrow status shown in the lead/partner WhatsApp tab — just enough to
@@ -266,6 +304,7 @@ async function postMessageToMeta(cfg, payload) {
     // status in the webhook, which is why isCustomerWindowOpen checks first —
     // this branch only covers the case where Meta rejects it synchronously.
     if (data?.error?.code === 131047) throw new WhatsappWindowClosedError();
+    if (data?.error?.code === META_INVALID_TOKEN_CODE) throw new WhatsappTokenInvalidError();
     const metaMessage = data?.error?.error_data?.details || data?.error?.message || `HTTP ${res.status}`;
     throw new WhatsappSendError(`Błąd wysyłki WhatsApp (Meta): ${metaMessage}`);
   }
@@ -390,6 +429,7 @@ async function fetchApprovedTemplates(cfg) {
     const res  = await fetch(url, { headers: { Authorization: `Bearer ${cfg.accessToken}` } });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
+      if (data?.error?.code === META_INVALID_TOKEN_CODE) throw new WhatsappTokenInvalidError();
       const metaMessage = data?.error?.message || `HTTP ${res.status}`;
       throw new WhatsappSendError(`Nie udało się pobrać szablonów z Meta: ${metaMessage}`);
     }
@@ -639,6 +679,7 @@ async function updateMessageStatus({ tenantId, metaMessageId, status }) {
 module.exports = {
   getTenantConfig,
   getTenantStatus,
+  checkAccessToken,
   upsertTenantConfig,
   deleteTenantConfig,
   sendTextMessage,
