@@ -199,6 +199,7 @@ router.post('/',
       if (substitute.email) {
         try {
           await email.sendSubstitutionAssigned({
+            tenantId:       req.tenantId,
             to:             substitute.email,
             locale:         resolveLocale({
               userLocale:          substitute.user_locale,

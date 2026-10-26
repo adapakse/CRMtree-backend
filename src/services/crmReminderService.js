@@ -51,6 +51,7 @@ async function sendDueReminders() {
     if (!claimed.length) continue;
     try {
       await email.sendActivityReminder({
+        tenantId:      act.tenant_id,
         to:            act.recipient_email,
         locale:        resolveLocale({ userLocale: act.recipient_locale, tenantDefaultLocale: act.tenant_default_locale }),
         recipientName: act.recipient_name,
@@ -106,6 +107,7 @@ async function sendDueReminders() {
     if (!claimed.length) continue;
     try {
       await email.sendActivityReminder({
+        tenantId:      act.tenant_id,
         to:            act.recipient_email,
         locale:        resolveLocale({ userLocale: act.recipient_locale, tenantDefaultLocale: act.tenant_default_locale }),
         recipientName: act.recipient_name,
@@ -137,7 +139,7 @@ async function sendDueReminders() {
   const { rows: projectTasks } = await db.query(`
     SELECT
       t.id, t.task_number, t.name, t.end_date, t.reminder_type,
-      p.id AS project_id, p.key AS project_key, p.name AS project_name,
+      p.id AS project_id, p.key AS project_key, p.name AS project_name, p.tenant_id,
       tn.default_locale AS tenant_default_locale,
       COALESCE((
         SELECT json_agg(json_build_object('id', u.id, 'email', u.email, 'name', u.display_name, 'locale', u.locale))
@@ -165,6 +167,7 @@ async function sendDueReminders() {
     try {
       for (const recipient of task.recipients) {
         await email.sendProjectTaskReminder({
+          tenantId:      task.tenant_id,
           to:            recipient.email,
           locale:        resolveLocale({ userLocale: recipient.locale, tenantDefaultLocale: task.tenant_default_locale }),
           recipientName: recipient.name,

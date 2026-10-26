@@ -43,7 +43,7 @@ function recipientLocale(recipient) {
 async function getUserEmail(db, userId) {
   if (!userId) return null;
   const { rows } = await db.query(
-    `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+    `SELECT u.email, u.display_name, u.tenant_id, u.locale AS user_locale, t.default_locale AS tenant_default_locale
      FROM users u
      LEFT JOIN tenants t ON t.id = u.tenant_id
      WHERE u.id = $1`,
@@ -54,7 +54,7 @@ async function getUserEmail(db, userId) {
 
 async function getDocumentOwner(db, documentId) {
   const { rows } = await db.query(
-    `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale,
+    `SELECT u.email, u.display_name, u.tenant_id, u.locale AS user_locale, t.default_locale AS tenant_default_locale,
             d.name AS doc_name, d.doc_number
      FROM documents d
      JOIN users u ON u.id = d.owner_id
@@ -86,6 +86,7 @@ async function onTaskAssigned({ db, task, assignerUser }) {
     if (!doc) return;
 
     await email.sendTaskAssigned({
+      tenantId: assignee.tenant_id,
       to: assignee.email,
       locale: recipientLocale(assignee),
       assigneeName: assignee.display_name,
@@ -115,12 +116,12 @@ async function onStatusChanged({ db, document, oldStatus, changerUser }) {
 
     // Zbiór adresatów: właściciel + osoby z aktywnymi taskami
     const { rows: recipients } = await db.query(
-      `SELECT DISTINCT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+      `SELECT DISTINCT u.email, u.display_name, u.tenant_id, u.locale AS user_locale, t.default_locale AS tenant_default_locale
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
        WHERE u.id = $1
        UNION
-       SELECT DISTINCT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+       SELECT DISTINCT u.email, u.display_name, u.tenant_id, u.locale AS user_locale, t.default_locale AS tenant_default_locale
        FROM workflow_tasks wt
        JOIN users u ON u.id = wt.assigned_to
        LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -136,6 +137,7 @@ async function onStatusChanged({ db, document, oldStatus, changerUser }) {
       if (recipient.email === changerUser.email) continue;
 
       await email.sendDocumentStatusChanged({
+        tenantId: recipient.tenant_id,
         to: recipient.email,
         locale: recipientLocale(recipient),
         recipientName: recipient.display_name,
@@ -162,6 +164,7 @@ async function onTaskCompleted({ db, task, completedByUser, comment }) {
     if (owner.email === completedByUser.email) return;
 
     await email.sendTaskCompleted({
+      tenantId: owner.tenant_id,
       to: owner.email,
       locale: recipientLocale(owner),
       ownerName: owner.display_name,
@@ -184,6 +187,7 @@ async function onTaskRejected({ db, task, rejectedByUser, comment }) {
     if (!owner?.email) return;
 
     await email.sendTaskRejected({
+      tenantId: owner.tenant_id,
       to: owner.email,
       locale: recipientLocale(owner),
       ownerName: owner.display_name,
@@ -207,6 +211,7 @@ async function onUserInvited({ db, newUser, invitedByUser }) {
       [newUser.tenant_id],
     );
     await email.sendUserInvitation({
+      tenantId: newUser.tenant_id,
       to: newUser.email,
       locale: resolveLocale({
         userLocale: newUser.locale,
@@ -228,6 +233,7 @@ async function onDocumentSigned({ db, document, signedByName }) {
     if (!owner?.email) return;
 
     await email.sendDocumentSigned({
+      tenantId: owner.tenant_id,
       to: owner.email,
       locale: recipientLocale(owner),
       recipientName: owner.display_name,

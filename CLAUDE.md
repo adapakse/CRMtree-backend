@@ -121,17 +121,26 @@ Outlook, Zoho per user) — to osobny mechanizm.
   agenta — sekret w Key Vault), `EMAIL_FROM` (`noreply@crmtree.pl`), `EMAIL_FROM_NAME`
   (`CRMtree`). Bez hosta albo tokenu każdy mail kończy się błędem w logu.
 - **Tryb deweloperski:** przy `NODE_ENV=development` (lokalnie i na **INT**) maile są tylko
-  logowane (`[DEV] Email NIE wysłany`), chyba że `EMAIL_SEND_IN_DEV=true`. Na INT jest to
-  włączone celowo, żeby testować maile przed produkcją — uważaj, bo idą do prawdziwych
-  adresów użytkowników bazy INT. Stara zmienna `GOOGLE_SEND_IN_DEV` dotyczy już tylko
-  zaproszeń kalendarza (`calendarService.js`).
+  logowane (`[DEV] Email NIE wysłany`), chyba że `EMAIL_SEND_IN_DEV=true`. **Na INT jest
+  wyłączone** (od 2026-10-23): baza INT ma skopiowane prawdziwe konta i 23.10 raporty poszły
+  do osób spoza zespołu. Włączaj tylko na czas testu i wyłączaj od razu po nim. Stara zmienna
+  `GOOGLE_SEND_IN_DEV` dotyczy już tylko zaproszeń kalendarza (`calendarService.js`).
+- **Linki w mailach prowadzą na adres firmy odbiorcy** (`https://{slug}.crmtree.pl/...`, na
+  INT `https://{slug}.int.crmtree.pl/...`), nie na wspólne `app.crmtree.pl`. Ten sam e-mail
+  może mieć konta w kilku firmach, a logowanie na wspólnym hoście wybiera jedno z nich —
+  link do leada innej firmy kończył się „nie znaleziono”. Każda funkcja `send*` w
+  `email.js` przyjmuje `tenantId` **odbiorcy** i buduje linki od `appUrlFor(tenantId)`;
+  adres liczy `tenantAppUrl()` z `config/tenantHost.js` (`app.` w `FRONTEND_URL` → slug).
+  Firma ze slugiem zarezerwowanym (np. `crmtree-gold`), brak `tenantId` i lokalny
+  `localhost` zostają przy adresie wspólnym. **Nowy mail z linkiem musi dostać `tenantId`.**
 - **Domena:** `crmtree.pl` jest zweryfikowana w ZeptoMail rekordami DKIM (TXT) i CNAME
   (adres odbić) w DNS; SPF nie jest potrzebny. Bez weryfikacji ZeptoMail odrzuca nadawcę.
 - **Diagnoza:** w logach Container Appa szukaj `Email wysłany` / `Błąd wysyłki emaila` /
   `[Digest]`; w panelu ZeptoMail są logi doręczeń i odbić.
 - **Znana zaległość:** szablony w `emailService.js` (obieg dokumentu, podpis) mają jeszcze
   branding „worktrips.doc” i angielskie teksty spoza i18n — do przerobienia osobno.
-- Testy: `src/__tests__/email-transport.test.js` (bez bazy; nodemailer podmieniony). Testy,
+- Testy: `src/__tests__/email-transport.test.js` (bez bazy; nodemailer podmieniony),
+  `email-links.test.js` (adres firmy w linkach, bez bazy), `tenantHost.test.js`. Testy,
   które sprawdzają treść maili, podmieniają `emailUtil.sendMail` przez `jest.spyOn`.
 
 ### Dostęp do bazy Azure Postgres z lokalnego komputera
