@@ -68,7 +68,29 @@ function resolveRequestHost(req) {
   return req.headers['x-crm-tenant-host'] || req.hostname || req.headers.host || '';
 }
 
+/**
+ * The company's own address for a link: the shared `app.` host of `baseUrl`
+ * with the company slug in its place (https://app.crmtree.pl → https://acme.crmtree.pl,
+ * https://app.int.crmtree.pl → https://acme.int.crmtree.pl). `baseUrl` unchanged when
+ * the slug can't be a host of its own (reserved, missing) or the base is not an
+ * `app.` host on a tenant base domain (local development).
+ */
+function tenantAppUrl(slug, baseUrl) {
+  if (!slug || !isSlugAllowed(slug)) return baseUrl;
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return baseUrl;
+  }
+  if (!url.hostname.startsWith('app.')) return baseUrl;
+  const host = `${slug}.${url.hostname.slice('app.'.length)}`;
+  if (matchTenantSlug(host) !== slug.toLowerCase()) return baseUrl;
+  url.hostname = host;
+  return url.origin;
+}
+
 module.exports = {
   BASE_DOMAINS, RESERVED_SLUGS, HOST_REGEX,
-  matchTenantSlug, isSlugAllowed, resolveRequestHost,
+  matchTenantSlug, isSlugAllowed, resolveRequestHost, tenantAppUrl,
 };

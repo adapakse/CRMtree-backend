@@ -497,12 +497,13 @@ async function notifyNewAssignees({ project, task, assigner, assigneeIds }) {
   });
   try {
     const { rows: recipients } = await db.query(
-      `SELECT u.email, u.display_name, u.locale AS user_locale, t.default_locale AS tenant_default_locale
+      `SELECT u.email, u.display_name, u.tenant_id, u.locale AS user_locale, t.default_locale AS tenant_default_locale
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
        WHERE u.id = ANY($1::uuid[]) AND u.is_active`, [recipientIds],
     );
     await Promise.all(recipients.map((recipient) => emailUtil.sendProjectTaskAssigned({
+      tenantId: recipient.tenant_id,
       to: recipient.email,
       locale: resolveLocale({ userLocale: recipient.user_locale, tenantDefaultLocale: recipient.tenant_default_locale }),
       assigneeName: recipient.display_name,

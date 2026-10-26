@@ -279,6 +279,7 @@ async function sendDailyDigests() {
           if (digestSize(digest) === 0) continue;
 
           await email.sendDailyDigest({
+            tenantId: tenant.id,
             to: user.email,
             locale: resolveLocale({
               userLocale: user.locale,

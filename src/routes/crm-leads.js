@@ -1683,6 +1683,7 @@ router.post('/:id/activities',
           );
           if (assigneeRows.length && assigneeRows[0].email) {
             await email.sendCrmActivityAssigned({
+              tenantId:      req.tenantId,
               to:            assigneeRows[0].email,
               locale:        resolveLocale({
                 userLocale:          assigneeRows[0].user_locale,

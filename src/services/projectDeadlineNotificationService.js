@@ -34,7 +34,7 @@ const localeOf = (recipient) => resolveLocale({
 
 async function listNotifiedProjectManagers(projectId) {
   const { rows } = await db.query(
-    `SELECT u.id, u.email, u.display_name, u.locale AS user_locale, tn.default_locale AS tenant_default_locale
+    `SELECT u.id, u.email, u.display_name, u.tenant_id, u.locale AS user_locale, tn.default_locale AS tenant_default_locale
      FROM project_members m
      JOIN users u ON u.id = m.user_id AND u.is_active AND u.project_deadline_notifications_enabled
      JOIN tenants tn ON tn.id = m.tenant_id
@@ -51,6 +51,7 @@ async function notifyEndDateChanged({ project, task, previousEndDate, changedBy,
     const managers = await listNotifiedProjectManagers(project.id);
     const recipients = managers.filter((manager) => manager.id !== changedBy.id);
     await Promise.all(recipients.map((recipient) => emailUtil.sendProjectTaskEndDateChanged({
+      tenantId: recipient.tenant_id,
       to: recipient.email,
       locale: localeOf(recipient),
       recipientName: recipient.display_name,
@@ -80,6 +81,7 @@ async function notifyIfProjectBecameDelayed({ project, wasDelayed }) {
     const { rows: [current] } = await db.query('SELECT end_date FROM projects WHERE id = $1', [project.id]);
     const recipients = await listNotifiedProjectManagers(project.id);
     await Promise.all(recipients.map((recipient) => emailUtil.sendProjectDelayed({
+      tenantId: recipient.tenant_id,
       to: recipient.email,
       locale: localeOf(recipient),
       recipientName: recipient.display_name,
@@ -222,6 +224,7 @@ async function sendDailySummaries({ now = new Date(), tenantId = null } = {}) {
     try {
       const summary = summaries.get(recipient.id);
       await emailUtil.sendProjectDeadlineSummary({
+        tenantId: recipient.tenant_id,
         to: recipient.email,
         locale: localeOf(recipient),
         recipientName: recipient.display_name,
