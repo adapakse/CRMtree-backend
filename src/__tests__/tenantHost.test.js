@@ -1,6 +1,6 @@
 "use strict";
 
-const { matchTenantSlug, isSlugAllowed, RESERVED_SLUGS, resolveRequestHost } = require("../config/tenantHost");
+const { matchTenantSlug, isSlugAllowed, RESERVED_SLUGS, resolveRequestHost, tenantAppUrl } = require("../config/tenantHost");
 
 describe("tenantHost.matchTenantSlug", () => {
   test("extracts slug from a valid tenant subdomain", () => {
@@ -69,5 +69,22 @@ describe("tenantHost.resolveRequestHost", () => {
   test("returns an empty string when nothing is available", () => {
     const req = { headers: {}, hostname: undefined };
     expect(resolveRequestHost(req)).toBe("");
+  });
+});
+
+describe("tenantHost.tenantAppUrl", () => {
+  test("puts the company slug in place of the shared app host", () => {
+    expect(tenantAppUrl("acme", "https://app.crmtree.pl")).toBe("https://acme.crmtree.pl");
+    expect(tenantAppUrl("Acme", "https://app.crmtree.pl/")).toBe("https://acme.crmtree.pl");
+  });
+
+  test("keeps the shared address when the slug cannot be a host of its own", () => {
+    expect(tenantAppUrl("crmtree-gold", "https://app.crmtree.pl")).toBe("https://app.crmtree.pl");
+    expect(tenantAppUrl(null, "https://app.crmtree.pl")).toBe("https://app.crmtree.pl");
+  });
+
+  test("keeps the address of a non-app host (local development)", () => {
+    expect(tenantAppUrl("acme", "http://localhost:4200")).toBe("http://localhost:4200");
+    expect(tenantAppUrl("acme", "not a url")).toBe("not a url");
   });
 });

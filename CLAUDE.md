@@ -121,17 +121,26 @@ Outlook, Zoho per user) — to osobny mechanizm.
   agenta — sekret w Key Vault), `EMAIL_FROM` (`noreply@crmtree.pl`), `EMAIL_FROM_NAME`
   (`CRMtree`). Bez hosta albo tokenu każdy mail kończy się błędem w logu.
 - **Tryb deweloperski:** przy `NODE_ENV=development` (lokalnie i na **INT**) maile są tylko
-  logowane (`[DEV] Email NIE wysłany`), chyba że `EMAIL_SEND_IN_DEV=true`. Na INT jest to
-  włączone celowo, żeby testować maile przed produkcją — uważaj, bo idą do prawdziwych
-  adresów użytkowników bazy INT. Stara zmienna `GOOGLE_SEND_IN_DEV` dotyczy już tylko
-  zaproszeń kalendarza (`calendarService.js`).
+  logowane (`[DEV] Email NIE wysłany`), chyba że `EMAIL_SEND_IN_DEV=true`. **Na INT jest
+  wyłączone** (od 2026-10-23): baza INT ma skopiowane prawdziwe konta i 23.10 raporty poszły
+  do osób spoza zespołu. Włączaj tylko na czas testu i wyłączaj od razu po nim. Stara zmienna
+  `GOOGLE_SEND_IN_DEV` dotyczy już tylko zaproszeń kalendarza (`calendarService.js`).
+- **Linki w mailach prowadzą na adres firmy odbiorcy** (`https://{slug}.crmtree.pl/...`, na
+  INT `https://{slug}.int.crmtree.pl/...`), nie na wspólne `app.crmtree.pl`. Ten sam e-mail
+  może mieć konta w kilku firmach, a logowanie na wspólnym hoście wybiera jedno z nich —
+  link do leada innej firmy kończył się „nie znaleziono”. Każda funkcja `send*` w
+  `email.js` przyjmuje `tenantId` **odbiorcy** i buduje linki od `appUrlFor(tenantId)`;
+  adres liczy `tenantAppUrl()` z `config/tenantHost.js` (`app.` w `FRONTEND_URL` → slug).
+  Firma ze slugiem zarezerwowanym (np. `crmtree-gold`), brak `tenantId` i lokalny
+  `localhost` zostają przy adresie wspólnym. **Nowy mail z linkiem musi dostać `tenantId`.**
 - **Domena:** `crmtree.pl` jest zweryfikowana w ZeptoMail rekordami DKIM (TXT) i CNAME
   (adres odbić) w DNS; SPF nie jest potrzebny. Bez weryfikacji ZeptoMail odrzuca nadawcę.
 - **Diagnoza:** w logach Container Appa szukaj `Email wysłany` / `Błąd wysyłki emaila` /
   `[Digest]`; w panelu ZeptoMail są logi doręczeń i odbić.
 - **Znana zaległość:** szablony w `emailService.js` (obieg dokumentu, podpis) mają jeszcze
   branding „worktrips.doc” i angielskie teksty spoza i18n — do przerobienia osobno.
-- Testy: `src/__tests__/email-transport.test.js` (bez bazy; nodemailer podmieniony). Testy,
+- Testy: `src/__tests__/email-transport.test.js` (bez bazy; nodemailer podmieniony),
+  `email-links.test.js` (adres firmy w linkach, bez bazy), `tenantHost.test.js`. Testy,
   które sprawdzają treść maili, podmieniają `emailUtil.sendMail` przez `jest.spyOn`.
 
 ### Dostęp do bazy Azure Postgres z lokalnego komputera
@@ -237,7 +246,7 @@ admina → Tenants → zakładka „Moduły".
 |---|---|---|
 | WABA ID | Meta App Dashboard → WhatsApp → API Setup | id WhatsApp Business Account |
 | Phone Number ID | jw. | **nie mylić z samym numerem telefonu** — to id zasobu w Graph API |
-| Access Token | System User permanent token (Meta Business Suite) | wymagany, szyfrowany |
+| Access Token | System User permanent token (Meta Business Suite) | wymagany, szyfrowany. **Tylko stały token** (ważność „Nigdy”) — tymczasowy z „API Setup” wygasa i po cichu zatrzymuje wysyłkę (tak padł INT 19.09.2026). Martwy token (błąd Meta 190) daje `WHATSAPP_TOKEN_INVALID`, a zakładka WhatsApp w Tenants sprawdza go w Meta przy otwarciu (`token_check`) |
 | App Secret | Meta App Dashboard → Settings → Basic | opcjonalny przy pierwszym zapisie, ale wymagany do weryfikacji podpisu webhooka (`X-Hub-Signature-256`) |
 | Webhook Verify Token | **generowany automatycznie przez CRM** przy pierwszym zapisie | super admin tylko go odczytuje (przycisk „Pokaż”/„Kopiuj”) i wkleja do konfiguracji webhooka w Meta App — nigdy nie przychodzi jako input |
 
@@ -261,6 +270,26 @@ Przepływ POST:
    `(tenant_id, meta_message_id)`.
 6. Zawsze `200 {"received":true}`, nawet przy błędzie własnego kodu — inaczej Meta wpada
    w retry storm.
+
+### Okno 24 h i szablony wiadomości
+
+Reguła Meta: zwykły tekst dochodzi tylko w ciągu 24 h od ostatniej wiadomości KLIENTA na
+numer firmy. Poza oknem (w tym pierwszy kontakt) jedyną drogą jest zatwierdzony szablon.
+Meta zwykle przyjmuje wysyłkę tekstu poza oknem i dopiero potem zwraca status `failed`
+(błąd 131047) w webhooku, więc bez sprawdzenia handlowiec widziałby „wysłano”.
+- `sendTextMessage` najpierw sprawdza `isCustomerWindowOpen` (incoming od tego numeru,
+  tenant-wide po cyfrach, `created_at` < 24 h) → `WHATSAPP_WINDOW_CLOSED` (400).
+- `GET /crm/whatsapp/templates` → zatwierdzone szablony z `/{waba_id}/message_templates`
+  (potrzebny `waba_id` + uprawnienie tokena `whatsapp_business_management`).
+- `POST /send/lead|partner` przyjmuje `message` ALBO `template: { name, language, params }`.
+  Szablon jest pobierany z Meta ponownie przy każdej wysyłce; do historii zapisujemy
+  wyrenderowaną treść (nagłówek + body + stopka).
+- Wspierane są tylko zmienne w BODY (pozycyjne `{{1}}` i nazwane `{{imie}}`). Szablony z
+  nagłówkiem media/ze zmienną albo z przyciskiem ze zmienną mają `supported: false`.
+- Szablony tworzy się w WhatsApp Manager (Meta), nie w CRM.
+- Webhook zapisuje też odpowiedzi przyciskami (`button`, `interactive`), bo tak klient
+  zwykle odpowiada na szablon i to też otwiera okno 24 h.
+- Testy: `src/__tests__/whatsappTemplates.test.js`.
 
 ### Dopasowanie do leada/partnera (`resolveIncomingSender`)
 

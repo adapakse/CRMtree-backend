@@ -1,8 +1,9 @@
 'use strict';
 // src/routes/crm-whatsapp.js
 //
-// CRM WhatsApp API — outbound send, inbound webhook (messages/statuses), and
-// conversation history. No message templates yet.
+// CRM WhatsApp API — outbound send (free text inside the 24h customer-service
+// window, approved message templates anytime), inbound webhook
+// (messages/statuses), and conversation history.
 //
 // One shared company WhatsApp Business number per tenant, configured by a
 // super admin in Tenant management (see routes/admin-tenants.js,
@@ -50,6 +51,19 @@ router.get('/webhook', async (req, res) => {
 // is the exact Buffer express.json()'s verify hook captured in app.js, needed
 // for HMAC signature verification since a re-serialized JSON body could differ
 // byte-for-byte from what Meta actually signed.
+// Text a customer can send back that the CRM can show: plain text, plus taps on
+// a template's quick-reply button ("button") or an interactive reply — those
+// are how customers typically answer a template, and they open the 24h window
+// just like a typed message. Anything else (media, location…) isn't stored yet.
+function incomingMessageText(message) {
+  if (message.type === 'text') return message.text?.body ?? null;
+  if (message.type === 'button') return message.button?.text ?? null;
+  if (message.type === 'interactive') {
+    return message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title ?? null;
+  }
+  return null;
+}
+
 router.post('/webhook', async (req, res) => {
   // Diagnostic logging only — never the raw payload, tokens, or app secret.
   const hasRawBody        = Buffer.isBuffer(req.rawBody);
@@ -122,7 +136,8 @@ router.post('/webhook', async (req, res) => {
 
     for (const value of values) {
       for (const message of value.messages || []) {
-        if (message.type !== 'text' || !message.id) continue;
+        const incomingBody = incomingMessageText(message);
+        if (incomingBody === null || !message.id) continue;
 
         const fromDigits = whatsappService.normalizePhoneDigits(message.from);
         const {
@@ -138,7 +153,7 @@ router.post('/webhook', async (req, res) => {
           leadId, partnerId,
           fromPhone:     fromDigits ? `+${fromDigits}` : String(message.from || ''),
           toPhone:       config.displayPhoneNumber,
-          body:          message.text?.body ?? null,
+          body:          incomingBody,
           metaMessageId: message.id,
           rawPayload:    message,
         });
@@ -198,7 +213,41 @@ const KNOWN_WHATSAPP_ERROR_CODES = [
   'WHATSAPP_NOT_CONFIGURED',
   'WHATSAPP_SEND_FAILED',
   'WHATSAPP_INVALID_PHONE',
+  'WHATSAPP_WINDOW_CLOSED',
+  'WHATSAPP_TEMPLATE_INVALID',
+  'WHATSAPP_TOKEN_INVALID',
 ];
+
+// A send is either free text (`message`) or an approved template
+// (`template: { name, language, params }`) — exactly one of the two.
+const sendBodyValidators = [
+  body('message').optional({ nullable: true }).isString().trim(),
+  body('to_phone').optional({ nullable: true }).isString().trim(),
+  body('template').optional({ nullable: true }).isObject(),
+  body('template.name').if(body('template').exists({ values: 'null' })).isString().trim().notEmpty(),
+  body('template.language').if(body('template').exists({ values: 'null' })).isString().trim().notEmpty(),
+  body('template.params').optional({ nullable: true }).isObject(),
+  body().custom(b => {
+    if (Boolean(b.template) === Boolean(b.message && String(b.message).trim())) {
+      throw new Error('Podaj treść wiadomości albo szablon.');
+    }
+    return true;
+  }),
+];
+
+async function sendFromRequest(req, toPhone) {
+  if (req.body.template) {
+    return whatsappService.sendTemplateMessage({
+      tenantId:     req.tenantId,
+      to:           toPhone,
+      templateName: req.body.template.name,
+      language:     req.body.template.language,
+      params:       req.body.template.params || {},
+    });
+  }
+  const result = await whatsappService.sendTextMessage({ tenantId: req.tenantId, to: toPhone, body: req.body.message });
+  return { ...result, body: req.body.message };
+}
 
 function sendServiceError(res, err, fallbackMessage) {
   if (KNOWN_WHATSAPP_ERROR_CODES.includes(err.code)) {
@@ -216,12 +265,20 @@ router.get('/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── GET /templates — approved message templates of the tenant's WABA ──────
+router.get('/templates', async (req, res) => {
+  try {
+    res.json(await whatsappService.listTemplates(req.tenantId));
+  } catch (err) {
+    sendServiceError(res, err, 'Błąd pobierania szablonów WhatsApp');
+  }
+});
+
 // ── POST /send/lead/:leadId ────────────────────────────────────────────────
 router.post('/send/lead/:leadId',
   [
     param('leadId').isInt(),
-    body('message').isString().trim().notEmpty(),
-    body('to_phone').optional({ nullable: true }).isString().trim(),
+    ...sendBodyValidators,
   ], validate,
   async (req, res) => {
     try {
@@ -240,16 +297,14 @@ router.post('/send/lead/:leadId',
         return res.status(400).json({ error: 'Brak numeru telefonu do wysyłki WhatsApp.' });
       }
 
-      const { messageId, fromPhone } = await whatsappService.sendTextMessage({
-        tenantId: req.tenantId, to: toPhone, body: req.body.message,
-      });
+      const { messageId, fromPhone, body: sentBody } = await sendFromRequest(req, toPhone);
 
       const { rows: msgRows } = await db.query(
         `INSERT INTO whatsapp_messages
            (tenant_id, lead_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by, is_read)
          VALUES ($1, $2, 'outgoing', $3, $4, $5, $6, 'sent', $7, true)
          RETURNING id`,
-        [req.tenantId, lead.id, fromPhone, toPhone, req.body.message, messageId, req.user.id],
+        [req.tenantId, lead.id, fromPhone, toPhone, sentBody, messageId, req.user.id],
       );
 
       logger.info('WhatsApp message sent (lead)', { tenantId: req.tenantId, leadId: lead.id, by: req.user.email });
@@ -264,8 +319,7 @@ router.post('/send/lead/:leadId',
 router.post('/send/partner/:partnerId',
   [
     param('partnerId').isString().trim().notEmpty(),
-    body('message').isString().trim().notEmpty(),
-    body('to_phone').optional({ nullable: true }).isString().trim(),
+    ...sendBodyValidators,
   ], validate,
   async (req, res) => {
     try {
@@ -279,16 +333,14 @@ router.post('/send/partner/:partnerId',
         return res.status(400).json({ error: 'Brak numeru telefonu do wysyłki WhatsApp.' });
       }
 
-      const { messageId, fromPhone } = await whatsappService.sendTextMessage({
-        tenantId: req.tenantId, to: toPhone, body: req.body.message,
-      });
+      const { messageId, fromPhone, body: sentBody } = await sendFromRequest(req, toPhone);
 
       const { rows: msgRows } = await db.query(
         `INSERT INTO whatsapp_messages
            (tenant_id, partner_id, direction, from_phone, to_phone, body, meta_message_id, status, created_by, is_read)
          VALUES ($1, $2, 'outgoing', $3, $4, $5, $6, 'sent', $7, true)
          RETURNING id`,
-        [req.tenantId, partner.id, fromPhone, toPhone, req.body.message, messageId, req.user.id],
+        [req.tenantId, partner.id, fromPhone, toPhone, sentBody, messageId, req.user.id],
       );
 
       logger.info('WhatsApp message sent (partner)', { tenantId: req.tenantId, partnerId: partner.id, by: req.user.email });

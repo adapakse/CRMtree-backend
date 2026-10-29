@@ -42,6 +42,7 @@ async function notifyNewOwner({ ownerId, assigner, sourceType, sourceId, sourceN
     );
     if (!owner?.email) return;
     await email.sendCrmOwnerAssigned({
+      tenantId,
       to: owner.email,
       locale: resolveLocale({ userLocale: owner.user_locale, tenantDefaultLocale: owner.tenant_default_locale }),
       ownerName: owner.display_name || owner.email,

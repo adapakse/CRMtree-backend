@@ -15,7 +15,9 @@
 
 const nodemailer = require("nodemailer");
 const config = require("../config");
+const db = require("../config/database");
 const logger = require("./logger");
+const { tenantAppUrl } = require("../config/tenantHost");
 const { translate, formatDate, formatDateOnly, formatDateTime, supportedOrDefault } = require("./i18n");
 
 let transporter = null;
@@ -87,6 +89,24 @@ async function sendMail({ to, subject, html, text }) {
 // missing or unsupported locale gives the Polish mail.
 
 const BASE_URL = config.frontendUrl;
+
+/**
+ * Links in a mail point at the recipient's company address
+ * ({slug}.crmtree.pl), not the shared app.crmtree.pl. One e-mail can have
+ * accounts in several companies, and signing in on the shared host picks one
+ * of them, so a link there opened a record of another company as "not found".
+ * Signing in on the company's own host always uses the account in that company.
+ */
+async function appUrlFor(tenantId) {
+  if (!tenantId) return BASE_URL;
+  try {
+    const { rows } = await db.query("SELECT slug FROM tenants WHERE id = $1", [tenantId]);
+    return tenantAppUrl(rows[0]?.slug, BASE_URL);
+  } catch (err) {
+    logger.warn("email.appUrlFor: no company address, using the shared one", { tenantId, error: err.message });
+    return BASE_URL;
+  }
+}
 
 function emailTexts(locale) {
   return (key, params) => translate(locale, `emails.${key}`, params);
@@ -232,11 +252,13 @@ async function sendTaskAssigned({
   docNumber,
   assignerName,
   dueDate,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   const t = emailTexts(locale);
   const taskBadge = DOCUMENT_TASK_BADGES[taskType] || "badge-blue";
   const taskTypeLabel = DOCUMENT_TASK_BADGES[taskType] ? t(`documentTaskTypes.${taskType}`) : taskType;
-  const url = `${BASE_URL}/documents`;
+  const url = `${appUrl}/documents`;
 
   await module.exports.sendMail({
     to,
@@ -288,14 +310,16 @@ async function sendDocumentStatusChanged({
   oldStatus,
   newStatus,
   changedByName,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   const t = emailTexts(locale);
   const statusBadge = (status) => {
     const known = DOCUMENT_STATUSES[status];
     const label = known ? t(`documentStatuses.${known.key}`) : status;
     return `<span class="badge ${known ? known.badge : "badge-blue"}">${label}</span>`;
   };
-  const url = `${BASE_URL}/documents`;
+  const url = `${appUrl}/documents`;
 
   await module.exports.sendMail({
     to,
@@ -343,10 +367,12 @@ async function sendTaskCompleted({
   docNumber,
   completedByName,
   comment,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   const t = emailTexts(locale);
   const introKey = DOCUMENT_TASK_BADGES[taskType] ? taskType : "other";
-  const url = `${BASE_URL}/documents`;
+  const url = `${appUrl}/documents`;
 
   await module.exports.sendMail({
     to,
@@ -393,9 +419,11 @@ async function sendTaskRejected({
   docNumber,
   rejectedByName,
   comment,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   const t = emailTexts(locale);
-  const url = `${BASE_URL}/documents`;
+  const url = `${appUrl}/documents`;
 
   await module.exports.sendMail({
     to,
@@ -441,9 +469,11 @@ async function sendDocumentSigned({
   documentName,
   docNumber,
   signedByName,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   const t = emailTexts(locale);
-  const url = `${BASE_URL}/documents`;
+  const url = `${appUrl}/documents`;
 
   await module.exports.sendMail({
     to,
@@ -484,7 +514,9 @@ async function sendUserInvitation({
   displayName,
   invitedByName,
   loginUrl,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   const t = emailTexts(locale);
 
   await module.exports.sendMail({
@@ -495,7 +527,7 @@ async function sendUserInvitation({
       <p>${t("common.greeting", { name: displayName })}</p>
       <p>${t("userInvitation.intro", { invitedByName })}</p>
       <p>${t("userInvitation.loginHint", { email: to })}</p>
-      <a href="${loginUrl || BASE_URL}" class="btn">${t("userInvitation.signIn")}</a>
+      <a href="${loginUrl || appUrl}" class="btn">${t("userInvitation.signIn")}</a>
       <p style="color:#71717A;font-size:12px;margin-top:16px">
         ${t("userInvitation.ignoreHint")}
       </p>
@@ -517,11 +549,13 @@ async function sendCrmActivityAssigned({
   sourceName,
   sourceType,  // 'lead' | 'partner'
   sourceId,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   const t = emailTexts(locale);
   const isPartner = sourceType === 'partner';
   const typeLabel = activityTypeLabel(t, ACTIVITY_TYPE_KEYS, activityType);
-  const url = `${BASE_URL}/crm/${isPartner ? 'partners' : 'leads'}/${sourceId}`;
+  const url = `${appUrl}/crm/${isPartner ? 'partners' : 'leads'}/${sourceId}`;
 
   await module.exports.sendMail({
     to,
@@ -571,11 +605,13 @@ async function sendCrmOwnerAssigned({
   sourceName,
   sourceType,  // 'lead' | 'partner'
   sourceId,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   const t = emailTexts(locale);
   const isPartner = sourceType === 'partner';
   const variant = isPartner ? 'Partner' : 'Lead';
-  const url = `${BASE_URL}/crm/${isPartner ? 'partners' : 'leads'}/${sourceId}`;
+  const url = `${appUrl}/crm/${isPartner ? 'partners' : 'leads'}/${sourceId}`;
 
   await module.exports.sendMail({
     to,
@@ -614,12 +650,14 @@ async function sendActivityReminder({
   sourceType,     // 'lead' | 'partner'
   sourceId,
   sourceName,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   if (!to) return;
 
   const t = emailTexts(locale);
   const isPartner = sourceType === 'partner';
-  const url = `${BASE_URL}/crm/${isPartner ? 'partners' : 'leads'}/${sourceId}`;
+  const url = `${appUrl}/crm/${isPartner ? 'partners' : 'leads'}/${sourceId}`;
   const typeLabel = activityTypeLabel(t, REMINDER_ACTIVITY_TYPE_KEYS, activityType);
   const reminder = reminderLabel(t, reminderType, 'activityAtDue');
 
@@ -674,13 +712,15 @@ async function sendSubstitutionAssigned({
   endsOn,
   reason,   // 'vacation' | 'sick_leave' | 'other'
   note,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   if (!to) return;
 
   const t = emailTexts(locale);
   const reasonLabel = t(`absenceReasons.${ABSENCE_REASON_KEYS[reason] || 'other'}`);
   const formatDay = (day) => (day ? formatDate(locale, day) : '—');
-  const url = `${BASE_URL}/crm/leads`;
+  const url = `${appUrl}/crm/leads`;
 
   await module.exports.sendMail({
     to,
@@ -730,9 +770,11 @@ async function sendProjectTaskAssigned({
   taskLabel,   // e.g. "WSC-12"
   taskName,
   endDate,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   const t = emailTexts(locale);
-  const url = `${BASE_URL}/projects/${projectId}?task=${taskId}`;
+  const url = `${appUrl}/projects/${projectId}?task=${taskId}`;
 
   await module.exports.sendMail({
     to,
@@ -771,11 +813,13 @@ async function sendProjectTaskReminder({
   taskName,
   endDate,
   reminderType,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   if (!to) return;
 
   const t = emailTexts(locale);
-  const url = `${BASE_URL}/projects/${projectId}?task=${taskId}`;
+  const url = `${appUrl}/projects/${projectId}?task=${taskId}`;
   const reminder = reminderLabel(t, reminderType, 'projectAtDue');
 
   await module.exports.sendMail({
@@ -810,8 +854,8 @@ async function sendProjectTaskReminder({
 
 // ─── Project deadline mails (sent by projectDeadlineNotificationService) ─────
 
-const projectTaskUrl = (projectId, taskId) => `${BASE_URL}/projects/${projectId}?task=${taskId}`;
-const projectUrl = (projectId) => `${BASE_URL}/projects/${projectId}`;
+const projectTaskUrl = (appUrl, projectId, taskId) => `${appUrl}/projects/${projectId}?task=${taskId}`;
+const projectUrl = (appUrl, projectId) => `${appUrl}/projects/${projectId}`;
 
 /**
  * Somebody other than the receiving PM changed the end date of a task.
@@ -831,7 +875,9 @@ async function sendProjectTaskEndDateChanged({
   originalEndDate,  // "YYYY-MM-DD" or null
   slipDays,         // new end date − original, in days; null when equal or unknown
   reason,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   if (!to) return;
 
   const t = emailTexts(locale);
@@ -869,7 +915,7 @@ async function sendProjectTaskEndDateChanged({
           <span class="info-val">${htmlText(reason)}</span>
         </div>` : ''}
       </div>
-      <a href="${projectTaskUrl(projectId, taskId)}" class="btn">${t('common.openTask')}</a>
+      <a href="${projectTaskUrl(appUrl, projectId, taskId)}" class="btn">${t('common.openTask')}</a>
     `),
   });
 }
@@ -887,7 +933,9 @@ async function sendProjectDelayed({
   tasksAfterEndCount,
   latestTaskEndDate,
   daysAfterEnd,
+  tenantId,
 }) {
+  const appUrl = await appUrlFor(tenantId);
   if (!to) return;
 
   const t = emailTexts(locale);
@@ -917,12 +965,12 @@ async function sendProjectDelayed({
           <span class="info-val">${formatDateOnly(locale, latestTaskEndDate)} (${t('projectDelayed.daysAfterEnd', { count: daysAfterEnd })})</span>
         </div>
       </div>
-      <a href="${projectUrl(projectId)}" class="btn">${t('projectDelayed.openProject')}</a>
+      <a href="${projectUrl(appUrl, projectId)}" class="btn">${t('projectDelayed.openProject')}</a>
     `),
   });
 }
 
-function deadlineSummaryTaskRow(t, locale, task, { showAssignees }) {
+function deadlineSummaryTaskRow(t, locale, task, { showAssignees, appUrl }) {
   const details = [
     t('projectDeadlineSummary.dueOn', { date: formatDateOnly(locale, task.end_date) }),
     t('projectDeadlineSummary.daysOverdue', { count: task.days_overdue }),
@@ -936,7 +984,7 @@ function deadlineSummaryTaskRow(t, locale, task, { showAssignees }) {
   }
   const label = `${task.project.key}-${task.task_number}`;
   return `<div style="padding:6px 0;border-bottom:1px solid #E4E4E7">
-    <a href="${projectTaskUrl(task.project.id, task.id)}" style="color:#18181B;font-weight:600;text-decoration:none">${escapeHtml(label)} ${escapeHtml(task.name)}</a>
+    <a href="${projectTaskUrl(appUrl, task.project.id, task.id)}" style="color:#18181B;font-weight:600;text-decoration:none">${escapeHtml(label)} ${escapeHtml(task.name)}</a>
     ${task.is_new ? `<span class="badge badge-red">${t('projectDeadlineSummary.newBadge')}</span>` : ''}
     <div style="color:#71717A;font-size:12px">${details.join(' · ')}</div>
   </div>`;
@@ -972,25 +1020,26 @@ function deadlineSummaryDelayReasons(t, locale, { project, delay }) {
  * Either part may be empty; tasks arrive with the ones that became overdue
  * today first.
  */
-async function sendProjectDeadlineSummary({ to, locale, recipientName, date, ownTasks, managedProjects }) {
+async function sendProjectDeadlineSummary({ to, locale, recipientName, date, ownTasks, managedProjects, tenantId }) {
+  const appUrl = await appUrlFor(tenantId);
   if (!to) return;
 
   const t = emailTexts(locale);
   const formattedDate = formatDateOnly(locale, date);
   const sectionHeading = (text) => `<h3 style="margin:20px 0 6px;font-size:15px;color:#18181B">${text}</h3>`;
-  const projectHeading = (project) => `<p style="margin:12px 0 2px"><a href="${projectUrl(project.id)}" style="color:#2F8F4D;font-weight:600;text-decoration:none">${escapeHtml(project.name)}</a></p>`;
+  const projectHeading = (project) => `<p style="margin:12px 0 2px"><a href="${projectUrl(appUrl, project.id)}" style="color:#2F8F4D;font-weight:600;text-decoration:none">${escapeHtml(project.name)}</a></p>`;
 
   const projectsWithOverdueTasks = managedProjects.filter((report) => report.overdueTasks.length);
   const delayedProjects = managedProjects.filter((report) => report.delay);
 
   const ownSection = ownTasks.length ? `
       ${sectionHeading(t('projectDeadlineSummary.ownTasksHeading'))}
-      ${ownTasks.map((task) => deadlineSummaryTaskRow(t, locale, task, { showAssignees: false })).join('')}` : '';
+      ${ownTasks.map((task) => deadlineSummaryTaskRow(t, locale, task, { showAssignees: false, appUrl })).join('')}` : '';
   const managedSection = projectsWithOverdueTasks.length ? `
       ${sectionHeading(t('projectDeadlineSummary.managedTasksHeading'))}
       ${projectsWithOverdueTasks.map(({ project, overdueTasks }) => `
         ${projectHeading(project)}
-        ${overdueTasks.map((task) => deadlineSummaryTaskRow(t, locale, { ...task, project }, { showAssignees: true })).join('')}`).join('')}` : '';
+        ${overdueTasks.map((task) => deadlineSummaryTaskRow(t, locale, { ...task, project }, { showAssignees: true, appUrl })).join('')}`).join('')}` : '';
   const delayedSection = delayedProjects.length ? `
       ${sectionHeading(t('projectDeadlineSummary.delayedProjectsHeading'))}
       ${delayedProjects.map((report) => `
@@ -1021,7 +1070,8 @@ async function sendProjectDeadlineSummary({ to, locale, recipientName, date, own
  * rysowane, a całkiem pusty raport w ogóle nie trafia do tej funkcji — pilnuje
  * tego dailyDigestService (zasada z worktrips: pusta lista = brak maila).
  */
-async function sendDailyDigest({ to, locale, recipientName, digest, date }) {
+async function sendDailyDigest({ to, locale, recipientName, digest, date, tenantId }) {
+  const appUrl = await appUrlFor(tenantId);
   if (!to) return;
 
   const t = emailTexts(locale);
@@ -1034,12 +1084,12 @@ async function sendDailyDigest({ to, locale, recipientName, digest, date }) {
   // Adres rekordu. Zadanie projektowe trafia wprost w panel zadania (?task=),
   // bo na ten sam adres prowadzą linki z pozostałych maili o zadaniach.
   const itemUrl = (item) => {
-    if (item.source === 'lead')       return `${BASE_URL}/crm/leads/${item.source_id}`;
-    if (item.source === 'partner')    return `${BASE_URL}/crm/partners/${item.source_id}`;
-    if (item.source === 'onboarding') return `${BASE_URL}/crm/onboarding`;
-    if (item.source === 'workflow')   return `${BASE_URL}/documents`;
-    if (item.source === 'project')    return `${BASE_URL}/projects/${item.source_id}?task=${item.task_id}`;
-    return BASE_URL;
+    if (item.source === 'lead')       return `${appUrl}/crm/leads/${item.source_id}`;
+    if (item.source === 'partner')    return `${appUrl}/crm/partners/${item.source_id}`;
+    if (item.source === 'onboarding') return `${appUrl}/crm/onboarding`;
+    if (item.source === 'workflow')   return `${appUrl}/documents`;
+    if (item.source === 'project')    return `${appUrl}/projects/${item.source_id}?task=${item.task_id}`;
+    return appUrl;
   };
 
   // Typy biorą się z istniejących słowników, a nie z nowych kluczy pod
@@ -1103,10 +1153,10 @@ async function sendDailyDigest({ to, locale, recipientName, digest, date }) {
       ${renderSection('📋', t('digest.sections.noDate'), '#71717A', noDate)}
 
       <div style="margin-top:20px">
-        <a href="${BASE_URL}/crm/dashboard" class="btn">${t('digest.cta')}</a>
+        <a href="${appUrl}/crm/dashboard" class="btn">${t('digest.cta')}</a>
       </div>
       <p style="font-size:11px;color:#A1A1AA;margin-top:14px">
-        ${t('digest.optOut')} <a href="${BASE_URL}/my-settings" style="color:#3BAA5D">${t('digest.optOutLink')}</a>.
+        ${t('digest.optOut')} <a href="${appUrl}/my-settings" style="color:#3BAA5D">${t('digest.optOutLink')}</a>.
       </p>
     `),
   });

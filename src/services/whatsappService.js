@@ -8,9 +8,10 @@
 // simultaneous personal/business use of the same phone number, so letting
 // each CRM user connect their own number wasn't viable in the field.
 //
-// Outbound send + inbound webhook (messages + delivery/read statuses). No
-// message templates yet — sends outside Meta's 24h customer-service window
-// will fail until that's added.
+// Outbound send + inbound webhook (messages + delivery/read statuses).
+// Free-form text is only allowed inside Meta's 24h customer-service window
+// (counted from the customer's last incoming message); outside it the only
+// way to reach a customer is an approved message template (sendTemplateMessage).
 
 const crypto = require('crypto');
 const { pool } = require('../config/database');
@@ -45,6 +46,39 @@ class WhatsappInvalidPhoneError extends Error {
     this.code   = 'WHATSAPP_INVALID_PHONE';
   }
 }
+
+class WhatsappWindowClosedError extends Error {
+  constructor() {
+    super('Klient nie pisał do Was przez ostatnie 24 godziny — WhatsApp pozwala wtedy wysłać tylko zatwierdzony szablon wiadomości.');
+    this.name   = 'WhatsappWindowClosedError';
+    this.status = 400;
+    this.code   = 'WHATSAPP_WINDOW_CLOSED';
+  }
+}
+
+class WhatsappTemplateError extends Error {
+  constructor(message) {
+    super(message);
+    this.name   = 'WhatsappTemplateError';
+    this.status = 400;
+    this.code   = 'WHATSAPP_TEMPLATE_INVALID';
+  }
+}
+
+// Meta answers OAuthException code 190 once the stored access token has
+// expired or been revoked — typically a short-lived token copied from "API
+// Setup" instead of a permanent System User token. Every send fails until a
+// super admin saves a new one, so it gets its own code the UI can explain.
+class WhatsappTokenInvalidError extends Error {
+  constructor() {
+    super('The WhatsApp access token has expired or is invalid. A super admin must save a new permanent (System User) token in Tenant management → WhatsApp.');
+    this.name   = 'WhatsappTokenInvalidError';
+    this.status = 502;
+    this.code   = 'WHATSAPP_TOKEN_INVALID';
+  }
+}
+
+const META_INVALID_TOKEN_CODE = 190;
 
 class WhatsappMetaVerificationError extends Error {
   constructor(metaMessage) {
@@ -115,6 +149,29 @@ async function getTenantConfig(tenantId) {
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+// Asks Meta whether the stored access token still works, for the super admin's
+// WhatsApp tab — a dead token otherwise only shows up as failed sends, while the
+// config itself still looks "configured". Not part of getTenantStatus, which
+// every lead/partner card calls: one Graph round-trip per card is too slow.
+// `valid: null` = Meta couldn't be asked (network), not a verdict on the token.
+async function checkAccessToken(tenantId) {
+  const { rows } = await pool.query(
+    'SELECT phone_number_id, access_token FROM tenant_whatsapp_config WHERE tenant_id = $1',
+    [tenantId],
+  );
+  if (!rows.length) return null;
+  try {
+    const res = await fetch(`${GRAPH_BASE}/${rows[0].phone_number_id}?fields=id`, {
+      headers: { Authorization: `Bearer ${decrypt(rows[0].access_token)}` },
+    });
+    if (res.ok) return { valid: true, error: null };
+    const data = await res.json().catch(() => ({}));
+    return { valid: false, error: data?.error?.message || `HTTP ${res.status}` };
+  } catch {
+    return { valid: null, error: null };
+  }
 }
 
 // Narrow status shown in the lead/partner WhatsApp tab — just enough to
@@ -204,13 +261,14 @@ async function deleteTenantConfig(tenantId) {
 async function getSenderConfig(tenantId) {
   if (!tenantId) return null;
   const { rows } = await pool.query(
-    `SELECT phone_number_id, display_phone_number, access_token, is_enabled
+    `SELECT waba_id, phone_number_id, display_phone_number, access_token, is_enabled
      FROM tenant_whatsapp_config
      WHERE tenant_id = $1`,
     [tenantId],
   );
   if (!rows.length || !rows[0].is_enabled) return null;
   return {
+    wabaId:             rows[0].waba_id,
     phoneNumberId:      rows[0].phone_number_id,
     displayPhoneNumber: rows[0].display_phone_number || rows[0].phone_number_id,
     accessToken:        decrypt(rows[0].access_token),
@@ -229,38 +287,212 @@ function normalizePhone(raw) {
   return trimmed.replace(/\D/g, '');
 }
 
-async function sendTextMessage({ tenantId, to, body }) {
-  const cfg = await getSenderConfig(tenantId);
-  if (!cfg) throw new WhatsappNotConfiguredError();
-
-  const toPhone = normalizePhone(to);
-  if (!toPhone) {
-    const err = new Error('Brak numeru telefonu do wysyłki WhatsApp.');
-    err.status = 400;
-    throw err;
-  }
-
+async function postMessageToMeta(cfg, payload) {
   const res = await fetch(`${GRAPH_BASE}/${cfg.phoneNumberId}/messages`, {
     method:  'POST',
     headers: {
       Authorization:  `Bearer ${cfg.accessToken}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to:   toPhone,
-      type: 'text',
-      text: { body },
-    }),
+    body: JSON.stringify({ messaging_product: 'whatsapp', ...payload }),
   });
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const metaMessage = data?.error?.message || `HTTP ${res.status}`;
+    // 131047 = "Re-engagement message": free-form text outside the 24h window.
+    // Meta usually accepts such a send and reports 131047 later as a "failed"
+    // status in the webhook, which is why isCustomerWindowOpen checks first —
+    // this branch only covers the case where Meta rejects it synchronously.
+    if (data?.error?.code === 131047) throw new WhatsappWindowClosedError();
+    if (data?.error?.code === META_INVALID_TOKEN_CODE) throw new WhatsappTokenInvalidError();
+    const metaMessage = data?.error?.error_data?.details || data?.error?.message || `HTTP ${res.status}`;
     throw new WhatsappSendError(`Błąd wysyłki WhatsApp (Meta): ${metaMessage}`);
   }
+  return data?.messages?.[0]?.id || null;
+}
 
-  return { messageId: data?.messages?.[0]?.id || null, fromPhone: cfg.displayPhoneNumber };
+function requireRecipient(to) {
+  const toPhone = normalizePhone(to);
+  if (!toPhone) {
+    const err = new Error('Brak numeru telefonu do wysyłki WhatsApp.');
+    err.status = 400;
+    throw err;
+  }
+  return toPhone;
+}
+
+// Meta only accepts free-form text within 24h of the customer's last message
+// to this business number — the window belongs to the number, not to a lead,
+// so it's checked tenant-wide by digits (the same customer may be attached to
+// a different lead/partner, or still unassigned).
+async function isCustomerWindowOpen(tenantId, toDigits) {
+  if (!toDigits) return false;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM whatsapp_messages
+     WHERE tenant_id = $1
+       AND direction = 'incoming'
+       AND regexp_replace(from_phone, '\\D', '', 'g') = $2
+       AND created_at > NOW() - INTERVAL '24 hours'
+     LIMIT 1`,
+    [tenantId, toDigits],
+  );
+  return rows.length > 0;
+}
+
+async function sendTextMessage({ tenantId, to, body }) {
+  const cfg = await getSenderConfig(tenantId);
+  if (!cfg) throw new WhatsappNotConfiguredError();
+
+  const toPhone = requireRecipient(to);
+  if (!await isCustomerWindowOpen(tenantId, toPhone)) throw new WhatsappWindowClosedError();
+
+  const messageId = await postMessageToMeta(cfg, { to: toPhone, type: 'text', text: { body } });
+  return { messageId, fromPhone: cfg.displayPhoneNumber };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Message templates — created and approved in Meta's WhatsApp Manager;
+// the CRM only lists approved ones and fills in their variables.
+// ─────────────────────────────────────────────────────────────────
+
+const PLACEHOLDER_RE = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+
+function extractPlaceholders(text) {
+  const keys = [];
+  for (const match of String(text || '').matchAll(PLACEHOLDER_RE)) {
+    if (!keys.includes(match[1])) keys.push(match[1]);
+  }
+  return keys;
+}
+
+function renderTemplateText(text, params) {
+  return String(text || '').replace(PLACEHOLDER_RE, (whole, key) => (key in params ? params[key] : whole));
+}
+
+// Only variables in the BODY are supported — a template whose header needs a
+// media file / variable, or whose button needs a variable (dynamic URL, copy
+// code), can't be sent from the CRM yet, so it's reported as unsupported
+// instead of failing at send time. Static headers/footers/buttons are fine:
+// Meta fills those in itself.
+function toCrmTemplate(raw) {
+  const components = Array.isArray(raw.components) ? raw.components : [];
+  const header  = components.find(c => c.type === 'HEADER');
+  const bodyCmp = components.find(c => c.type === 'BODY');
+  const footer  = components.find(c => c.type === 'FOOTER');
+  const buttons = components.find(c => c.type === 'BUTTONS')?.buttons || [];
+
+  let unsupportedReason = null;
+  if (header && header.format && header.format !== 'TEXT') unsupportedReason = 'HEADER_MEDIA';
+  else if (header && extractPlaceholders(header.text).length) unsupportedReason = 'HEADER_VARIABLE';
+  else if (buttons.some(b => extractPlaceholders(b.url).length || ['COPY_CODE', 'OTP', 'FLOW', 'CATALOG', 'MPM'].includes(b.type))) {
+    unsupportedReason = 'BUTTON_VARIABLE';
+  }
+
+  const bodyText     = bodyCmp?.text || '';
+  const placeholders = extractPlaceholders(bodyText);
+  const isNamed      = raw.parameter_format === 'NAMED' || placeholders.some(p => !/^\d+$/.test(p));
+
+  // Sample values entered when the template was submitted to Meta — shown in
+  // the CRM as input hints, so the user knows what each variable stands for.
+  const examples = {};
+  if (isNamed) {
+    for (const ex of bodyCmp?.example?.body_text_named_params || []) examples[ex.param_name] = ex.example;
+  } else {
+    const positional = bodyCmp?.example?.body_text?.[0] || [];
+    placeholders.forEach(p => { if (positional[Number(p) - 1] != null) examples[p] = positional[Number(p) - 1]; });
+  }
+
+  return {
+    name:               raw.name,
+    language:           raw.language,
+    category:           raw.category,
+    header_text:        header?.format === 'TEXT' ? header.text || null : null,
+    body_text:          bodyText,
+    footer_text:        footer?.text || null,
+    buttons:            buttons.map(b => b.text).filter(Boolean),
+    variables:          placeholders.map(key => ({ key, example: examples[key] ?? null })),
+    parameter_format:   isNamed ? 'NAMED' : 'POSITIONAL',
+    supported:          !unsupportedReason,
+    unsupported_reason: unsupportedReason,
+  };
+}
+
+async function fetchApprovedTemplates(cfg) {
+  if (!cfg.wabaId) {
+    throw new WhatsappTemplateError('Brak WABA ID w konfiguracji WhatsApp tego tenanta — nie da się pobrać szablonów.');
+  }
+  const templates = [];
+  let url = `${GRAPH_BASE}/${cfg.wabaId}/message_templates?status=APPROVED&limit=100`
+    + '&fields=name,language,status,category,components,parameter_format';
+  // Capped so a misbehaving `paging.next` link can never loop forever.
+  for (let page = 0; url && page < 20; page++) {
+    const res  = await fetch(url, { headers: { Authorization: `Bearer ${cfg.accessToken}` } });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (data?.error?.code === META_INVALID_TOKEN_CODE) throw new WhatsappTokenInvalidError();
+      const metaMessage = data?.error?.message || `HTTP ${res.status}`;
+      throw new WhatsappSendError(`Nie udało się pobrać szablonów z Meta: ${metaMessage}`);
+    }
+    for (const raw of data.data || []) {
+      if (raw.status === 'APPROVED') templates.push(toCrmTemplate(raw));
+    }
+    url = data?.paging?.next || null;
+  }
+  return templates.sort((a, b) => a.name.localeCompare(b.name) || a.language.localeCompare(b.language));
+}
+
+async function listTemplates(tenantId) {
+  const cfg = await getSenderConfig(tenantId);
+  if (!cfg) throw new WhatsappNotConfiguredError();
+  return fetchApprovedTemplates(cfg);
+}
+
+// The template is re-fetched from Meta on every send instead of trusting the
+// browser's copy: the body stored in history must be exactly what Meta
+// delivers, and a template can be paused/edited in WhatsApp Manager between
+// opening the form and pressing "send".
+async function sendTemplateMessage({ tenantId, to, templateName, language, params }) {
+  const cfg = await getSenderConfig(tenantId);
+  if (!cfg) throw new WhatsappNotConfiguredError();
+  const toPhone = requireRecipient(to);
+
+  const template = (await fetchApprovedTemplates(cfg)).find(t => t.name === templateName && t.language === language);
+  if (!template) throw new WhatsappTemplateError('Ten szablon nie jest (już) zatwierdzony w Meta. Odśwież listę szablonów.');
+  if (!template.supported) {
+    throw new WhatsappTemplateError('Tego szablonu nie da się wysłać z CRM (wymaga zdjęcia/pliku albo zmiennej w nagłówku lub przycisku).');
+  }
+
+  const values = {};
+  for (const { key } of template.variables) {
+    const value = String(params?.[key] ?? '').trim();
+    if (!value) throw new WhatsappTemplateError(`Uzupełnij wszystkie pola szablonu (brakuje {{${key}}}).`);
+    // Meta rejects template parameters containing new lines, tabs or more than
+    // 4 consecutive spaces (error 132018) — caught here with a clear message.
+    if (/[\n\t]| {5,}/.test(value)) {
+      throw new WhatsappTemplateError(`Pole {{${key}}} nie może zawierać nowych linii, tabulatorów ani wielu spacji z rzędu.`);
+    }
+    values[key] = value;
+  }
+
+  const components = [];
+  if (template.variables.length) {
+    components.push({
+      type: 'body',
+      parameters: template.variables.map(({ key }) => (template.parameter_format === 'NAMED'
+        ? { type: 'text', parameter_name: key, text: values[key] }
+        : { type: 'text', text: values[key] })),
+    });
+  }
+
+  const messageId = await postMessageToMeta(cfg, {
+    to:       toPhone,
+    type:     'template',
+    template: { name: template.name, language: { code: template.language }, components },
+  });
+
+  const renderedBody = [template.header_text, renderTemplateText(template.body_text, values), template.footer_text]
+    .filter(Boolean).join('\n\n');
+  return { messageId, fromPhone: cfg.displayPhoneNumber, body: renderedBody };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -439,17 +671,20 @@ async function updateMessageStatus({ tenantId, metaMessageId, status }) {
   );
 }
 
-// generateWebhookVerifyToken, the four Whatsapp*Error classes,
+// generateWebhookVerifyToken, the Whatsapp*Error classes,
 // fetchPhoneNumberInfoFromMeta, and findCrmRecordByPhone are used only
-// inside this file (by upsertTenantConfig, sendTextMessage's throws, and
+// inside this file (by upsertTenantConfig, the send functions' throws, and
 // resolveIncomingSender respectively) — not re-exported, since nothing
 // outside this module references them by name.
 module.exports = {
   getTenantConfig,
   getTenantStatus,
+  checkAccessToken,
   upsertTenantConfig,
   deleteTenantConfig,
   sendTextMessage,
+  listTemplates,
+  sendTemplateMessage,
   verifyWebhookToken,
   findTenantConfigByPhoneNumberId,
   verifyWebhookSignature,
