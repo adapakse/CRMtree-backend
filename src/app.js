@@ -238,6 +238,7 @@ app.use('/api/crm/consents',     crmConsentsRoutes);
 app.use('/api/crm/seo',          crmSeoRoutes);
 app.use('/api/crm/prospects-dashboard', crmProspectsDashboardRoutes);
 
+app.use('/api/entity-attachments', require('./routes/entity-attachments'));
 // Before the /:id routers, which would read "portfolio" as a project id.
 app.use('/api/projects/portfolio',   projectPortfolioRoutes);
 app.use('/api/projects/:id/tasks',   projectTaskRoutes);
