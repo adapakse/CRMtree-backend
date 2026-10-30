@@ -91,4 +91,10 @@ describe('dates', () => {
     expect(formatDateTime('en', moment)).toBe(new Date(moment).toLocaleString('en-GB', options));
     expect(formatDateTime('pl', moment)).toMatch(/^10\.09\.2026, \d{2}:30$/);
   });
+
+  test('with a company time zone the hour is the one the company sees', () => {
+    const moment = '2026-10-30T09:00:00Z';
+    expect(formatDateTime('pl', moment, 'Europe/Warsaw')).toBe('30.10.2026, 10:00');
+    expect(formatDateTime('ru', moment, 'Asia/Bishkek')).toMatch(/30\.10\.2026, 15:00$/);
+  });
 });

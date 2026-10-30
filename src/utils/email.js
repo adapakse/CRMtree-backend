@@ -108,6 +108,20 @@ async function appUrlFor(tenantId) {
   }
 }
 
+// The company's time zone for hours printed in a mail. Never throws: a lookup
+// failure falls back to Warsaw, where most companies are, instead of losing the mail.
+const DEFAULT_TIME_ZONE = "Europe/Warsaw";
+async function timeZoneFor(tenantId) {
+  if (!tenantId) return DEFAULT_TIME_ZONE;
+  try {
+    const { rows } = await db.query("SELECT time_zone FROM tenants WHERE id = $1", [tenantId]);
+    return rows[0]?.time_zone || DEFAULT_TIME_ZONE;
+  } catch (err) {
+    logger.warn("email.timeZoneFor: no company time zone, using Warsaw", { tenantId, error: err.message });
+    return DEFAULT_TIME_ZONE;
+  }
+}
+
 function emailTexts(locale) {
   return (key, params) => translate(locale, `emails.${key}`, params);
 }
@@ -552,6 +566,7 @@ async function sendCrmActivityAssigned({
   tenantId,
 }) {
   const appUrl = await appUrlFor(tenantId);
+  const timeZone = await timeZoneFor(tenantId);
   const t = emailTexts(locale);
   const isPartner = sourceType === 'partner';
   const typeLabel = activityTypeLabel(t, ACTIVITY_TYPE_KEYS, activityType);
@@ -579,7 +594,7 @@ async function sendCrmActivityAssigned({
         </div>
         ${activityAt ? `<div class="info-row">
           <span class="info-label">${t('labels.activityDate')}</span>
-          <span class="info-val">${formatDateTime(locale, activityAt)}</span>
+          <span class="info-val">${formatDateTime(locale, activityAt, timeZone)}</span>
         </div>` : ''}
         <div class="info-row">
           <span class="info-label">${t('labels.assigner')}</span>
@@ -653,6 +668,7 @@ async function sendActivityReminder({
   tenantId,
 }) {
   const appUrl = await appUrlFor(tenantId);
+  const timeZone = await timeZoneFor(tenantId);
   if (!to) return;
 
   const t = emailTexts(locale);
@@ -683,7 +699,7 @@ async function sendActivityReminder({
         </div>
         <div class="info-row">
           <span class="info-label">${t('labels.activityDate')}</span>
-          <span class="info-val">${activityAt ? formatDateTime(locale, activityAt) : '—'}</span>
+          <span class="info-val">${activityAt ? formatDateTime(locale, activityAt, timeZone) : '—'}</span>
         </div>
         ${reminder ? `<div class="info-row">
           <span class="info-label">${t('labels.reminder')}</span>
