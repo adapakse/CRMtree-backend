@@ -578,7 +578,9 @@ router.get("/:id", requireAuth, crmAuth, async (req, res) => {
     const actsQ = await pool.query(
       `SELECT a.*,
               u.display_name  AS created_by_name,
-              au.display_name AS assigned_to_name
+              au.display_name AS assigned_to_name,
+              (SELECT COUNT(*) FROM entity_attachments ea
+                WHERE ea.partner_activity_id = a.id AND ea.tenant_id = a.tenant_id)::int AS attachment_count
        FROM crm_partner_activities a
        LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
        LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
@@ -954,7 +956,9 @@ router.get("/:id/activities", requireAuth, crmAuth, async (req, res) => {
     const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
     if (!crmId) return res.json([]);
     const r = await pool.query(
-      `SELECT a.*, u.display_name AS created_by_name, au.display_name AS assigned_to_name
+      `SELECT a.*, u.display_name AS created_by_name, au.display_name AS assigned_to_name,
+              (SELECT COUNT(*) FROM entity_attachments ea
+                WHERE ea.partner_activity_id = a.id AND ea.tenant_id = a.tenant_id)::int AS attachment_count
        FROM crm_partner_activities a
        LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
        LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
