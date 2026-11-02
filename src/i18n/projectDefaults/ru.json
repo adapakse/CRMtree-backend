@@ -1,0 +1,27 @@
+{
+  "costCategories": {
+    "licences": "Лицензии",
+    "materials": "Материалы",
+    "other": "Прочее",
+    "ownWork": "Собственная работа",
+    "subcontractors": "Субподрядчики",
+    "travel": "Командировки"
+  },
+  "priorities": {
+    "critical": "Критический",
+    "high": "Высокий",
+    "low": "Низкий",
+    "medium": "Средний"
+  },
+  "statuses": {
+    "done": "Завершено",
+    "inProgress": "В работе",
+    "review": "На проверке",
+    "todo": "К выполнению"
+  },
+  "types": {
+    "meeting": "Встреча",
+    "milestone": "Веха",
+    "task": "Задача"
+  }
+}

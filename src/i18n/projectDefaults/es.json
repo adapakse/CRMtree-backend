@@ -1,0 +1,27 @@
+{
+  "costCategories": {
+    "licences": "Licencias",
+    "materials": "Materiales",
+    "other": "Otros",
+    "ownWork": "Trabajo propio",
+    "subcontractors": "Subcontratistas",
+    "travel": "Viajes"
+  },
+  "priorities": {
+    "critical": "Crítica",
+    "high": "Alta",
+    "low": "Baja",
+    "medium": "Media"
+  },
+  "statuses": {
+    "done": "Completado",
+    "inProgress": "En curso",
+    "review": "En revisión",
+    "todo": "Por hacer"
+  },
+  "types": {
+    "meeting": "Reunión",
+    "milestone": "Hito",
+    "task": "Tarea"
+  }
+}

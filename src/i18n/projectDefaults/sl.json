@@ -1,0 +1,27 @@
+{
+  "costCategories": {
+    "licences": "Licence",
+    "materials": "Material",
+    "other": "Drugo",
+    "ownWork": "Lastno delo",
+    "subcontractors": "Podizvajalci",
+    "travel": "Potovanja"
+  },
+  "priorities": {
+    "critical": "Kritična",
+    "high": "Visoka",
+    "low": "Nizka",
+    "medium": "Srednja"
+  },
+  "statuses": {
+    "done": "Zaključeno",
+    "inProgress": "V teku",
+    "review": "V pregledu",
+    "todo": "Za izvedbo"
+  },
+  "types": {
+    "meeting": "Sestanek",
+    "milestone": "Mejnik",
+    "task": "Naloga"
+  }
+}

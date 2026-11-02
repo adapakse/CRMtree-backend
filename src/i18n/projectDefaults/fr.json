@@ -1,0 +1,27 @@
+{
+  "costCategories": {
+    "licences": "Licences",
+    "materials": "Matériaux",
+    "other": "Autres",
+    "ownWork": "Travail interne",
+    "subcontractors": "Sous-traitants",
+    "travel": "Déplacements"
+  },
+  "priorities": {
+    "critical": "Critique",
+    "high": "Haute",
+    "low": "Faible",
+    "medium": "Moyenne"
+  },
+  "statuses": {
+    "done": "Terminé",
+    "inProgress": "En cours",
+    "review": "À vérifier",
+    "todo": "À faire"
+  },
+  "types": {
+    "meeting": "Réunion",
+    "milestone": "Jalon",
+    "task": "Tâche"
+  }
+}
