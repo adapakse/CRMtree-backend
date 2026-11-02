@@ -438,4 +438,27 @@ describe('POST /api/crm/churn/generate — logika', () => {
       expect(t.assigned_to).toBeTruthy();
     }
   });
+
+  test('tasks are written in the tenant language and duplicates are still skipped', async () => {
+    await db.query(`UPDATE tenants SET default_locale = 'ru' WHERE id = $1`, [tenantId]);
+    try {
+      const first = await request(app).post('/api/crm/churn/generate').set('Authorization', `Bearer ${adminToken}`);
+      expect(first.body.created).toBeGreaterThan(0);
+
+      const { rows: tasks } = await db.query(
+        `SELECT title, body FROM crm_partner_activities
+         WHERE tenant_id = $1 AND type = 'task' AND title LIKE 'Churn:%'`,
+        [tenantId],
+      );
+      for (const t of tasks) {
+        expect(t.title).toMatch(/^Churn: .+ \[(Критический|Высокий|Средний)\]$/);
+        expect(t.body).toMatch(/^Индекс оттока: /);
+      }
+
+      const second = await request(app).post('/api/crm/churn/generate').set('Authorization', `Bearer ${adminToken}`);
+      expect(second.body.created).toBe(0);
+    } finally {
+      await db.query(`UPDATE tenants SET default_locale = 'pl' WHERE id = $1`, [tenantId]);
+    }
+  });
 });

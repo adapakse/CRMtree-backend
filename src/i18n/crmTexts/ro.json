@@ -1,0 +1,15 @@
+{
+  "churn": {
+    "body": "Indice churn: {score} pct. | Zile fără comandă: {daysSinceOrder} | Scădere M-2→M-1: {salesDropPct}%",
+    "riskLevels": {
+      "critical": "Critic",
+      "high": "Ridicat",
+      "medium": "Mediu"
+    }
+  },
+  "hold": {
+    "cancelledComment": "Așteptare anulată",
+    "taskBody": "Așteptarea s-a încheiat pe {until}. Motiv: {reason}",
+    "taskTitle": "Reluați activitățile de vânzare — așteptarea s-a încheiat"
+  }
+}

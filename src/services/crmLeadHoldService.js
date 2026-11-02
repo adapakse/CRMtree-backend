@@ -8,6 +8,7 @@
 const db     = require('../config/database');
 const audit  = require('../services/auditService');
 const logger = require('../utils/logger');
+const { translate } = require('../utils/i18n');
 
 /**
  * Cancels the Hold on a lead: closes the linked reminder task, clears the hold_*
@@ -23,10 +24,11 @@ async function cancelHold(leadId, tenantId, { userId = null } = {}) {
   const lead = existing[0];
 
   if (lead.hold_task_id) {
+    const { rows: [tenant] } = await db.query('SELECT default_locale FROM tenants WHERE id = $1', [tenantId]);
     await db.query(
-      `UPDATE crm_lead_activities SET status='closed', close_comment='Hold zdjęty', updated_at=now()
+      `UPDATE crm_lead_activities SET status='closed', close_comment=$3, updated_at=now()
        WHERE id=$1 AND tenant_id=$2 AND status != 'closed'`,
-      [lead.hold_task_id, tenantId]
+      [lead.hold_task_id, tenantId, translate(tenant?.default_locale, 'crmTexts.hold.cancelledComment')]
     );
   }
 

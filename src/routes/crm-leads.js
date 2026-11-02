@@ -20,6 +20,7 @@ const leadStageSvc   = require('../services/leadStageService');
 const email          = require('../utils/email');
 const pushService    = require('../services/pushService');
 const { resolveLocale } = require('../config/locales');
+const { translate } = require('../utils/i18n');
 const { notifyNewOwner } = require('../services/crmOwnerNotification');
 const { autoSaveLeadContacts } = require('../services/gmailProcessor');
 
@@ -1388,8 +1389,10 @@ router.put('/:id/hold',
       // istniejącego przy edycji Holda. Termin = hold_until, przypomnienie 1 dzień wcześniej.
       const dueAt      = new Date(`${until}T09:00:00`).toISOString();
       const reminderAt = computeReminderAt(dueAt, '1d_before');
-      const taskTitle  = 'Wznów działania sprzedażowe — koniec Holda';
-      const taskBody   = `Hold zakończył się ${until}. Powód: ${req.body.reason}`;
+      // The task is stored once for the whole team, so in the tenant's language.
+      const { rows: [tenantRow] } = await db.query('SELECT default_locale FROM tenants WHERE id = $1', [req.tenantId]);
+      const taskTitle  = translate(tenantRow?.default_locale, 'crmTexts.hold.taskTitle');
+      const taskBody   = translate(tenantRow?.default_locale, 'crmTexts.hold.taskBody', { until, reason: req.body.reason });
 
       let taskId = lead.hold_task_id;
       if (taskId) {
@@ -2310,7 +2313,8 @@ router.post('/:id/migrate',
       // ── Automatyczne zadania standardowe z AppSettings ────────────────────────
       try {
         const { rows: settingsRows } = await db.query(
-          `SELECT value FROM app_settings WHERE key = 'onboarding_task_templates'`
+          `SELECT value FROM app_settings WHERE key = 'onboarding_task_templates' AND tenant_id = $1`,
+          [req.tenantId]
         );
         if (settingsRows.length && settingsRows[0].value) {
           const templates  = JSON.parse(settingsRows[0].value);

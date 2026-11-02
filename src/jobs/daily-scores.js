@@ -250,9 +250,14 @@ async function generateAlerts(tenantId, pfx, s) {
       const activityAt = new Date();
       activityAt.setDate(activityAt.getDate() + daysAhead);
 
-      const riskLabel = { critical: 'Krytyczne', high: 'Wysokie', medium: 'Średnie' }[p.churn_level] || p.churn_level;
+      // Stored once for the whole team, so in the tenant's language. The "Churn:" prefix
+      // stays untranslated: the open-task duplicate check above matches on it.
+      const textsLocale = p.tenant_default_locale;
+      const riskLabel = translate(textsLocale, `crmTexts.churn.riskLevels.${p.churn_level}`);
       const title = `Churn: ${p.display_name} [${riskLabel}]`;
-      const body  = `Wskaźnik churn: ${p.churn_score} pkt | Dni bez zamówienia: ${p.days_since_order ?? '—'} | Spadek M-2→M-1: ${p.sales_drop_pct ?? 0}%`;
+      const body  = translate(textsLocale, 'crmTexts.churn.body', {
+        score: p.churn_score, daysSinceOrder: p.days_since_order ?? '—', salesDropPct: p.sales_drop_pct ?? 0,
+      });
 
       await db.query(
         `INSERT INTO crm_partner_activities

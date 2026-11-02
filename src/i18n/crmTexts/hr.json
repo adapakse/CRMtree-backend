@@ -1,0 +1,15 @@
+{
+  "churn": {
+    "body": "Indeks odljeva: {score} bod. | Dana bez narudžbe: {daysSinceOrder} | Pad M-2→M-1: {salesDropPct} %",
+    "riskLevels": {
+      "critical": "Kritičan",
+      "high": "Visok",
+      "medium": "Srednji"
+    }
+  },
+  "hold": {
+    "cancelledComment": "Čekanje uklonjeno",
+    "taskBody": "Čekanje je završilo {until}. Razlog: {reason}",
+    "taskTitle": "Nastavite prodajne aktivnosti — čekanje završeno"
+  }
+}

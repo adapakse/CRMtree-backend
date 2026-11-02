@@ -1,0 +1,15 @@
+{
+  "churn": {
+    "body": "Wskaźnik churn: {score} pkt | Dni bez zamówienia: {daysSinceOrder} | Spadek M-2→M-1: {salesDropPct}%",
+    "riskLevels": {
+      "critical": "Krytyczne",
+      "high": "Wysokie",
+      "medium": "Średnie"
+    }
+  },
+  "hold": {
+    "cancelledComment": "Hold zdjęty",
+    "taskBody": "Hold zakończył się {until}. Powód: {reason}",
+    "taskTitle": "Wznów działania sprzedażowe — koniec Holda"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "churn": {
+    "body": "Indice de churn : {score} pts | Jours sans commande : {daysSinceOrder} | Baisse M-2→M-1 : {salesDropPct} %",
+    "riskLevels": {
+      "critical": "Critique",
+      "high": "Élevé",
+      "medium": "Moyen"
+    }
+  },
+  "hold": {
+    "cancelledComment": "Mise en attente levée",
+    "taskBody": "La mise en attente a pris fin le {until}. Motif : {reason}",
+    "taskTitle": "Reprendre les actions commerciales — fin de la mise en attente"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "churn": {
+    "body": "Churn-Wert: {score} Pkt. | Tage ohne Bestellung: {daysSinceOrder} | Rückgang M-2→M-1: {salesDropPct}%",
+    "riskLevels": {
+      "critical": "Kritisch",
+      "high": "Hoch",
+      "medium": "Mittel"
+    }
+  },
+  "hold": {
+    "cancelledComment": "Zurückstellung aufgehoben",
+    "taskBody": "Die Zurückstellung endete am {until}. Grund: {reason}",
+    "taskTitle": "Vertriebsaktivitäten wieder aufnehmen — Zurückstellung beendet"
+  }
+}
