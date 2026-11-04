@@ -1,0 +1,15 @@
+{
+  "churn": {
+    "body": "Индекс оттока: {score} б. | Дней без заказа: {daysSinceOrder} | Падение M-2→M-1: {salesDropPct}%",
+    "riskLevels": {
+      "critical": "Критический",
+      "high": "Высокий",
+      "medium": "Средний"
+    }
+  },
+  "hold": {
+    "cancelledComment": "Пауза снята",
+    "taskBody": "Пауза завершилась {until}. Причина: {reason}",
+    "taskTitle": "Возобновите продажи — пауза завершена"
+  }
+}

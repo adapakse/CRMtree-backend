@@ -53,6 +53,14 @@ DB: PostgreSQL lokalny, baza `crmtree`, user `postgres`, hasło w `.env.local`
 ## Projekty NIE mylić
 - `worktrips-doc-backend` — osobna aplikacja worktrips
 
+## Instrukcja użytkownika — aktualizuj razem ze zmianą (decyzja Adama, 2026-11-03)
+Interaktywna instrukcja CRMtree jest częścią aplikacji i leży w repo frontendu
+(`CRMtree-frontend/src/assets/manual/<język>.html`, 10 języków). Zmiana w backendzie, którą
+użytkownik zauważy (nowa funkcja, inna reguła uprawnień, inny przepływ, nowy status, nowy mail),
+wymaga w tym samym zadaniu aktualizacji odpowiedniego rozdziału instrukcji we wszystkich 10
+plikach. Same poprawki błędów nie. Zasady i strażnik w Git: `CRMtree-frontend/CLAUDE.md`, sekcja
+„Instrukcja użytkownika (manual)”.
+
 ---
 
 ## Infrastruktura Azure i sekrety

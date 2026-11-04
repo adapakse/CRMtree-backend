@@ -11,6 +11,7 @@ const { requireAuth }                            = require('../middleware/auth')
 const { crmAuth, requireCrmManager, loadCrmScope, requireFeature } = require('../middleware/crm-rbac');
 const { sendCrmActivityAssigned }                = require('../utils/email');
 const { resolveLocale }                          = require('../config/locales');
+const { translate }                              = require('../utils/i18n');
 
 router.use(requireAuth, crmAuth, requireFeature('dwh_integration'));
 
@@ -425,9 +426,14 @@ router.post('/generate', requireCrmManager, async (req, res, next) => {
         const activityAt = new Date();
         activityAt.setDate(activityAt.getDate() + daysAhead);
 
-        const riskLabel = ({ critical: 'Krytyczne', high: 'Wysokie', medium: 'Średnie' })[p.risk_level] || p.risk_level;
+        // Stored once for the whole team, so in the tenant's language. The "Churn:" prefix
+        // stays untranslated: the open-task duplicate check above matches on it.
+        const textsLocale = p.tenant_default_locale;
+        const riskLabel = translate(textsLocale, `crmTexts.churn.riskLevels.${p.risk_level}`);
         const title = `Churn: ${p.display_name} [${riskLabel}]`;
-        const body  = `Wskaźnik churn: ${p.total_score} pkt | Dni bez zamówienia: ${p.days_since_order ?? '—'} | Spadek M-2→M-1: ${p.sales_drop_pct ?? 0}%`;
+        const body  = translate(textsLocale, 'crmTexts.churn.body', {
+          score: p.total_score, daysSinceOrder: p.days_since_order ?? '—', salesDropPct: p.sales_drop_pct ?? 0,
+        });
 
         await db.query(
           `INSERT INTO crm_partner_activities

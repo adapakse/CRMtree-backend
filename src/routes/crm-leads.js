@@ -20,6 +20,7 @@ const leadStageSvc   = require('../services/leadStageService');
 const email          = require('../utils/email');
 const pushService    = require('../services/pushService');
 const { resolveLocale } = require('../config/locales');
+const { translate } = require('../utils/i18n');
 const { notifyNewOwner } = require('../services/crmOwnerNotification');
 const { autoSaveLeadContacts } = require('../services/gmailProcessor');
 
@@ -1388,8 +1389,10 @@ router.put('/:id/hold',
       // istniejącego przy edycji Holda. Termin = hold_until, przypomnienie 1 dzień wcześniej.
       const dueAt      = new Date(`${until}T09:00:00`).toISOString();
       const reminderAt = computeReminderAt(dueAt, '1d_before');
-      const taskTitle  = 'Wznów działania sprzedażowe — koniec Holda';
-      const taskBody   = `Hold zakończył się ${until}. Powód: ${req.body.reason}`;
+      // The task is stored once for the whole team, so in the tenant's language.
+      const { rows: [tenantRow] } = await db.query('SELECT default_locale FROM tenants WHERE id = $1', [req.tenantId]);
+      const taskTitle  = translate(tenantRow?.default_locale, 'crmTexts.hold.taskTitle');
+      const taskBody   = translate(tenantRow?.default_locale, 'crmTexts.hold.taskBody', { until, reason: req.body.reason });
 
       let taskId = lead.hold_task_id;
       if (taskId) {
@@ -1563,7 +1566,9 @@ router.get('/:id/activities',
       if (!lead.length) return res.status(404).json({ error: 'Lead nie znaleziony' });
 
       const { rows } = await db.query(`
-        SELECT a.*, u.display_name AS created_by_name, au.display_name AS assigned_to_name
+        SELECT a.*, u.display_name AS created_by_name, au.display_name AS assigned_to_name,
+               (SELECT COUNT(*) FROM entity_attachments ea
+                 WHERE ea.lead_activity_id = a.id AND ea.tenant_id = a.tenant_id)::int AS attachment_count
         FROM crm_lead_activities a
         LEFT JOIN users u  ON u.id  = a.created_by  AND u.tenant_id  = $2
         LEFT JOIN users au ON au.id = a.assigned_to AND au.tenant_id = $2
@@ -2308,7 +2313,8 @@ router.post('/:id/migrate',
       // ── Automatyczne zadania standardowe z AppSettings ────────────────────────
       try {
         const { rows: settingsRows } = await db.query(
-          `SELECT value FROM app_settings WHERE key = 'onboarding_task_templates'`
+          `SELECT value FROM app_settings WHERE key = 'onboarding_task_templates' AND tenant_id = $1`,
+          [req.tenantId]
         );
         if (settingsRows.length && settingsRows[0].value) {
           const templates  = JSON.parse(settingsRows[0].value);
@@ -2389,18 +2395,9 @@ router.post('/:id/migrate',
 
       // ── Przenieś aktywności z leada ───────────────────────────────────────────
       try {
-        await db.query(
-          `INSERT INTO crm_partner_activities
-             (partner_id, type, title, body, activity_at, duration_min, participants, doc_id,
-              created_by, created_at, updated_at, meeting_location,
-              gmail_thread_id, gmail_message_id, status, close_comment, assigned_to, is_read)
-           SELECT $1, type, title, body, activity_at, duration_min, participants, doc_id,
-                  created_by, created_at, updated_at, meeting_location,
-                  gmail_thread_id, gmail_message_id, status, close_comment, assigned_to, is_read
-           FROM crm_lead_activities
-           WHERE lead_id = $2`,
-          [partner.id, id]
-        );
+        await require('../services/entityAttachmentService').copyLeadActivitiesToPartner({
+          tenantId: req.tenantId, leadId: id, partnerId: partner.id,
+        });
       } catch (e) {
         const logger = require('../utils/logger');
         logger.error('Błąd kopiowania aktywności leada do partnera', { error: e.message });

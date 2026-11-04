@@ -14,6 +14,7 @@
 // is stored the same way; a tenant without the row uses the default.
 
 const db = require('../config/database');
+const { translate } = require('../utils/i18n');
 
 const COST_CATEGORIES = 'cost-categories';
 const DICTIONARY_TABLES = {
@@ -35,34 +36,37 @@ const FIELD_TYPES       = ['text', 'number', 'list', 'date', 'money'];
 const MAX_LIST_OPTIONS       = 100;
 const MAX_LIST_OPTION_LENGTH = 120;
 
+// Default names are i18n keys (scope projectDefaults), rendered once in the
+// tenant's default language when the dictionaries are seeded — afterwards they
+// are ordinary tenant data the admin can rename.
 const DEFAULT_STATUSES = [
-  { name: 'Do zrobienia',   category: 'todo',        color: '#6B7280' },
-  { name: 'W toku',         category: 'in_progress', color: '#3B82F6' },
-  { name: 'Do weryfikacji', category: 'in_progress', color: '#F59E0B' },
-  { name: 'Zakończone',     category: 'done',        color: '#3BAA5D' },
+  { key: 'todo',       category: 'todo',        color: '#6B7280' },
+  { key: 'inProgress', category: 'in_progress', color: '#3B82F6' },
+  { key: 'review',     category: 'in_progress', color: '#F59E0B' },
+  { key: 'done',       category: 'done',        color: '#3BAA5D' },
 ];
 const DEFAULT_TYPES = [
-  { name: 'Zadanie',        color: '#3B82F6' },
-  { name: 'Spotkanie',      color: '#8B5CF6' },
-  { name: 'Kamień milowy',  color: '#F59E0B' },
+  { key: 'task',      color: '#3B82F6' },
+  { key: 'meeting',   color: '#8B5CF6' },
+  { key: 'milestone', color: '#F59E0B' },
 ];
 const DEFAULT_PRIORITIES = [
-  { name: 'Niski',     color: '#6B7280' },
-  { name: 'Średni',    color: '#3B82F6' },
-  { name: 'Wysoki',    color: '#F59E0B' },
-  { name: 'Krytyczny', color: '#DC2626' },
+  { key: 'low',      color: '#6B7280' },
+  { key: 'medium',   color: '#3B82F6' },
+  { key: 'high',     color: '#F59E0B' },
+  { key: 'critical', color: '#DC2626' },
 ];
-const DEFAULT_COST_CATEGORIES = ['Praca własna', 'Podwykonawcy', 'Materiały', 'Licencje', 'Podróże', 'Inne'];
-// [role, from status name, to status name]
+const DEFAULT_COST_CATEGORIES = ['ownWork', 'subcontractors', 'materials', 'licences', 'travel', 'other'];
+// [role, from status key, to status key]
 const DEFAULT_TRANSITIONS = [
-  ['internal_participant', 'Do zrobienia',   'W toku'],
-  ['internal_participant', 'W toku',         'Do zrobienia'],
-  ['internal_participant', 'W toku',         'Do weryfikacji'],
-  ['external_participant', 'Do zrobienia',   'W toku'],
-  ['external_participant', 'W toku',         'Do zrobienia'],
-  ['external_participant', 'W toku',         'Do weryfikacji'],
-  ['controller',           'Do weryfikacji', 'Zakończone'],
-  ['controller',           'Do weryfikacji', 'W toku'],
+  ['internal_participant', 'todo',       'inProgress'],
+  ['internal_participant', 'inProgress', 'todo'],
+  ['internal_participant', 'inProgress', 'review'],
+  ['external_participant', 'todo',       'inProgress'],
+  ['external_participant', 'inProgress', 'todo'],
+  ['external_participant', 'inProgress', 'review'],
+  ['controller',           'review',     'done'],
+  ['controller',           'review',     'inProgress'],
 ];
 
 function httpError(status, message) {
@@ -82,6 +86,11 @@ function rethrowDuplicateName(err) {
   throw err;
 }
 
+async function loadTenantLocale(client, tenantId) {
+  const { rows: [tenant] } = await client.query('SELECT default_locale FROM tenants WHERE id = $1', [tenantId]);
+  return tenant?.default_locale;
+}
+
 async function seedDefaults(tenantId) {
   await db.transaction(async (client) => {
     // Serialises concurrent first reads of the same tenant's configuration.
@@ -91,34 +100,35 @@ async function seedDefaults(tenantId) {
     );
     if (existing.length) return;
 
-    const statusIdByName = {};
+    const locale = await loadTenantLocale(client, tenantId);
+    const statusIdByKey = {};
     for (const [index, status] of DEFAULT_STATUSES.entries()) {
       const { rows: [row] } = await client.query(
         `INSERT INTO project_task_statuses (tenant_id, name, category, color, sort_order)
          VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [tenantId, status.name, status.category, status.color, index],
+        [tenantId, translate(locale, `projectDefaults.statuses.${status.key}`), status.category, status.color, index],
       );
-      statusIdByName[status.name] = row.id;
+      statusIdByKey[status.key] = row.id;
     }
     for (const [index, type] of DEFAULT_TYPES.entries()) {
       await client.query(
         `INSERT INTO project_task_types (tenant_id, name, color, sort_order)
          VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-        [tenantId, type.name, type.color, index],
+        [tenantId, translate(locale, `projectDefaults.types.${type.key}`), type.color, index],
       );
     }
     for (const [index, priority] of DEFAULT_PRIORITIES.entries()) {
       await client.query(
         `INSERT INTO project_task_priorities (tenant_id, name, color, sort_order)
          VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-        [tenantId, priority.name, priority.color, index],
+        [tenantId, translate(locale, `projectDefaults.priorities.${priority.key}`), priority.color, index],
       );
     }
     for (const [role, from, to] of DEFAULT_TRANSITIONS) {
       await client.query(
         `INSERT INTO project_status_transitions (tenant_id, role, from_status_id, to_status_id)
          VALUES ($1, $2, $3, $4)`,
-        [tenantId, role, statusIdByName[from], statusIdByName[to]],
+        [tenantId, role, statusIdByKey[from], statusIdByKey[to]],
       );
     }
   });
@@ -182,10 +192,11 @@ async function ensureDefaultCostCategories(tenantId) {
       'SELECT 1 FROM project_cost_categories WHERE tenant_id = $1 LIMIT 1', [tenantId],
     );
     if (existing.length) return;
-    for (const [index, name] of DEFAULT_COST_CATEGORIES.entries()) {
+    const locale = await loadTenantLocale(client, tenantId);
+    for (const [index, key] of DEFAULT_COST_CATEGORIES.entries()) {
       await client.query(
         'INSERT INTO project_cost_categories (tenant_id, name, sort_order) VALUES ($1, $2, $3)',
-        [tenantId, name, index],
+        [tenantId, translate(locale, `projectDefaults.costCategories.${key}`), index],
       );
     }
   });

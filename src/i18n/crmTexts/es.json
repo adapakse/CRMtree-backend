@@ -1,0 +1,15 @@
+{
+  "churn": {
+    "body": "Índice de churn: {score} pts | Días sin pedido: {daysSinceOrder} | Caída M-2→M-1: {salesDropPct}%",
+    "riskLevels": {
+      "critical": "Crítico",
+      "high": "Alto",
+      "medium": "Medio"
+    }
+  },
+  "hold": {
+    "cancelledComment": "Espera retirada",
+    "taskBody": "La espera terminó el {until}. Motivo: {reason}",
+    "taskTitle": "Reanudar las actividades de venta — fin de la espera"
+  }
+}

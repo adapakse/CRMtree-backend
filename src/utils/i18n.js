@@ -91,9 +91,13 @@ function formatDate(locale, value, options = DATE_OPTIONS) {
   return new Date(value).toLocaleDateString(INTL_LOCALE_TAGS[language] || language, options);
 }
 
-function formatDateTime(locale, value) {
+// A moment with an hour in it must be printed in the company's time zone —
+// the server runs in UTC, so without one the mail shows a different hour
+// than the CRM did.
+function formatDateTime(locale, value, timeZone) {
   const language = supportedOrDefault(locale);
-  return new Date(value).toLocaleString(INTL_LOCALE_TAGS[language] || language, DATE_TIME_OPTIONS);
+  const options = timeZone ? { ...DATE_TIME_OPTIONS, timeZone } : DATE_TIME_OPTIONS;
+  return new Date(value).toLocaleString(INTL_LOCALE_TAGS[language] || language, options);
 }
 
 // A calendar date ("YYYY-MM-DD") stays that day whatever the server time zone.

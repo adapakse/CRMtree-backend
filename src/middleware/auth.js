@@ -185,6 +185,7 @@ const EXTERNAL_USER_API_PREFIXES = ["/api/projects", "/api/auth", "/api/profile"
 
 function isAllowedForExternalUser(originalUrl) {
   const path = originalUrl.split("?")[0];
+  if (/^\/api\/entity-attachments\/(project|project-task)\//.test(path)) return true;
   return EXTERNAL_USER_API_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 

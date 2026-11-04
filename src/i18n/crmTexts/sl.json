@@ -1,0 +1,15 @@
+{
+  "churn": {
+    "body": "Indeks odliva: {score} točk | Dni brez naročila: {daysSinceOrder} | Padec M-2→M-1: {salesDropPct} %",
+    "riskLevels": {
+      "critical": "Kritično",
+      "high": "Visoko",
+      "medium": "Srednje"
+    }
+  },
+  "hold": {
+    "cancelledComment": "Zadržanje odstranjeno",
+    "taskBody": "Zadržanje se je končalo {until}. Razlog: {reason}",
+    "taskTitle": "Nadaljujte prodajne aktivnosti — zadržanje končano"
+  }
+}

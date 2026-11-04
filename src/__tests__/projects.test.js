@@ -11,9 +11,11 @@ const app     = require('../app');
 const db      = require('../config/database');
 const { signAccessToken } = require('../middleware/auth');
 const { buildKeyBase } = require('../services/projectService');
+const projectConfigService = require('../services/projectConfigService');
 
 const SLUG         = 'zz-projects-test';
 const OTHER_SLUG   = 'zz-projects-test-other';
+const RUSSIAN_SLUG = 'zz-projects-test-ru';
 const EMAIL_DOMAIN = '@projects-test.crmtree.local';
 
 let tenantId, otherTenantId;
@@ -235,6 +237,30 @@ describe('tenant configuration', () => {
     expect(res.body.statuses.map((s) => s.category)).toEqual(['todo', 'in_progress', 'in_progress', 'done']);
     expect(res.body.priorities).toHaveLength(4);
     expect(res.body.transitions.length).toBeGreaterThan(0);
+  });
+
+  test("defaults are seeded in the tenant's default language with working transitions", async () => {
+    const { rows: [russianTenant] } = await db.query(
+      `INSERT INTO tenants (name, slug, is_active, default_locale) VALUES ($1, $2, TRUE, 'ru')
+       ON CONFLICT (slug) DO UPDATE SET default_locale = 'ru' RETURNING id`,
+      ['Projects Test RU', RUSSIAN_SLUG],
+    );
+    try {
+      const config = await projectConfigService.getConfig(russianTenant.id);
+      expect(config.statuses.map((s) => s.name)).toEqual(['К выполнению', 'В работе', 'На проверке', 'Завершено']);
+      expect(config.types.map((t) => t.name)).toEqual(['Задача', 'Встреча', 'Веха']);
+      expect(config.priorities.map((p) => p.name)).toEqual(['Низкий', 'Средний', 'Высокий', 'Критический']);
+      const statusIds = new Set(config.statuses.map((s) => s.id));
+      expect(config.transitions).toHaveLength(8);
+      expect(config.transitions.every((t) => statusIds.has(t.from_status_id) && statusIds.has(t.to_status_id))).toBe(true);
+      const categories = await projectConfigService.listCostCategories(russianTenant.id);
+      expect(categories.map((c) => c.name)).toContain('Собственная работа');
+    } finally {
+      for (const table of ['project_task_statuses', 'project_task_types', 'project_task_priorities', 'project_cost_categories']) {
+        await db.query(`DELETE FROM ${table} WHERE tenant_id = $1`, [russianTenant.id]);
+      }
+      await db.query('DELETE FROM tenants WHERE id = $1', [russianTenant.id]);
+    }
   });
 
   test('only the tenant admin edits the configuration', async () => {

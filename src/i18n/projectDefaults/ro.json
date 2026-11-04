@@ -1,0 +1,27 @@
+{
+  "costCategories": {
+    "licences": "Licențe",
+    "materials": "Materiale",
+    "other": "Altele",
+    "ownWork": "Muncă proprie",
+    "subcontractors": "Subcontractori",
+    "travel": "Deplasări"
+  },
+  "priorities": {
+    "critical": "Critică",
+    "high": "Ridicată",
+    "low": "Scăzută",
+    "medium": "Medie"
+  },
+  "statuses": {
+    "done": "Finalizat",
+    "inProgress": "În lucru",
+    "review": "De verificat",
+    "todo": "De făcut"
+  },
+  "types": {
+    "meeting": "Întâlnire",
+    "milestone": "Reper",
+    "task": "Sarcină"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "churn": {
+    "body": "Churn score: {score} pts | Days without an order: {daysSinceOrder} | Drop M-2→M-1: {salesDropPct}%",
+    "riskLevels": {
+      "critical": "Critical",
+      "high": "High",
+      "medium": "Medium"
+    }
+  },
+  "hold": {
+    "cancelledComment": "Hold removed",
+    "taskBody": "The hold ended on {until}. Reason: {reason}",
+    "taskTitle": "Resume sales activities — hold ended"
+  }
+}

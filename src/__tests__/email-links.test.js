@@ -81,3 +81,21 @@ test('project links in the daily digest use the company address', async () => {
   expect(sentHtml()).toContain('https://acme.crmtree.pl/projects/p-1?task=t-1');
   expect(sentHtml()).toContain('https://acme.crmtree.pl/crm/dashboard');
 });
+
+test('the task hour in the mail is in the company time zone', async () => {
+  mockQuery.mockImplementation(async (sql) => (sql.includes('time_zone')
+    ? { rows: [{ time_zone: 'Asia/Bishkek' }] }
+    : { rows: [{ slug: 'acme' }] }));
+  await sendLeadActivityMail('tenant-4');
+
+  // 09:00 UTC is 15:00 in Bishkek.
+  expect(sentHtml()).toContain('23/10/2026, 15:00');
+});
+
+test('a company without a time zone gets the Warsaw hour', async () => {
+  mockQuery.mockResolvedValue({ rows: [{ slug: 'acme' }] });
+  await sendLeadActivityMail('tenant-5');
+
+  // 09:00 UTC on 23.10 is 11:00 in Warsaw (summer time).
+  expect(sentHtml()).toContain('23/10/2026, 11:00');
+});
