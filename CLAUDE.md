@@ -77,6 +77,8 @@ plikach. Same poprawki błędów nie. Zasady i strażnik w Git: `CRMtree-fronten
 - Subdomeny tenantów: `app.crmtree.pl` (uniwersalny login) / `{slug}.crmtree.pl`
   (per-tenant), analogicznie `app.int.crmtree.pl` / `{slug}.int.crmtree.pl` na INT —
   wildcard DNS + cert na obu, nowy tenant nie wymaga żadnej dodatkowej konfiguracji DNS.
+  Certy wildcard (Let's Encrypt, 90 dni) odnawia automatycznie
+  `.github/workflows/renew-wildcard-certs.yml` — szczegóły w `docs/tenant-subdomains-infra.md`.
 
 ### Sekrety — wszystko w Azure Key Vault (`crmtree-vault`), nigdy w plikach ani w kodzie
 Container Apps (PROD i INT) referencują sekrety przez `secretRef` → Key Vault, przez

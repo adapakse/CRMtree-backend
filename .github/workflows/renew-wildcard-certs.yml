@@ -1,0 +1,140 @@
+# Automatyczne odnawianie certyfikatów wildcard Let's Encrypt dla subdomen tenantów:
+#   *.crmtree.pl      → crmtree-frontend
+#   *.int.crmtree.pl  → crmtree-frontend-int
+# Managed Certificate w Container Apps nie obsługuje wildcarda (docs/tenant-subdomains-infra.md),
+# więc certyfikat wystawiamy przez ACME DNS-01 (Cloudflare), wgrywamy jako PFX do crmtree-env
+# i przepinamy hostname — bez przerwy w działaniu.
+#
+# Co tydzień sprawdza datę ważności certyfikatu podpiętego w Azure; odnawia, gdy zostało
+# < RENEW_DAYS dni (albo zawsze, przy ręcznym uruchomieniu z force=true).
+# Harmonogram działa tylko z gałęzi domyślnej (master). Nieudany run → mail z GitHub Actions.
+#
+# Sekrety repo: AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID
+# (te same co deploy.yml) + CLOUDFLARE_API_TOKEN (szablon „Edit zone DNS”, strefa crmtree.pl).
+name: Renew wildcard certificates
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'   # poniedziałki 04:17 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Odnów niezależnie od daty ważności'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renew-wildcard-certs
+  cancel-in-progress: false
+
+env:
+  RG: rg-crmtree-prod
+  CAE: crmtree-env
+  RENEW_DAYS: 30
+  ACME_EMAIL: adapakse@gmail.com
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - domain: crmtree.pl
+            app: crmtree-frontend
+            cert_prefix: wildcard-crmtree-pl
+          - domain: int.crmtree.pl
+            app: crmtree-frontend-int
+            cert_prefix: wildcard-int-crmtree-pl
+    env:
+      DOMAIN: ${{ matrix.domain }}
+      APP: ${{ matrix.app }}
+      PREFIX: ${{ matrix.cert_prefix }}
+      HOSTNAME: '*.${{ matrix.domain }}'
+    steps:
+      - name: Azure login
+        run: |
+          az login --service-principal \
+            -u "${{ secrets.AZURE_CLIENT_ID }}" \
+            -p "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}" -o none
+          az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+          az extension add --name containerapp --upgrade --only-show-errors -y
+
+      - name: Sprawdzenie ważności obecnego certyfikatu
+        id: check
+        run: |
+          set -euo pipefail
+          current=$(az containerapp hostname list -g "$RG" -n "$APP" \
+            --query "[?name=='$HOSTNAME'].certificateId | [0]" -o tsv | sed 's#.*/##')
+          expires=""
+          if [ -n "$current" ]; then
+            expires=$(az containerapp env certificate list -g "$RG" -n "$CAE" \
+              --query "[?name=='$current'].properties.expirationDate | [0]" -o tsv)
+          fi
+          days=-1
+          [ -n "$expires" ] && days=$(( ( $(date -d "$expires" +%s) - $(date +%s) ) / 86400 ))
+          echo "Podpięty certyfikat: ${current:-brak}, wygasa: ${expires:-?} (zostało $days dni)"
+          renew=false
+          if [ "${{ inputs.force }}" = "true" ] || [ "$days" -lt "$RENEW_DAYS" ]; then renew=true; fi
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "renew=$renew" >> "$GITHUB_OUTPUT"
+          echo "### $HOSTNAME — wygasa ${expires:-?} ($days dni), odnowienie: $renew" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wystawienie certyfikatu (Let's Encrypt DNS-01 / Cloudflare)
+        if: steps.check.outputs.renew == 'true'
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$CF_TOKEN" ] || { echo "::error::Brak sekretu CLOUDFLARE_API_TOKEN"; exit 1; }
+          python3 -m pip install --quiet --user certbot certbot-dns-cloudflare
+          umask 077
+          mkdir -p "$RUNNER_TEMP/le"
+          printf 'dns_cloudflare_api_token = %s\n' "$CF_TOKEN" > "$RUNNER_TEMP/cf.ini"
+          ~/.local/bin/certbot certonly --non-interactive --agree-tos -m "$ACME_EMAIL" \
+            --config-dir "$RUNNER_TEMP/le" --work-dir "$RUNNER_TEMP/le-work" --logs-dir "$RUNNER_TEMP/le-logs" \
+            --dns-cloudflare --dns-cloudflare-credentials "$RUNNER_TEMP/cf.ini" \
+            --dns-cloudflare-propagation-seconds 60 \
+            -d "$HOSTNAME" --cert-name wildcard
+          rm -f "$RUNNER_TEMP/cf.ini"
+
+      - name: Wgranie do Container Apps i przepięcie hostname
+        if: steps.check.outputs.renew == 'true'
+        run: |
+          set -euo pipefail
+          umask 077
+          live="$RUNNER_TEMP/le/live/wildcard"
+          pass=$(openssl rand -hex 16)
+          echo "::add-mask::$pass"
+          openssl pkcs12 -export -out "$RUNNER_TEMP/cert.pfx" -passout "pass:$pass" \
+            -inkey "$live/privkey.pem" -in "$live/fullchain.pem"
+          name="$PREFIX-$(date +%Y%m%d)"
+          az containerapp env certificate upload -g "$RG" -n "$CAE" \
+            --certificate-file "$RUNNER_TEMP/cert.pfx" --certificate-name "$name" --password "$pass" -o none
+          rm -f "$RUNNER_TEMP/cert.pfx"
+          az containerapp hostname bind -g "$RG" -n "$APP" --hostname "$HOSTNAME" \
+            --environment "$CAE" --certificate "$name" -o none
+          echo "Przepięto $HOSTNAME na $name"
+          echo "new=$name" >> "$GITHUB_ENV"
+
+      - name: Weryfikacja i sprzątanie starych certyfikatów
+        if: steps.check.outputs.renew == 'true'
+        run: |
+          set -euo pipefail
+          bound=$(az containerapp hostname list -g "$RG" -n "$APP" \
+            --query "[?name=='$HOSTNAME'].certificateId | [0]" -o tsv | sed 's#.*/##')
+          [ "$bound" = "$new" ] || { echo "::error::$HOSTNAME wskazuje na '$bound', oczekiwano '$new'"; exit 1; }
+          # Usuwamy tylko certyfikaty tej domeny (ten sam prefiks), które nie są już podpięte.
+          for c in $(az containerapp env certificate list -g "$RG" -n "$CAE" \
+                       --query "[?name=='$PREFIX' || starts_with(name, '$PREFIX-')].name" -o tsv); do
+            [ "$c" = "$new" ] && continue
+            echo "Usuwam stary certyfikat $c"
+            az containerapp env certificate delete -g "$RG" -n "$CAE" --certificate "$c" --yes -o none \
+              || echo "::warning::Nie udało się usunąć $c (może nadal podpięty) — zostawiam"
+          done
+          echo "Nowy certyfikat: $new" >> "$GITHUB_STEP_SUMMARY"
