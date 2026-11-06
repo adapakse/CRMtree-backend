@@ -48,8 +48,7 @@ az containerapp env certificate upload \
   --certificate-password <pfx-password>
 ```
 
-Certyfikat wildcard trzeba będzie ręcznie odnawiać (ACME DNS-01 pozwala to
-zautomatyzować przez skrypt, ale to osobna konfiguracja, nie część tej zmiany).
+Odnawianie jest zautomatyzowane — patrz „Odnawianie certyfikatów wildcard” niżej.
 
 ## Krok 3 — Bindowanie hostname'a
 
@@ -89,3 +88,24 @@ curl -I https://acme-test.crmtree.pl   # 200/redirect z tego samego frontendu co
 
 Backend nie wymaga żadnej zmiany DNS/cert — działa już dziś, wystarczy że frontend zacznie
 być osiągalny pod subdomeną.
+
+## Odnawianie certyfikatów wildcard
+
+Certyfikaty `*.crmtree.pl` (`crmtree-frontend`) i `*.int.crmtree.pl` (`crmtree-frontend-int`)
+to Let's Encrypt (ważność 90 dni), wgrane do `crmtree-env` jako
+`wildcard-crmtree-pl-YYYYMMDD` / `wildcard-int-crmtree-pl-YYYYMMDD`. DNS `crmtree.pl` jest
+w Cloudflare.
+
+Odnawia je workflow `.github/workflows/renew-wildcard-certs.yml`:
+
+- co poniedziałek sprawdza datę ważności certyfikatu podpiętego do hostname w Azure,
+- gdy zostało < 30 dni: certbot (DNS-01 przez API Cloudflare) → PFX → upload do
+  `crmtree-env` → `hostname bind` → weryfikacja → usunięcie starych certyfikatów tej domeny,
+- ręcznie: Actions → „Renew wildcard certificates” → Run workflow (`force` = odnów od razu).
+
+Wymaga sekretu repo `CLOUDFLARE_API_TOKEN` (token „Edit zone DNS” dla strefy `crmtree.pl`)
+oraz sekretów `AZURE_*` z `deploy.yml` (service principal musi mieć prawo zapisu do
+`crmtree-env` i obu Container Apps). Harmonogram działa dopiero z gałęzi `master`.
+Nieudany run → mail z GitHub Actions; wtedy odnowić ręcznie (te same kroki lokalnie,
+certbot w Dockerze `certbot/dns-cloudflare`; na Windows pliki brać z `le/archive/`, bo
+`le/live/` to symlinki).
