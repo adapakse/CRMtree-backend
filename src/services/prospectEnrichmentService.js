@@ -1096,6 +1096,74 @@ function isConfirmedDeadDomain(deterministicFailure) {
 // automatyczne zaufanie.
 const insecureHttpsAgent = new https.Agent({ rejectUnauthorized: false });
 
+// Limit pamięci na jedną pobraną stronę (poprawka 06.11, OOM na PROD).
+// Wcześniej axios buforował w pamięci CAŁĄ odpowiedź (także wideo/PDF/
+// gigantyczne listingi — content-type sprawdzaliśmy dopiero po pobraniu).
+// Przy kilku firmach w batchu równolegle backend (1 GiB) padał z
+// "JavaScript heap out of memory" kilkanaście sekund po starcie batcha.
+//
+// Strona NIE jest odrzucana, tylko obcinana do pierwszych MAX_PAGE_BYTES —
+// odrzucenie strony głównej oznaczałoby utratę całej firmy (fetch_error,
+// zero treści dla AI). Pomiar PROD (30 dni, 589 stron): mediana 63 KB,
+// p99 0,7 MB; > 5 MB tylko BIP wodociągów (5,85 MB, ~3,6 tys. znaków tekstu,
+// mieści się w pierwszych 5 MB). Do AI i tak trafia budżet ~12 tys. znaków.
+const MAX_PAGE_BYTES = 5 * 1024 * 1024;
+
+// Zamiennik axios.get() dla pobierania stron w crawlu: ta sama sygnatura
+// i kształt odpowiedzi (status/headers/request/data jako string), ale treść
+// czytana strumieniowo i ucinana po MAX_PAGE_BYTES (po dekompresji — chroni
+// też przed bombą gzip). `timeout` obejmuje też czytanie treści (przy
+// responseType 'stream' axios pilnuje tylko nagłówków).
+async function getCapped(url, config = {}) {
+  const resp = await axios.get(url, { ...config, responseType: 'stream' });
+  const stream = resp.data;
+  // Mock axios w testach jednostkowych zwraca gotowy string — bez zmian.
+  if (!stream || typeof stream.on !== 'function') return resp;
+
+  const chunks = [];
+  let size = 0;
+  let truncated = false;
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err && !truncated) reject(err); else resolve();
+    };
+    const timer = config.timeout > 0
+      ? setTimeout(() => {
+          stream.destroy();
+          const err = new Error(`timeout of ${config.timeout}ms exceeded`);
+          err.code = 'ECONNABORTED';
+          done(err);
+        }, config.timeout)
+      : null;
+    stream.on('data', (chunk) => {
+      if (truncated) return;
+      const room = MAX_PAGE_BYTES - size;
+      if (chunk.length >= room) {
+        if (room > 0) chunks.push(chunk.subarray(0, room));
+        size += Math.max(room, 0);
+        truncated = true;
+        stream.destroy();
+        done();
+        return;
+      }
+      chunks.push(chunk);
+      size += chunk.length;
+    });
+    stream.on('end', () => done());
+    stream.on('error', (err) => done(err));
+    stream.on('close', () => done());
+  });
+
+  if (truncated) {
+    logger.info('[Prospect] page_truncated — kept first part of oversized page', { url, limitBytes: MAX_PAGE_BYTES });
+  }
+  return { ...resp, data: Buffer.concat(chunks).toString('utf8'), truncated };
+}
+
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
@@ -2159,7 +2227,7 @@ async function scrapeLinkedin(linkedinUrl) {
   let employmentCount = null;
   let employmentRange = null;
   try {
-    const { data: html } = await axios.get(linkedinUrl, {
+    const { data: html } = await getCapped(linkedinUrl, {
       timeout: 12_000,
       maxRedirects: 3,
       validateStatus: s => s === 200 || s === 999,
@@ -2444,7 +2512,7 @@ async function fetchSitemapUrls(effectiveBase, baseHostname) {
   const found = [];
   for (const url of candidates) {
     try {
-      const { data } = await axios.get(url, {
+      const { data } = await getCapped(url, {
         timeout: 5_000,
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WorktripsBot/1.0)' },
         validateStatus: s => s === 200,
@@ -2467,7 +2535,7 @@ async function fetchSitemapUrls(effectiveBase, baseHostname) {
 
 // HTTP GET — zwraca HTML lub rzuca; 403/429 = bot-blocked = pusty html (nie rzucamy, strona istnieje)
 async function fetchPage(url) {
-  const resp = await axios.get(url, {
+  const resp = await getCapped(url, {
     timeout: 10_000,
     maxRedirects: 5,
     headers: {
@@ -2729,7 +2797,7 @@ const CRAWL_REQUEST_HEADERS = {
 async function fetchInsecureFallback(url, timeoutMs = 10_000) {
   if (timeoutMs <= 0) return null;
   try {
-    const resp = await axios.get(url, {
+    const resp = await getCapped(url, {
       timeout: timeoutMs, maxRedirects: 5, headers: CRAWL_REQUEST_HEADERS,
       validateStatus: () => true, httpsAgent: insecureHttpsAgent,
     });
@@ -2765,7 +2833,7 @@ async function fetchHttpFallback(url, timeoutMs) {
     return null;
   }
   try {
-    const resp = await axios.get(httpUrl, {
+    const resp = await getCapped(httpUrl, {
       timeout: timeoutMs, maxRedirects: 5, headers: CRAWL_REQUEST_HEADERS,
       validateStatus: () => true,
     });
@@ -2802,7 +2870,7 @@ async function fetchHostVariant(originalUrl, apexUrl, deadline, originalError) {
     return { html: '', finalUrl: originalUrl, status: null, error: originalError };
   }
   try {
-    const resp = await axios.get(apexUrl, {
+    const resp = await getCapped(apexUrl, {
       timeout: remaining, maxRedirects: 5, headers: CRAWL_REQUEST_HEADERS, validateStatus: () => true,
     });
     const finalUrl = resp.request?.res?.responseUrl || apexUrl;
@@ -2872,7 +2940,7 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     try {
-      const resp = await axios.get(currentUrl, {
+      const resp = await getCapped(currentUrl, {
         timeout: remaining,
         maxRedirects: 5,
         headers: CRAWL_REQUEST_HEADERS,
@@ -3047,7 +3115,7 @@ async function fetchPageHardened(url, { maxRetries = 2, timeoutMs = 12_000 } = {
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     try {
-      const resp = await axios.get(url, {
+      const resp = await getCapped(url, {
         timeout: Math.min(timeoutMs, remaining),
         maxRedirects: 5,
         headers: level2Headers(hostname),
@@ -4989,7 +5057,9 @@ async function enrichOne(prospectId, opts = {}) {
 
 // ── Batch enrichment ────────────────────────────────────────────────
 
-const BATCH_CONCURRENCY = 10;
+// 10 → 5 (poprawka 06.11): przy 10 firmach naraz × CRAWL_CONCURRENCY podstron
+// szczyt pamięci przekraczał 1 GiB kontenera PROD i batch kończył się OOM.
+const BATCH_CONCURRENCY = 5;
 
 // Stan batcha jest per-tenant (Map) — CRMtree jest multi-tenant, więc batch
 // jednego klienta nie może blokować ani mieszać postępu z innym klientem.
@@ -5174,4 +5244,6 @@ module.exports = {
   // Monotonic identity resolution (21.09, po benchmarku 50 firm) — czysta
   // funkcja, testowalna bez sieci/AI.
   resolveIdentityMonotonically, HARD_IDENTITY_CONFLICT_REASONS,
+  // Limit rozmiaru pobieranej strony (06.11, OOM batcha na PROD).
+  MAX_PAGE_BYTES, BATCH_CONCURRENCY,
 };
