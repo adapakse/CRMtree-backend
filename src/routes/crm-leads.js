@@ -457,7 +457,9 @@ router.get('/tasks', async (req, res, next) => {
         lu.display_name AS assigned_to_name,
         lu.id           AS assigned_to_id,
         au.display_name AS act_assigned_to_name,
-        a.assigned_to   AS act_assigned_to_id
+        a.assigned_to   AS act_assigned_to_id,
+        (SELECT COUNT(*) FROM entity_attachments ea
+          WHERE ea.lead_activity_id = a.id AND ea.tenant_id = a.tenant_id)::int AS attachment_count
       FROM crm_lead_activities a
       JOIN crm_leads l      ON l.id   = a.lead_id
       LEFT JOIN users u     ON u.id   = a.created_by  AND u.tenant_id  = $1
