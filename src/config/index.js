@@ -177,7 +177,8 @@ module.exports = {
 
   rateLimit: {
     windowMs: parseInt(optional("RATE_LIMIT_WINDOW_MS", "900000")),
-    max: parseInt(optional("RATE_LIMIT_MAX", "200")),
+    // Per signed-in user (see middleware/api-rate-limit.js); the dashboard alone polls every minute.
+    max: parseInt(optional("RATE_LIMIT_MAX", "1000")),
   },
 
   upload: {

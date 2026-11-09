@@ -5,10 +5,10 @@ const cors          = require('cors');
 const helmet        = require('helmet');
 const compression   = require('compression');
 const morgan        = require('morgan');
-const rateLimit     = require('express-rate-limit');
 const passport      = require('passport');
 const config        = require('./config');
 const logger        = require('./utils/logger');
+const { apiRateLimit } = require('./middleware/api-rate-limit');
 const { errorHandler, notFound, injectAuditContext } = require('./middleware/errorHandler');
 const { isAllowedOrigin } = require('./utils/corsOrigin');
 
@@ -115,22 +115,7 @@ app.use(cors({
 }));
 
 // ─── Rate limiter ─────────────────────────────────────────
-// Uwaga: req.path jest wzgledem mountpointa ('/api/'), wiec '/auth/saml'
-// zamiast '/api/auth/saml'. Webhook signing tez wylaczamy, bo zewnetrzne
-// serwisy potrafia retry'owac w seriach i niepotrzebnie zjadaja limit.
-app.use('/api/', rateLimit({
-  windowMs: config.rateLimit.windowMs,
-  max:      config.rateLimit.max,
-  standardHeaders: true,
-  legacyHeaders:   false,
-  message: { error: 'Too many requests, please try again later.' },
-  skip: (req) => (
-    config.isDev ||
-    req.path.startsWith('/auth/') ||
-    req.path === '/signing/webhook' ||
-    req.path === '/crm/whatsapp/webhook'
-  ),
-}));
+app.use('/api/', apiRateLimit);
 
 // ─── Request parsing ──────────────────────────────────────
 app.use((req, res, next) => {
