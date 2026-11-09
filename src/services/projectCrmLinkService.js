@@ -149,6 +149,8 @@ async function listAssignedTasks({ tenantId, viewer, assigneeIds, includeDone = 
   const { rows } = await db.query(
     `SELECT p.id AS project_id, p.key AS project_key, p.name AS project_name,
             t.reminder_type, t.reminder_at, t.updated_at,
+            (SELECT COUNT(*) FROM entity_attachments ea
+              WHERE ea.project_task_id = t.id AND ea.tenant_id = t.tenant_id)::int AS attachment_count,
             ${taskSummaryColumns({ today: '$6', onlyAssignedTo: '$7' })}
      FROM project_tasks t
      JOIN projects p ON p.id = t.project_id
