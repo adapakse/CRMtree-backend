@@ -13,7 +13,7 @@
 // GET  /api/crm/sales-data/report          – kompleksowy raport KPI + trend
 
 const express = require('express');
-const db      = require('../config/database');
+const { queryDwhOrEmpty } = require('../utils/dwh');
 const { requireAuth }                = require('../middleware/auth');
 const { crmAuth, requireCrmManager, loadCrmScope, requireFeature } = require('../middleware/crm-rbac');
 
@@ -56,7 +56,7 @@ function addPeriodFilters(where, params, pfrom, pto, alias = 's') {
 router.get('/partners', requireAuth, crmAuth, async (req, res, next) => {
   try {
     const pfx = req.dwhPrefix;
-    const { rows } = await db.query(
+    const { rows } = await queryDwhOrEmpty(req,
       `SELECT DISTINCT
          COALESCE(p.company, dm.company_name, dm.name, 'Partner ' || s.partner_id::text) AS partner_name,
          p.id                                 AS partner_id,
@@ -88,7 +88,7 @@ router.get('/summary', requireAuth, crmAuth, async (req, res, next) => {
     if (partner_id)       { params.push(parseInt(partner_id)); where.push(`s.partner_id = $${params.length}`); }
 
     where.push(EXCLUDE_TEST);
-    const { rows } = await db.query(
+    const { rows } = await queryDwhOrEmpty(req,
       `SELECT TO_CHAR(s.sale_date, 'YYYY-MM') AS period,
               ${DWH_FIN_SELECT}
        FROM dwh.${pfx}_sales s
@@ -124,7 +124,7 @@ router.get('/by-partner', requireAuth, crmAuth, loadCrmScope, async (req, res, n
     }
     where.push(EXCLUDE_TEST);
 
-    const { rows } = await db.query(
+    const { rows } = await queryDwhOrEmpty(req,
       `SELECT
          COALESCE(p.company, dm.company_name, dm.name, 'Partner ' || s.partner_id::text) AS partner_name,
          p.id           AS partner_id,
@@ -163,7 +163,7 @@ router.get('/by-salesperson', requireAuth, crmAuth, loadCrmScope, async (req, re
     }
     where.push(EXCLUDE_TEST);
 
-    const { rows } = await db.query(
+    const { rows } = await queryDwhOrEmpty(req,
       `SELECT
          COALESCE(u.display_name, '— brak opiekuna —') AS salesperson_name,
          u.id AS salesperson_id,
@@ -193,7 +193,7 @@ router.get('/by-product', requireAuth, crmAuth, async (req, res, next) => {
     if (partner_id) { params.push(parseInt(partner_id)); where.push(`s.partner_id = $${params.length}`); }
     where.push(EXCLUDE_TEST);
 
-    const { rows } = await db.query(
+    const { rows } = await queryDwhOrEmpty(req,
       `SELECT s.service_category AS product_type, ${DWH_FIN_SELECT}
        FROM dwh.${pfx}_sales s
        LEFT JOIN dwh.${pfx}_partner dm ON dm.partner_id = s.partner_id
@@ -220,7 +220,7 @@ router.get('/', requireAuth, crmAuth, async (req, res, next) => {
 
     where.push(EXCLUDE_TEST);
     params.push(parseInt(req.query.limit) || 500);
-    const { rows } = await db.query(
+    const { rows } = await queryDwhOrEmpty(req,
       `SELECT
          s.partner_id                         AS dwh_partner_id,
          TO_CHAR(s.sale_date, 'YYYY-MM')      AS period,
@@ -287,7 +287,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
     const [kpiRes, trendRes, byPartnerRes, byProductRes, byRepRes] = await Promise.all([
 
       // KPI zbiorcze
-      db.query(`
+      queryDwhOrEmpty(req, `
         SELECT ${FIN},
           ROUND(100.0 * SUM(s.gross_margin_value_pln) / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS margin_pct,
           ROUND(100.0 * SUM(s.gross_fee_value_pln)    / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS fee_rate_pct,
@@ -297,7 +297,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
       `, base.params),
 
       // Trend miesięczny
-      db.query(`
+      queryDwhOrEmpty(req, `
         SELECT TO_CHAR(s.sale_date, 'YYYY-MM')        AS period,
                SUM(s.gross_sales_value_pln)::numeric(14,2)  AS gross_turnover_pln,
                SUM(s.net_sales_value_pln)::numeric(14,2)    AS net_turnover_pln,
@@ -310,7 +310,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
       `, base.params),
 
       // Per partner — z health score z crm_partner_scores (przeliczone przez /compute)
-      db.query(`
+      queryDwhOrEmpty(req, `
         SELECT COALESCE(p.company, dm.company_name, dm.name, 'Partner ' || s.partner_id::text) AS partner_name,
                p.id AS partner_id,
                s.partner_id AS dwh_partner_id,
@@ -329,7 +329,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
       `, base.params),
 
       // Per kategoria (product_type)
-      db.query(`
+      queryDwhOrEmpty(req, `
         SELECT s.service_category AS product_type, ${FIN}
         FROM dwh.${pfx}_sales s ${JOIN}
         ${base.where}
@@ -339,7 +339,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
 
       // Per handlowiec (tylko manager widzi wszystkich)
       (req.isCrmManager || req.crmGlobalRead)
-        ? db.query(`
+        ? queryDwhOrEmpty(req, `
             SELECT COALESCE(u.display_name,'— brak opiekuna —') AS salesperson_name,
                    u.id AS salesperson_id,
                    COUNT(DISTINCT s.partner_id)::int AS partners_count,
@@ -380,7 +380,7 @@ router.get('/report', requireAuth, crmAuth, loadCrmScope, async (req, res, next)
       prevW.push(EXCLUDE_TEST);
 
       const prevWhere = prevW.length ? 'WHERE ' + prevW.join(' AND ') : '';
-      const prevRes = await db.query(`
+      const prevRes = await queryDwhOrEmpty(req, `
         SELECT ${FIN},
           ROUND(100.0 * SUM(s.gross_margin_value_pln) / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS margin_pct
         FROM dwh.${pfx}_sales s ${JOIN}
@@ -440,14 +440,14 @@ router.get('/analytics', requireAuth, crmAuth, requireCrmManager, loadCrmScope, 
     async function fetchPeriod(cond) {
       const isManager = req.isCrmManager || req.crmGlobalRead;
       const [kpiRes, trendRes, byPartnerRes, byProductRes, byRepRes] = await Promise.all([
-        db.query(`
+        queryDwhOrEmpty(req, `
           SELECT ${FIN},
             ROUND(100.0 * SUM(s.gross_margin_value_pln) / NULLIF(SUM(s.gross_sales_value_pln),0), 2) AS margin_pct,
             COUNT(DISTINCT s.partner_id)::int AS partners_count
           FROM dwh.${pfx}_sales s ${JOIN}
           ${cond.where}
         `, cond.params),
-        db.query(`
+        queryDwhOrEmpty(req, `
           SELECT TO_CHAR(s.sale_date, 'YYYY-MM') AS period,
             SUM(s.gross_sales_value_pln)::numeric(14,2)  AS gross_turnover_pln,
             SUM(s.net_sales_value_pln)::numeric(14,2)    AS net_turnover_pln,
@@ -457,7 +457,7 @@ router.get('/analytics', requireAuth, crmAuth, requireCrmManager, loadCrmScope, 
           ${cond.where}
           GROUP BY TO_CHAR(s.sale_date, 'YYYY-MM') ORDER BY period ASC
         `, cond.params),
-        db.query(`
+        queryDwhOrEmpty(req, `
           SELECT COALESCE(p.company, dm.company_name, dm.name, 'Partner ' || s.partner_id::text) AS partner_name,
             p.id AS partner_id, s.partner_id AS dwh_partner_id, u.display_name AS salesperson_name,
             COALESCE(CASE WHEN dm.partner_group = 'Partner_basic' THEN NULL ELSE dm.partner_group END, g.name) AS group_name,
@@ -469,14 +469,14 @@ router.get('/analytics', requireAuth, crmAuth, requireCrmManager, loadCrmScope, 
                    dm.partner_group, g.name, p.industry
           ORDER BY SUM(s.gross_sales_value_pln) DESC LIMIT 500
         `, cond.params),
-        db.query(`
+        queryDwhOrEmpty(req, `
           SELECT s.service_category AS product_type, ${FIN}
           FROM dwh.${pfx}_sales s ${JOIN}
           ${cond.where}
           GROUP BY s.service_category ORDER BY SUM(s.gross_sales_value_pln) DESC
         `, cond.params),
         isManager
-          ? db.query(`
+          ? queryDwhOrEmpty(req, `
               SELECT COALESCE(u.display_name,'— brak opiekuna —') AS salesperson_name,
                 u.id AS salesperson_id, COUNT(DISTINCT s.partner_id)::int AS partners_count, ${FIN}
               FROM dwh.${pfx}_sales s ${JOIN}

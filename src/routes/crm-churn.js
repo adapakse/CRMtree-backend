@@ -12,6 +12,7 @@ const { crmAuth, requireCrmManager, loadCrmScope, requireFeature } = require('..
 const { sendCrmActivityAssigned }                = require('../utils/email');
 const { resolveLocale }                          = require('../config/locales');
 const { translate }                              = require('../utils/i18n');
+const { queryDwhOrEmpty }                        = require('../utils/dwh');
 
 router.use(requireAuth, crmAuth, requireFeature('dwh_integration'));
 
@@ -307,7 +308,7 @@ router.get('/', loadCrmScope, async (req, res, next) => {
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
     const sql = `SELECT * FROM (${cte}) churn ${where} ORDER BY total_score DESC`;
 
-    const { rows } = await db.query(sql, params);
+    const { rows } = await queryDwhOrEmpty(req, sql, params);
     res.json({ rows, settings: s });
   } catch (err) { next(err); }
 });
@@ -324,7 +325,7 @@ router.post('/compute', requireCrmManager, async (req, res, next) => {
     if (!pfx) return res.json({ computed: 0, message: 'Brak DWH prefix dla tego tenanta' });
 
     const sql  = buildCombinedScoreQuery(pfx, s, hs);
-    const { rows } = await db.query(sql, [req.tenantId]);
+    const { rows } = await queryDwhOrEmpty(req, sql, [req.tenantId]);
     if (!rows.length) return res.json({ computed: 0 });
 
     // Upsert wyników w jednym zapytaniu VALUES(...)
@@ -392,7 +393,7 @@ router.post('/generate', requireCrmManager, async (req, res, next) => {
     const pfx = req.dwhPrefix;
 
     const cte = buildChurnCte(pfx, s);
-    const { rows: allAtRisk } = await db.query(
+    const { rows: allAtRisk } = await queryDwhOrEmpty(req,
       `SELECT churn.*, u.locale AS salesperson_locale, t.default_locale AS tenant_default_locale
        FROM (${cte}) churn
        JOIN tenants t ON t.id = $1
