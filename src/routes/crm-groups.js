@@ -7,6 +7,7 @@ const router = require('express').Router();
 const { body, param } = require('express-validator');
 const db    = require('../config/database');
 const audit = require('../services/auditService');
+const { queryDwhOrEmpty } = require('../utils/dwh');
 const { requireAuth }                  = require('../middleware/auth');
 const { validate, injectAuditContext } = require('../middleware/errorHandler');
 const { crmAuth, requireCrmManager }   = require('../middleware/crm-rbac');
@@ -35,7 +36,7 @@ router.get('/', async (req, res, next) => {
     `, [req.tenantId]);
 
     // Grupy z DWH — distinct partner_group, pomijamy te które już istnieją w CRM
-    const dwhQ = await db.query(`
+    const dwhQ = await queryDwhOrEmpty(req, `
       SELECT NULL::int AS id,
              dm.partner_group AS name,
              NULL AS industry,

@@ -27,6 +27,10 @@ async function migrate() {
       )
     `);
 
+    // Every replica runs migrations on start, as does CI: one at a time, the
+    // others wait and then find everything already applied.
+    await client.query("SELECT pg_advisory_lock(hashtext('crmtree_migrations'))");
+
     const migrationsDir = path.join(__dirname, "migrations");
     const files = fs
       .readdirSync(migrationsDir)
@@ -60,6 +64,7 @@ async function migrate() {
     }
     console.log("\nMigrations complete.");
   } finally {
+    await client.query("SELECT pg_advisory_unlock(hashtext('crmtree_migrations'))").catch(() => {});
     client.release();
     await pool.end();
   }

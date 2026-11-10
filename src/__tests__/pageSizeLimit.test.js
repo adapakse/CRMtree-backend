@@ -6,6 +6,9 @@
 // MAX_PAGE_BYTES (nie odrzucana — odrzucenie strony głównej = utrata całej
 // firmy), zwykła strona przechodzi bez zmian.
 
+// These tests crawl a local HTTP server, which the crawler blocks by default.
+process.env.CRAWLER_ALLOW_PRIVATE_NETWORK = 'true';
+
 const http = require('http');
 const zlib = require('zlib');
 const svc = require('../services/prospectEnrichmentService');
