@@ -15,7 +15,7 @@ function optional(name, defaultValue = "") {
   return process.env[name] || defaultValue;
 }
 
-module.exports = {
+const config = {
   env: optional("NODE_ENV", "development"),
   port: parseInt(optional("PORT", "3000")),
   appUrl: optional("APP_URL", "http://localhost:3000"),
@@ -177,7 +177,8 @@ module.exports = {
 
   rateLimit: {
     windowMs: parseInt(optional("RATE_LIMIT_WINDOW_MS", "900000")),
-    max: parseInt(optional("RATE_LIMIT_MAX", "200")),
+    // Per signed-in user (see middleware/api-rate-limit.js); the dashboard alone polls every minute.
+    max: parseInt(optional("RATE_LIMIT_MAX", "1000")),
   },
 
   upload: {
@@ -248,3 +249,11 @@ module.exports = {
     minVersionIos: optional("MOBILE_MIN_VERSION_IOS", "0.0.0"),
   },
 };
+
+// The fallback secret is public (it is in this file): a production start without
+// JWT_SECRET would let anyone sign valid tokens, so refuse to start instead.
+if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
+  throw new Error("JWT_SECRET must be set in production");
+}
+
+module.exports = config;

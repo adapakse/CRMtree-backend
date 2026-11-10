@@ -145,6 +145,26 @@ if (process.env.NODE_ENV !== 'development') {
 }
 
 // ─── POST /api/auth/refresh — rotacja tokenów ────────────────────────────────
+// The global /api limiter skips /auth/*, so password checks need their own
+// limits (same windows as /mobile/login). Kept in memory per replica.
+const PASSWORD_WINDOW_MS = 15 * 60 * 1000;
+const passwordRateLimitMessage = { error: 'Too many attempts, please try again in a few minutes.', code: 'RATE_LIMITED' };
+const loginLimitByIp = rateLimit({
+  windowMs: PASSWORD_WINDOW_MS, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false,
+  message: passwordRateLimitMessage,
+});
+// Per email as well: an attacker rotating IPs still can't hammer one account.
+const loginLimitByEmail = rateLimit({
+  windowMs: PASSWORD_WINDOW_MS, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false,
+  message: passwordRateLimitMessage,
+  keyGenerator: (req) => `login:${String(req.body?.email ?? '').trim().toLowerCase()}`,
+});
+const changePasswordLimitByUser = rateLimit({
+  windowMs: PASSWORD_WINDOW_MS, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false,
+  message: passwordRateLimitMessage,
+  keyGenerator: (req) => `change-password:${req.user?.id}`,
+});
+
 router.post('/refresh', injectAuditContext, async (req, res, next) => {
   try {
     const { refresh_token } = req.body;
@@ -230,7 +250,7 @@ router.post('/logout', requireAuth, injectAuditContext, async (req, res, next) =
 });
 
 // ─── POST /api/auth/login — email + password ────────────────────────────────
-router.post('/login', injectAuditContext, async (req, res, next) => {
+router.post('/login', loginLimitByIp, loginLimitByEmail, injectAuditContext, async (req, res, next) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -401,7 +421,7 @@ router.post('/mobile/login', mobileLoginLimitByIp, mobileLoginLimitByEmail, inje
 });
 
 // ─── POST /api/auth/change-password ─────────────────────────────────────────
-router.post('/change-password', requireAuth, async (req, res, next) => {
+router.post('/change-password', requireAuth, changePasswordLimitByUser, async (req, res, next) => {
   try {
     const { current_password, new_password } = req.body;
     if (!new_password || new_password.length < 8) {

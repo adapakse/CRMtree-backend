@@ -157,6 +157,33 @@ test('activity lists report how many files each task or note has', async () => {
   expect(partnerActivities.body.find(activity => activity.id === partnerActivity.id).attachment_count).toBe(1);
 });
 
+// The CRM calendar renders an attachment widget per task; without the count
+// each widget fetched its own list, flooding the API on every calendar load.
+test('task lists feeding the calendar report how many files each task has', async () => {
+  const { rows: [leadTask] } = await db.query(`INSERT INTO crm_lead_activities
+    (tenant_id,lead_id,type,title,activity_at,created_by) VALUES ($1,$2,'task','Calendar lead task',now(),$3) RETURNING *`, [tenantId, lead.id, owner.id]);
+  const { rows: [partnerTask] } = await db.query(`INSERT INTO crm_partner_activities
+    (tenant_id,partner_id,type,title,activity_at,created_by) VALUES ($1,$2,'task','Calendar partner task',now(),$3) RETURNING *`, [tenantId, partner.id, owner.id]);
+  await upload('lead-activity', leadTask.id, 'lead-task.pdf');
+  await upload('partner-activity', partnerTask.id, 'partner-task-1.pdf');
+  await upload('partner-activity', partnerTask.id, 'partner-task-2.pdf');
+  const projectTaskCountBefore = (await api('get', '/api/projects/assigned-tasks')).body
+    .find(row => row.id === projectTask.id).attachment_count;
+  await upload('project-task', projectTask.id, 'calendar-project-task.pdf');
+
+  const leadTasks = await api('get', '/api/crm/leads/tasks');
+  expect(leadTasks.status).toBe(200);
+  expect(leadTasks.body.find(row => row.id === leadTask.id).attachment_count).toBe(1);
+
+  const partnerTasks = await api('get', '/api/crm/partners/tasks');
+  expect(partnerTasks.status).toBe(200);
+  expect(partnerTasks.body.find(row => row.id === partnerTask.id).attachment_count).toBe(2);
+
+  const projectTasks = await api('get', '/api/projects/assigned-tasks');
+  expect(projectTasks.status).toBe(200);
+  expect(projectTasks.body.find(row => row.id === projectTask.id).attachment_count).toBe(projectTaskCountBefore + 1);
+});
+
 test('isolates tenants, CRM scope and attachment-to-source associations', async () => {
   const file = await upload('lead-activity', note.id, 'private.pdf');
   for (const user of [outsider, otherAdmin]) {

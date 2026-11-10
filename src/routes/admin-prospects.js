@@ -8,6 +8,9 @@
 // POST   /api/admin/prospects/enrich-batch   — uruchom batch enrichmentu
 // GET    /api/admin/prospects/enrich-status  — postęp batcha
 // POST   /api/admin/prospects/:id/to-lead    — utwórz lead CRM z prospektu
+// PATCH  /api/admin/prospects/:id/score      — ręczna zmiana icp_score
+// PATCH  /api/admin/prospects/:id/contact    — edycja osoby decyzyjnej (imię/telefon/e-mail)
+// PATCH  /api/admin/prospects/:id/key-contacts — zapis listy kontaktów + osoba decyzyjna
 // ─────────────────────────────────────────────────────────────────
 
 const router  = require('express').Router();
@@ -29,6 +32,42 @@ const { normalizeWebsiteUrl, normalizeLinkedinUrl } = require('../utils/urlUtils
 function cut(value, maxLength) {
   const text = value == null ? '' : String(value).trim();
   return text ? text.slice(0, maxLength) : null;
+}
+
+// decision_maker_name/title/email are VARCHAR(200), decision_maker_phone VARCHAR(50) —
+// the decision maker from key_contacts is copied into them, so key contacts share the limits.
+const CONTACT_TEXT_MAX_LENGTH = 200;
+const CONTACT_PHONE_MAX_LENGTH = 50;
+const MAX_KEY_CONTACTS = 20;
+const DECISION_MAKER_ROLE = 'decision_maker';
+
+const DECISION_MAKER_EDITABLE_FIELDS = [
+  { column: 'decision_maker_name',  contactKey: 'name' },
+  { column: 'decision_maker_phone', contactKey: 'phone' },
+  { column: 'decision_maker_email', contactKey: 'email' },
+];
+
+// key_contacts and the flat decision_maker_* columns are one model: exactly one contact
+// may carry the decision_maker role, and that contact is what decision_maker_* holds.
+// Enforced here, not only by the checkbox in the UI (two tabs could send two of them).
+function normalizeKeyContacts(rawContacts) {
+  const contacts = rawContacts
+    .map(c => ({
+      name:  c.name  || null,
+      title: c.title || null,
+      email: c.email || null,
+      phone: c.phone || null,
+      role:  c.role === DECISION_MAKER_ROLE ? DECISION_MAKER_ROLE : null,
+    }))
+    .filter(c => c.name || c.title || c.email || c.phone);
+
+  let decisionMaker = null;
+  for (const contact of contacts) {
+    if (contact.role !== DECISION_MAKER_ROLE) continue;
+    if (decisionMaker) contact.role = null;
+    else decisionMaker = contact;
+  }
+  return { contacts, decisionMaker };
 }
 
 // ── "Prospekty" group check (mirrors the group_profiles/user_group_roles
@@ -688,6 +727,130 @@ router.patch('/:id/status',
         statusParams
       );
       if (!rows.length) return res.status(404).json({ error: 'Prospekt nie znaleziony' });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PATCH /:id/score — ręczne nadpisanie icp_score (bez przeliczania enrichmentu) ─
+
+router.patch('/:id/score',
+  [
+    param('id').isInt({ min: 1 }).toInt(),
+    body('icp_score').isInt({ min: 0, max: 100 }).toInt(),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const params = [req.params.id, req.body.icp_score];
+      const accessClause = singleRecordAccessSQL(params, req.user.id, req.user.is_admin, req.user.tenant_id);
+      const { rows } = await db.query(
+        `UPDATE prospect_companies SET icp_score = $2, updated_at = NOW()
+          WHERE id = $1 ${accessClause}
+          RETURNING id, icp_score`,
+        params
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Prospect not found' });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PATCH /:id/contact — edycja imienia/telefonu/e-maila osoby decyzyjnej ─
+// Zmienia też wpis z rolą decision_maker w key_contacts, żeby oba miejsca
+// pokazywały tę samą osobę.
+
+router.patch('/:id/contact',
+  [
+    param('id').isInt({ min: 1 }).toInt(),
+    body('decision_maker_name').optional({ nullable: true }).isString().trim().isLength({ max: CONTACT_TEXT_MAX_LENGTH }),
+    body('decision_maker_phone').optional({ nullable: true }).isString().trim().isLength({ max: CONTACT_PHONE_MAX_LENGTH }),
+    body('decision_maker_email').optional({ nullable: true }).isString().trim().isLength({ max: CONTACT_TEXT_MAX_LENGTH }),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const params = [req.params.id];
+      const sets = [];
+      const keyContactPatch = {};
+      for (const { column, contactKey } of DECISION_MAKER_EDITABLE_FIELDS) {
+        if (req.body[column] === undefined) continue;
+        const value = req.body[column] || null;
+        params.push(value);
+        sets.push(`${column} = $${params.length}`);
+        keyContactPatch[contactKey] = value;
+      }
+      if (!sets.length) return res.status(400).json({ error: 'No contact fields to update' });
+
+      params.push(JSON.stringify(keyContactPatch), DECISION_MAKER_ROLE);
+      const patchParam = params.length - 1;
+      const roleParam = params.length;
+      const accessClause = singleRecordAccessSQL(params, req.user.id, req.user.is_admin, req.user.tenant_id);
+      const { rows } = await db.query(
+        `UPDATE prospect_companies
+            SET ${sets.join(', ')},
+                key_contacts = CASE
+                  WHEN jsonb_typeof(key_contacts) = 'array' THEN (
+                    SELECT COALESCE(jsonb_agg(
+                             CASE WHEN contact->>'role' = $${roleParam} THEN contact || $${patchParam}::jsonb ELSE contact END
+                             ORDER BY position), '[]'::jsonb)
+                      FROM jsonb_array_elements(key_contacts) WITH ORDINALITY AS item(contact, position))
+                  ELSE key_contacts
+                END,
+                updated_at = NOW()
+          WHERE id = $1 ${accessClause}
+          RETURNING id, decision_maker_name, decision_maker_phone, decision_maker_email, key_contacts`,
+        params
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Prospect not found' });
+      res.json(rows[0]);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PATCH /:id/key-contacts — zapis całej listy kontaktów jednym żądaniem ─
+// Dodawanie/usuwanie/wybór osoby decyzyjnej dzieje się na froncie; tu przychodzi
+// docelowa tablica. Osoba decyzyjna trafia też do decision_maker_* (z niej
+// konwersja na lead bierze główny kontakt).
+
+router.patch('/:id/key-contacts',
+  [
+    param('id').isInt({ min: 1 }).toInt(),
+    body('contacts').isArray({ max: MAX_KEY_CONTACTS }),
+    body('contacts.*').isObject(),
+    body('contacts.*.name').optional({ nullable: true }).isString().trim().isLength({ max: CONTACT_TEXT_MAX_LENGTH }),
+    body('contacts.*.title').optional({ nullable: true }).isString().trim().isLength({ max: CONTACT_TEXT_MAX_LENGTH }),
+    body('contacts.*.email').optional({ nullable: true }).isString().trim().isLength({ max: CONTACT_TEXT_MAX_LENGTH }),
+    body('contacts.*.phone').optional({ nullable: true }).isString().trim().isLength({ max: CONTACT_PHONE_MAX_LENGTH }),
+    body('contacts.*.role').optional({ nullable: true }).isIn([DECISION_MAKER_ROLE]),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { contacts, decisionMaker } = normalizeKeyContacts(req.body.contacts);
+      const params = [
+        req.params.id,
+        JSON.stringify(contacts),
+        decisionMaker?.name  ?? null,
+        decisionMaker?.title ?? null,
+        decisionMaker?.phone ?? null,
+        decisionMaker?.email ?? null,
+      ];
+      const accessClause = singleRecordAccessSQL(params, req.user.id, req.user.is_admin, req.user.tenant_id);
+      const { rows } = await db.query(
+        `UPDATE prospect_companies
+            SET key_contacts         = $2::jsonb,
+                decision_maker_name  = $3,
+                decision_maker_title = $4,
+                decision_maker_phone = $5,
+                decision_maker_email = $6,
+                updated_at           = NOW()
+          WHERE id = $1 ${accessClause}
+          RETURNING id, key_contacts, decision_maker_name, decision_maker_title,
+                    decision_maker_phone, decision_maker_email`,
+        params
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Prospect not found' });
       res.json(rows[0]);
     } catch (err) { next(err); }
   }
@@ -1377,8 +1540,11 @@ router.post('/:id/to-lead',
         try { aiContacts = JSON.parse(aiContacts); } catch { aiContacts = []; }
       }
       if (Array.isArray(aiContacts)) {
+        const hasFlatDecisionMaker = allContacts.length > 0;
         for (const c of aiContacts) {
           if (!c.name && !c.email && !c.phone) continue;
+          // PATCH /:id/key-contacts copies this contact into decision_maker_*, already added above.
+          if (c.role === DECISION_MAKER_ROLE && hasFlatDecisionMaker) continue;
           const dupEmail = c.email && allContacts.some(x => x.email && x.email.toLowerCase() === c.email.toLowerCase());
           const dupName  = c.name  && allContacts.some(x => x.name  && x.name.toLowerCase()  === c.name.toLowerCase());
           if (!dupEmail && !dupName) allContacts.push(c);
@@ -1459,3 +1625,4 @@ module.exports = router;
 // bezpiecznie dopiąć właściwości bez wpływu na app.use('/api/admin/prospects', ...).
 module.exports.findColumnKey = findColumnKey;
 module.exports.deaccentHeader = deaccentHeader;
+module.exports.normalizeKeyContacts = normalizeKeyContacts;

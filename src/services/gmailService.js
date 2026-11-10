@@ -85,21 +85,24 @@ async function getAuthForUser(userId) {
 }
 
 // ── State OAuth2: HMAC-podpisany token z userId + timestamp ──────────────────
-// Format: "<userId>.<timestamp>.<hmac12>" — tylko cyfry, kropki i hex, bezpieczny w URL
+// Format: "<userId>.<timestamp>.<hmac>" — tylko cyfry, kropki i hex, bezpieczny w URL.
+// The callback comes from Google without our session, so this signature is the
+// only thing binding the mailbox to the user — it must use the real JWT secret.
+function signOAuthState(userId, ts) {
+  return crypto
+    .createHmac("sha256", config.jwt.secret)
+    .update(`${userId}:${ts}`)
+    .digest("hex");
+}
+
 function makeOAuthState(userId) {
-  const id  = String(userId);
-  const ts  = Date.now();
-  const sig = crypto
-    .createHmac("sha256", config.jwtSecret || "fallback-secret")
-    .update(`${id}:${ts}`)
-    .digest("hex")
-    .slice(0, 16);
-  return `${id}.${ts}.${sig}`;
+  const id = String(userId);
+  const ts = Date.now();
+  return `${id}.${ts}.${signOAuthState(id, ts)}`;
 }
 
 function parseOAuthState(state) {
   if (!state || typeof state !== "string") return null;
-  // Format: "<userId>.<timestamp>.<hmac16>"
   // userId może być UUID lub liczbą — szukamy ostatnich dwóch kropek
   const lastDot       = state.lastIndexOf(".");
   const secondLastDot = state.lastIndexOf(".", lastDot - 1);
@@ -114,12 +117,9 @@ function parseOAuthState(state) {
   if (!ts || isNaN(ts)) return null;
   // Token ważny 30 minut
   if (Date.now() - ts > 30 * 60 * 1000) return null;
-  const expected = crypto
-    .createHmac("sha256", config.jwtSecret || "fallback-secret")
-    .update(`${userIdStr}:${ts}`)
-    .digest("hex")
-    .slice(0, 16);
-  if (sig !== expected) return null;
+  const expected = Buffer.from(signOAuthState(userIdStr, ts));
+  const given    = Buffer.from(sig);
+  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return null;
   return userIdStr;  // zwraca string (UUID lub liczba jako string)
 }
 

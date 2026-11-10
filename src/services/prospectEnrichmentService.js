@@ -25,6 +25,7 @@ const db         = require('../config/database');
 const logger     = require('../utils/logger');
 const gusRegon   = require('./gusRegonService');
 const { normalizeWebsiteUrl, normalizeLinkedinUrl } = require('../utils/urlUtils');
+const { publicOnlyLookup, assertPublicHost } = require('../utils/publicOnlyLookup');
 const tenantIcpConfigService = require('./tenantIcpConfigService');
 
 const KRS_BASE        = 'https://api-krs.ms.gov.pl/api/krs';
@@ -1115,7 +1116,17 @@ const MAX_PAGE_BYTES = 5 * 1024 * 1024;
 // też przed bombą gzip). `timeout` obejmuje też czytanie treści (przy
 // responseType 'stream' axios pilnuje tylko nagłówków).
 async function getCapped(url, config = {}) {
-  const resp = await axios.get(url, { ...config, responseType: 'stream' });
+  // Only tests that crawl their own local server turn the guard off.
+  const isPrivateNetworkAllowed = process.env.CRAWLER_ALLOW_PRIVATE_NETWORK === 'true';
+  if (!isPrivateNetworkAllowed) assertPublicHost(new URL(url).hostname);
+  const resp = await axios.get(url, {
+    ...config,
+    responseType: 'stream',
+    ...(isPrivateNetworkAllowed ? {} : {
+      lookup: publicOnlyLookup,
+      beforeRedirect: (options) => assertPublicHost(options.hostname),
+    }),
+  });
   const stream = resp.data;
   // Mock axios w testach jednostkowych zwraca gotowy string — bez zmian.
   if (!stream || typeof stream.on !== 'function') return resp;
