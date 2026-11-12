@@ -690,6 +690,7 @@ if (process.env.NODE_ENV === 'development') {
 <html lang="pl">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DEV Login — CRMtree</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -710,6 +711,15 @@ if (process.env.NODE_ENV === 'development') {
     button:hover { background: #2F8F4D; }
     button:disabled { background: #d1d5db; cursor: not-allowed; }
     .err { color: #dc2626; font-size: 12px; margin-top: 10px; display: none; }
+    /* Phones (the mobile app opens this page in the system browser): full width, larger touch targets. */
+    @media (max-width: 480px) {
+      body { align-items: flex-start; padding: 24px 16px; }
+      .card { padding: 28px 22px; border-radius: 18px; }
+      p { font-size: 14px; }
+      label { font-size: 13px; }
+      select, input { padding: 13px 14px; font-size: 16px; border-radius: 12px; }
+      button { padding: 14px; font-size: 16px; border-radius: 12px; }
+    }
   </style>
 </head>
 <body data-relay="${relayState}">
