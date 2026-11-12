@@ -162,6 +162,21 @@ describe("GET /api/auth/google/callback - e-mail matching rules", () => {
     expect(webError(res)).toBe("no_account");
   });
 
+  it("web: a login started on a company address returns there, the shared host stays shared", async () => {
+    const original = config.frontendUrl;
+    config.frontendUrl = "https://app.crmtree.pl";
+    try {
+      const own = await callback({ host: slugs.b + ".crmtree.pl", identity: ok("multi@" + DOMAIN) });
+      expect(own.headers.location.startsWith("https://" + slugs.b + ".crmtree.pl/auth/callback?access_token=")).toBe(true);
+      const denied = await callback({ host: slugs.b + ".crmtree.pl", identity: ok("solo@" + DOMAIN) });
+      expect(denied.headers.location.startsWith("https://" + slugs.b + ".crmtree.pl/login?error=no_account")).toBe(true);
+      const shared = await callback({ identity: ok("solo@" + DOMAIN) });
+      expect(shared.headers.location.startsWith("https://app.crmtree.pl/auth/callback?access_token=")).toBe(true);
+    } finally {
+      config.frontendUrl = original;
+    }
+  });
+
   it("shared host with several companies still logs in (web, deterministic pick)", async () => {
     const res = await callback({ identity: ok("multi@" + DOMAIN) });
     expect(res.headers.location).toContain("/auth/callback?access_token=");

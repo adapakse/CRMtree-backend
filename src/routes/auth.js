@@ -11,7 +11,7 @@ const rateLimit = require('express-rate-limit');
 const { requireAuth, requireAdmin, signAccessToken, signRefreshToken, saveRefreshToken } = require('../middleware/auth');
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
-const { matchTenantSlug, resolveRequestHost, BASE_DOMAINS } = require('../config/tenantHost');
+const { matchTenantSlug, resolveRequestHost, tenantAppUrl, BASE_DOMAINS } = require('../config/tenantHost');
 const mobileSamlState = require('../utils/mobileSamlState');
 const googleLoginState = require('../utils/googleLoginState');
 const googleLogin = require('../services/googleLogin');
@@ -241,7 +241,7 @@ if (process.env.NODE_ENV !== 'development') {
 // e-mail equals the user's e-mail. No auto-registration, no Gmail scopes.
 //   GET /api/auth/google?client=web|mobile&device_id=…&host=…  → redirect to Google
 //   GET /api/auth/google/callback                               → sessions + redirect
-// Web:    {frontendUrl}/auth/callback?access_token=…&refresh_token=…   | /login?error=<code>
+// Web:    {company address or frontendUrl}/auth/callback?access_token=…&refresh_token=…   | /login?error=<code>
 // Mobile: crmtree://auth/callback?access_token=…&refresh_token=…&tenant_slug=…&tenant_name=…
 //         (several companies: ?accounts=<base64url JSON [{tenant_slug,tenant_name,access_token,refresh_token}]>)
 //         | crmtree://auth/callback?error=<code>
@@ -254,9 +254,14 @@ const GOOGLE_COOKIE_PATH = '/api/auth';
 const googleNotConfigured = (res) =>
   res.status(503).json({ error: 'Google sign-in is not configured.', code: 'google_not_configured' });
 
-const googleErrorUrl = (client, code) => (client === 'mobile'
+// A web login that started on a company address (acme.crmtree.pl) returns there, not to
+// the shared app host. Only hosts derived from FRONTEND_URL are used, so this can never
+// redirect outside our own domains.
+const googleWebBase = (host) => tenantAppUrl(matchTenantSlug(host), config.frontendUrl);
+
+const googleErrorUrl = (client, code, host) => (client === 'mobile'
   ? `${MOBILE_SAML_REDIRECT}?error=${code}`
-  : `${config.frontendUrl}/login?error=${code}`);
+  : `${googleWebBase(host)}/login?error=${code}`);
 
 function readCookie(req, name) {
   for (const part of String(req.headers.cookie || '').split(';')) {
@@ -345,7 +350,7 @@ router.get('/google/callback', injectAuditContext, async (req, res) => {
     logger.warn('[GoogleLogin] invalid state or missing nonce cookie');
     return res.redirect(googleErrorUrl('web', 'google_state_invalid'));
   }
-  const fail = (code) => res.redirect(googleErrorUrl(st.client, code));
+  const fail = (code) => res.redirect(googleErrorUrl(st.client, code, st.host));
   try {
     if (req.query.error || typeof req.query.code !== 'string' || !req.query.code) return fail('google_denied');
 
@@ -390,7 +395,7 @@ router.get('/google/callback', injectAuditContext, async (req, res) => {
       userAgent: req.auditContext?.userAgent,
     });
     return res.redirect(
-      `${config.frontendUrl}/auth/callback?access_token=${encodeURIComponent(accessToken)}&refresh_token=${encodeURIComponent(refreshToken)}`,
+      `${googleWebBase(st.host)}/auth/callback?access_token=${encodeURIComponent(accessToken)}&refresh_token=${encodeURIComponent(refreshToken)}`,
     );
   } catch (err) {
     logger.error('[GoogleLogin] callback failed', { err: err.message });
