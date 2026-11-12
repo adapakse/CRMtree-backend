@@ -12,6 +12,7 @@ const { requireAuth, requireAdmin, signAccessToken, signRefreshToken, saveRefres
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
 const { matchTenantSlug, resolveRequestHost } = require('../config/tenantHost');
+const mobileSamlState = require('../utils/mobileSamlState');
 
 // Resolves the active tenant id for a recognized tenant-subdomain request host,
 // or undefined when the host isn't a tenant-subdomain shape (universal app.*
@@ -44,6 +45,53 @@ async function isTenantSuspended(tenantId) {
   return rows[0]?.is_active === false;
 }
 
+// ─── Mobile Google SSO (SAML) ────────────────────────────────────────────────
+// The app opens GET /api/auth/saml?client=mobile&device_id=…, the signed
+// RelayState carries the device id through the IdP, and the callback hands the
+// tokens back through the app's custom scheme. The scheme is hardcoded on
+// purpose: nothing from the request ever decides where we redirect.
+const MOBILE_SAML_REDIRECT = 'crmtree://auth/callback';
+const mobileSamlError = (code) => `${MOBILE_SAML_REDIRECT}?error=${code}`;
+
+// Validates ?client=mobile&device_id and returns the RelayState to send to the
+// IdP. Returns { relayState } | { error } | null (not a mobile request).
+function startMobileSaml(req) {
+  if (req.query?.client !== 'mobile') return null;
+  const deviceId = req.query.device_id;
+  if (!mobileSamlState.isValidDeviceId(deviceId)) return { error: 'device_id jest wymagane (8-128 znaków)' };
+  return { relayState: mobileSamlState.signMobileRelayState(deviceId) };
+}
+
+// Issues the same device-bound mobile session as POST /mobile/login and returns
+// the crmtree:// URL to redirect to (success or error). Shared by the real
+// SAML callback and the dev stub.
+async function completeMobileSaml(req, user, { deviceId }) {
+  try {
+    if (await isTenantDeleted(user.tenant_id)) return mobileSamlError('tenant_deleted');
+    if (await isTenantSuspended(user.tenant_id)) return mobileSamlError('tenant_suspended');
+    if (!MOBILE_ROLES.includes(user.crm_role)) return mobileSamlError('role_not_allowed');
+
+    const accessToken = signAccessToken(user, { client: 'mobile' });
+    const { token: refreshToken, hash } = signRefreshToken(user);
+    await saveRefreshToken(user.id, user.tenant_id, hash, { client: 'mobile', deviceId, deviceName: null });
+    await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+    await audit.log({
+      user:      { id: user.id, email: user.email, display_name: user.display_name, tenant_id: user.tenant_id },
+      action:    'user_login',
+      metadata:  { method: 'saml_google', client: 'mobile' },
+      ipAddress: req.auditContext?.ipAddress,
+      userAgent: req.auditContext?.userAgent,
+    });
+    // Same tenant fields /mobile/login returns, so the app shows the right company.
+    const { rows: [tenant] } = await db.query('SELECT slug, name FROM tenants WHERE id = $1', [user.tenant_id]);
+    return `${MOBILE_SAML_REDIRECT}?access_token=${encodeURIComponent(accessToken)}&refresh_token=${encodeURIComponent(refreshToken)}` +
+      `&tenant_slug=${encodeURIComponent(tenant?.slug || '')}&tenant_name=${encodeURIComponent(tenant?.name || '')}`;
+  } catch (err) {
+    logger.error('[SAML] Błąd logowania mobilnego', { err: err.message });
+    return mobileSamlError('auth_failed');
+  }
+}
+
 // ─── SAML routes — aktywne TYLKO na produkcji (NODE_ENV=production) ──────────
 // Lokalnie i na htcd (NODE_ENV=development) używany jest stub poniżej.
 if (process.env.NODE_ENV !== 'development') {
@@ -64,6 +112,9 @@ if (process.env.NODE_ENV !== 'development') {
       issuer:      config.saml?.issuer,
       certDefined: !!config.saml?.idpCert,
     });
+    const mobile = startMobileSaml(req);
+    if (mobile?.error) return res.status(400).json({ error: mobile.error });
+    if (mobile) req.query = { ...req.query, RelayState: mobile.relayState };
     passport.authenticate('saml', { session: false })(req, res, next);
   });
 
@@ -103,11 +154,34 @@ if (process.env.NODE_ENV !== 'development') {
       });
       next();
     },
-    passport.authenticate('saml', {
+    // Mobile RelayState: forged/expired → error to the app, valid → passport
+    // with a callback so a failure goes to crmtree:// instead of the web.
+    (req, res, next) => {
+      const relay = req.body?.RelayState;
+      if (!mobileSamlState.looksLikeMobileRelayState(relay)) return next();
+      const mobile = mobileSamlState.verifyMobileRelayState(relay);
+      if (!mobile) {
+        logger.warn('[SAML] Nieprawidłowy lub wygasły mobilny RelayState');
+        return res.redirect(mobileSamlError('saml_failed'));
+      }
+      req.mobileSaml = mobile;
+      passport.authenticate('saml', { session: false }, (err, user) => {
+        if (err || !user) {
+          logger.warn('[SAML] Błąd uwierzytelnienia (mobile)', { err: err?.message });
+          return res.redirect(mobileSamlError('saml_failed'));
+        }
+        req.user = user;
+        next();
+      })(req, res, next);
+    },
+    (req, res, next) => (req.mobileSaml ? next() : passport.authenticate('saml', {
       session:         false,
       failureRedirect: `${config.frontendUrl}/login?error=saml_failed`,
-    }),
+    })(req, res, next)),
     async (req, res) => {
+      if (req.mobileSaml) {
+        return res.redirect(await completeMobileSaml(req, req.user, req.mobileSaml));
+      }
       try {
         const user = req.user;
         logger.info('[SAML] Uwierzytelnienie pomyślne', { email: user.email });
@@ -590,6 +664,9 @@ if (process.env.NODE_ENV === 'development') {
 
   // GET /api/auth/saml — dev HTML stub zamiast redirectu do Google
   router.get('/saml', async (req, res) => {
+    const mobile = startMobileSaml(req);
+    if (mobile?.error) return res.status(400).json({ error: mobile.error });
+    const relayState = mobile?.relayState ?? '';
     // Scope the picker to the current tenant subdomain when there is one —
     // otherwise the same email on two tenants shows up as two indistinguishable
     // options, and picking either still only logs into the tenant the host
@@ -635,7 +712,7 @@ if (process.env.NODE_ENV === 'development') {
     .err { color: #dc2626; font-size: 12px; margin-top: 10px; display: none; }
   </style>
 </head>
-<body>
+<body data-relay="${relayState}">
   <div class="card">
     <div class="logo">
       <div class="logo-icon">
@@ -668,9 +745,10 @@ if (process.env.NODE_ENV === 'development') {
       if (!email) { err.style.display = 'block'; err.textContent = 'Wybierz lub wpisz e-mail.'; return; }
       btn.disabled = true; btn.textContent = 'Logowanie…'; err.style.display = 'none';
       try {
-        const r = await fetch('/api/auth/dev-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) });
+        const r = await fetch('/api/auth/dev-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, relay_state: document.body.dataset.relay || undefined }) });
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || 'Błąd logowania');
+        if (d.redirect) { window.location.href = d.redirect; return; }
         window.location.href = '/auth/callback?access_token=' + encodeURIComponent(d.access_token) + '&refresh_token=' + encodeURIComponent(d.refresh_token);
       } catch (e) { err.style.display = 'block'; err.textContent = e.message; btn.disabled = false; btn.textContent = 'Zaloguj →'; }
     });
@@ -713,6 +791,14 @@ if (process.env.NODE_ENV === 'development') {
       if (!rows.length) return res.status(404).json({ error: 'User not found or inactive' });
 
       const user = rows[0];
+
+      // Mobile dev flow: same finish as the real SAML callback.
+      if (mobileSamlState.looksLikeMobileRelayState(req.body.relay_state)) {
+        const mobile = mobileSamlState.verifyMobileRelayState(req.body.relay_state);
+        if (!mobile) return res.json({ redirect: mobileSamlError('saml_failed') });
+        return res.json({ redirect: await completeMobileSaml(req, user, mobile) });
+      }
+
       if (await isTenantDeleted(user.tenant_id)) {
         return res.status(404).json({ error: 'User not found or inactive' });
       }
