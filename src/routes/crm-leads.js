@@ -329,7 +329,8 @@ router.get('/groups', async (req, res, next) => {
 router.get('/sources', async (req, res, next) => {
   try {
     const { rows } = await db.query(
-      `SELECT value FROM app_settings WHERE key = 'crm_lead_sources'`
+      `SELECT value FROM app_settings WHERE key = 'crm_lead_sources' AND tenant_id = $1`,
+      [req.tenantId]
     );
     let sources = [];
     if (rows.length) {
