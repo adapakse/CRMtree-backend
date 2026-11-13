@@ -29,6 +29,22 @@ router.put('/locale',
   }
 );
 
+// PUT /api/profile/theme — light or dark theme of the signed-in user, kept on
+// the account so it follows them to every computer.
+router.put('/theme',
+  [body('theme_mode').isIn(['light', 'dark'])],
+  validate,
+  async (req, res, next) => {
+    try {
+      await db.query(
+        'UPDATE users SET theme_mode = $1 WHERE id = $2 AND tenant_id = $3',
+        [req.body.theme_mode, req.user.id, req.tenantId]
+      );
+      res.json({ theme_mode: req.body.theme_mode });
+    } catch (err) { next(err); }
+  }
+);
+
 // PUT /api/profile/project-deadline-notifications — the user's own switch for
 // the automatic project deadline e-mails (daily overdue summary, end date
 // changed, project became delayed), in every project at once.

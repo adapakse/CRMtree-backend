@@ -69,6 +69,14 @@ test('a user sets and clears their own language', async () => {
   expect((await api('get', '/api/auth/me', employee)).body.locale).toBeNull();
 });
 
+test('a user keeps their light or dark theme on the account', async () => {
+  expect((await api('get', '/api/auth/me', employee)).body.theme_mode).toBeNull();
+  expect((await api('put', '/api/profile/theme', employee).send({ theme_mode: 'dark' })).status).toBe(200);
+  expect((await api('get', '/api/auth/me', employee)).body.theme_mode).toBe('dark');
+  expect((await api('get', '/api/auth/me', admin)).body.theme_mode).toBeNull();
+  expect((await api('put', '/api/profile/theme', employee).send({ theme_mode: 'neon' })).status).toBe(400);
+});
+
 test('only the tenant admin changes the tenant default', async () => {
   expect((await api('put', '/api/admin/settings/default-locale', employee).send({ locale: 'en' })).status).toBe(403);
   expect((await api('put', '/api/admin/settings/default-locale', admin).send({ locale: 'xx' })).status).toBe(400);
