@@ -289,7 +289,7 @@ router.get("/", requireAuth, crmAuth, async (req, res) => {
               (SELECT COUNT(*) FROM whatsapp_messages
                  WHERE partner_id = p.id AND tenant_id = p.tenant_id AND direction = 'incoming' AND is_read = false)::int AS unread_whatsapp_count,
               (SELECT COUNT(*) FROM pbx_call_log c
-                 WHERE c.partner_id = p.id AND c.tenant_id = p.tenant_id AND c.status IN ('missed','not_answered')
+                 WHERE c.partner_id = p.id AND c.tenant_id = p.tenant_id AND c.direction = 'inbound' AND c.status = 'missed'
                    AND NOT EXISTS (
                      SELECT 1 FROM pbx_call_log c2
                      WHERE c2.partner_id = c.partner_id AND c2.tenant_id = c.tenant_id

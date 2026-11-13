@@ -158,7 +158,7 @@ router.get('/',
             (SELECT COUNT(*) FROM whatsapp_messages
                WHERE lead_id = l.id AND tenant_id = l.tenant_id AND direction = 'incoming' AND is_read = false)::int AS unread_whatsapp_count,
             (SELECT COUNT(*) FROM pbx_call_log c
-               WHERE c.lead_id = l.id AND c.tenant_id = l.tenant_id AND c.status IN ('missed','not_answered')
+               WHERE c.lead_id = l.id AND c.tenant_id = l.tenant_id AND c.direction = 'inbound' AND c.status = 'missed'
                  AND NOT EXISTS (
                    SELECT 1 FROM pbx_call_log c2
                    WHERE c2.lead_id = c.lead_id AND c2.tenant_id = c.tenant_id
