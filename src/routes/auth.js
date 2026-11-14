@@ -11,7 +11,10 @@ const rateLimit = require('express-rate-limit');
 const { requireAuth, requireAdmin, signAccessToken, signRefreshToken, saveRefreshToken } = require('../middleware/auth');
 const { injectAuditContext } = require('../middleware/errorHandler');
 const config   = require('../config');
-const { matchTenantSlug, resolveRequestHost } = require('../config/tenantHost');
+const { matchTenantSlug, resolveRequestHost, tenantAppUrl, BASE_DOMAINS } = require('../config/tenantHost');
+const mobileSamlState = require('../utils/mobileSamlState');
+const googleLoginState = require('../utils/googleLoginState');
+const googleLogin = require('../services/googleLogin');
 
 // Resolves the active tenant id for a recognized tenant-subdomain request host,
 // or undefined when the host isn't a tenant-subdomain shape (universal app.*
@@ -19,7 +22,13 @@ const { matchTenantSlug, resolveRequestHost } = require('../config/tenantHost');
 // separate, unresolved problem). Mirrors the guard in middleware/auth.js so
 // the same hostname always means the same tenant at login time and after.
 async function resolveHostTenantId(req) {
-  const hostSlug = matchTenantSlug(resolveRequestHost(req));
+  return resolveTenantIdForHost(resolveRequestHost(req));
+}
+
+// Same, for an explicit host (Google login carries the originating host in its
+// signed state, because the callback itself lands on the shared host).
+async function resolveTenantIdForHost(host) {
+  const hostSlug = matchTenantSlug(host);
   if (!hostSlug) return undefined;
   const { rows } = await db.query(
     'SELECT id FROM tenants WHERE slug = $1 AND is_active = true AND deleted_at IS NULL LIMIT 1',
@@ -44,6 +53,63 @@ async function isTenantSuspended(tenantId) {
   return rows[0]?.is_active === false;
 }
 
+// ─── Mobile Google SSO (SAML) ────────────────────────────────────────────────
+// The app opens GET /api/auth/saml?client=mobile&device_id=…, the signed
+// RelayState carries the device id through the IdP, and the callback hands the
+// tokens back through the app's custom scheme. The scheme is hardcoded on
+// purpose: nothing from the request ever decides where we redirect.
+const MOBILE_ROLES = ['salesperson', 'sales_manager'];
+const MOBILE_SAML_REDIRECT = 'crmtree://auth/callback';
+const mobileSamlError = (code) => `${MOBILE_SAML_REDIRECT}?error=${code}`;
+
+// Validates ?client=mobile&device_id and returns the RelayState to send to the
+// IdP. Returns { relayState } | { error } | null (not a mobile request).
+function startMobileSaml(req) {
+  if (req.query?.client !== 'mobile') return null;
+  const deviceId = req.query.device_id;
+  if (!mobileSamlState.isValidDeviceId(deviceId)) return { error: 'device_id jest wymagane (8-128 znaków)' };
+  return { relayState: mobileSamlState.signMobileRelayState(deviceId) };
+}
+
+// Issues the same device-bound mobile session as POST /mobile/login and returns
+// the crmtree:// URL to redirect to (success or error). Shared by the real
+// SAML callback and the dev stub.
+async function issueMobileSession(req, user, { deviceId, method }) {
+  if (await isTenantDeleted(user.tenant_id)) return { error: 'tenant_deleted' };
+  if (await isTenantSuspended(user.tenant_id)) return { error: 'tenant_suspended' };
+  if (!MOBILE_ROLES.includes(user.crm_role)) return { error: 'role_not_allowed' };
+
+  const accessToken = signAccessToken(user, { client: 'mobile' });
+  const { token: refreshToken, hash } = signRefreshToken(user);
+  await saveRefreshToken(user.id, user.tenant_id, hash, { client: 'mobile', deviceId, deviceName: null });
+  await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+  await audit.log({
+    user:      { id: user.id, email: user.email, display_name: user.display_name, tenant_id: user.tenant_id },
+    action:    'user_login',
+    metadata:  { method, client: 'mobile' },
+    ipAddress: req.auditContext?.ipAddress,
+    userAgent: req.auditContext?.userAgent,
+  });
+  // Same tenant fields /mobile/login returns, so the app shows the right company.
+  const { rows: [tenant] } = await db.query('SELECT slug, name FROM tenants WHERE id = $1', [user.tenant_id]);
+  return { accessToken, refreshToken, tenantSlug: tenant?.slug || '', tenantName: tenant?.name || '' };
+}
+
+const mobileSessionQuery = (s) =>
+  `access_token=${encodeURIComponent(s.accessToken)}&refresh_token=${encodeURIComponent(s.refreshToken)}` +
+  `&tenant_slug=${encodeURIComponent(s.tenantSlug)}&tenant_name=${encodeURIComponent(s.tenantName)}`;
+
+async function completeMobileSaml(req, user, { deviceId }) {
+  try {
+    const s = await issueMobileSession(req, user, { deviceId, method: 'saml_google' });
+    if (s.error) return mobileSamlError(s.error);
+    return `${MOBILE_SAML_REDIRECT}?${mobileSessionQuery(s)}`;
+  } catch (err) {
+    logger.error('[SAML] Błąd logowania mobilnego', { err: err.message });
+    return mobileSamlError('auth_failed');
+  }
+}
+
 // ─── SAML routes — aktywne TYLKO na produkcji (NODE_ENV=production) ──────────
 // Lokalnie i na htcd (NODE_ENV=development) używany jest stub poniżej.
 if (process.env.NODE_ENV !== 'development') {
@@ -64,6 +130,9 @@ if (process.env.NODE_ENV !== 'development') {
       issuer:      config.saml?.issuer,
       certDefined: !!config.saml?.idpCert,
     });
+    const mobile = startMobileSaml(req);
+    if (mobile?.error) return res.status(400).json({ error: mobile.error });
+    if (mobile) req.query = { ...req.query, RelayState: mobile.relayState };
     passport.authenticate('saml', { session: false })(req, res, next);
   });
 
@@ -103,11 +172,34 @@ if (process.env.NODE_ENV !== 'development') {
       });
       next();
     },
-    passport.authenticate('saml', {
+    // Mobile RelayState: forged/expired → error to the app, valid → passport
+    // with a callback so a failure goes to crmtree:// instead of the web.
+    (req, res, next) => {
+      const relay = req.body?.RelayState;
+      if (!mobileSamlState.looksLikeMobileRelayState(relay)) return next();
+      const mobile = mobileSamlState.verifyMobileRelayState(relay);
+      if (!mobile) {
+        logger.warn('[SAML] Nieprawidłowy lub wygasły mobilny RelayState');
+        return res.redirect(mobileSamlError('saml_failed'));
+      }
+      req.mobileSaml = mobile;
+      passport.authenticate('saml', { session: false }, (err, user) => {
+        if (err || !user) {
+          logger.warn('[SAML] Błąd uwierzytelnienia (mobile)', { err: err?.message });
+          return res.redirect(mobileSamlError('saml_failed'));
+        }
+        req.user = user;
+        next();
+      })(req, res, next);
+    },
+    (req, res, next) => (req.mobileSaml ? next() : passport.authenticate('saml', {
       session:         false,
       failureRedirect: `${config.frontendUrl}/login?error=saml_failed`,
-    }),
+    })(req, res, next)),
     async (req, res) => {
+      if (req.mobileSaml) {
+        return res.redirect(await completeMobileSaml(req, req.user, req.mobileSaml));
+      }
       try {
         const user = req.user;
         logger.info('[SAML] Uwierzytelnienie pomyślne', { email: user.email });
@@ -143,6 +235,173 @@ if (process.env.NODE_ENV !== 'development') {
   );
 
 }
+
+// ─── Sign in with Google (OAuth 2.0 / OpenID Connect) ───────────────────────
+// Logs an EXISTING, active CRMtree user in with a Google account whose verified
+// e-mail equals the user's e-mail. No auto-registration, no Gmail scopes.
+//   GET /api/auth/google?client=web|mobile&device_id=…&host=…  → redirect to Google
+//   GET /api/auth/google/callback                               → sessions + redirect
+// Web:    {company address or frontendUrl}/auth/callback?access_token=…&refresh_token=…   | /login?error=<code>
+// Mobile: crmtree://auth/callback?access_token=…&refresh_token=…&tenant_slug=…&tenant_name=…
+//         (several companies: ?accounts=<base64url JSON [{tenant_slug,tenant_name,access_token,refresh_token}]>)
+//         | crmtree://auth/callback?error=<code>
+// Error codes: no_account, account_inactive, tenant_deleted, tenant_suspended,
+// role_not_allowed (mobile), email_not_verified, google_denied, google_state_invalid,
+// google_failed, auth_failed.
+const GOOGLE_COOKIE = 'crmtree_glogin';
+const GOOGLE_COOKIE_PATH = '/api/auth';
+
+const googleNotConfigured = (res) =>
+  res.status(503).json({ error: 'Google sign-in is not configured.', code: 'google_not_configured' });
+
+// A web login that started on a company address (acme.crmtree.pl) returns there, not to
+// the shared app host. Only hosts derived from FRONTEND_URL are used, so this can never
+// redirect outside our own domains.
+const googleWebBase = (host) => tenantAppUrl(matchTenantSlug(host), config.frontendUrl);
+
+const googleErrorUrl = (client, code, host) => (client === 'mobile'
+  ? `${MOBILE_SAML_REDIRECT}?error=${code}`
+  : `${googleWebBase(host)}/login?error=${code}`);
+
+function readCookie(req, name) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return null;
+}
+
+// The flow starts on the originating host (maybe {slug}.crmtree.pl) and ends on
+// the shared host of GOOGLE_LOGIN_REDIRECT_URI, so the cookie is scoped to the
+// base domain when there is one (otherwise it would not come back).
+function googleCookieOptions(req, maxAgeMs) {
+  const host = String(resolveRequestHost(req) || '').toLowerCase().split(':')[0];
+  const base = BASE_DOMAINS.find((d) => host === d || host.endsWith(`.${d}`));
+  return {
+    httpOnly: true, sameSite: 'lax', path: GOOGLE_COOKIE_PATH, maxAge: maxAgeMs,
+    secure: req.secure || req.headers['x-forwarded-proto'] === 'https' || /^https:/i.test(config.google.loginRedirectUri || ''),
+    ...(base ? { domain: base } : {}),
+  };
+}
+
+// Matching rule: Google e-mail -> CRMtree account(s). Returns { accounts } |
+// { error }. hostTenantId: undefined = shared host, null = tenant host whose
+// tenant doesn't exist / is inactive, else that tenant's id.
+async function findGoogleAccounts(email, { hostTenantId, client }) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized || hostTenantId === null) return { error: 'no_account' };
+  const params = [normalized];
+  let tenantFilter = '';
+  if (hostTenantId !== undefined) { tenantFilter = 'AND u.tenant_id = $2'; params.push(hostTenantId); }
+  const { rows } = await db.query(
+    `SELECT u.id, u.email, u.first_name, u.last_name, u.display_name, u.is_admin, u.is_active,
+            u.crm_role, u.tenant_id, u.is_super_admin, u.must_change_password,
+            t.slug AS tenant_slug, t.name AS tenant_name,
+            t.is_active AS tenant_active, (t.deleted_at IS NOT NULL) AS tenant_deleted
+       FROM users u JOIN tenants t ON t.id = u.tenant_id
+      WHERE lower(trim(u.email)) = $1 ${tenantFilter}
+      ORDER BY u.last_login_at DESC NULLS LAST, t.name`,
+    params,
+  );
+  if (!rows.length) return { error: 'no_account' };
+  const usable = rows.filter((u) => u.is_active && u.tenant_active && !u.tenant_deleted);
+  if (!usable.length) {
+    const f = rows[0];
+    if (f.tenant_deleted) return { error: 'tenant_deleted' };
+    if (!f.tenant_active) return { error: 'tenant_suspended' };
+    return { error: 'account_inactive' };
+  }
+  if (client === 'mobile') {
+    const allowed = usable.filter((u) => MOBILE_ROLES.includes(u.crm_role));
+    return allowed.length ? { accounts: allowed } : { error: 'role_not_allowed' };
+  }
+  // Web password login has no company picker either (it takes LIMIT 1 for the
+  // e-mail on the shared host); we pick deterministically: the account used most
+  // recently, then by company name.
+  return { accounts: [usable[0]] };
+}
+
+router.get('/google', injectAuditContext, async (req, res) => {
+  try {
+    if (!googleLogin.isConfigured()) return googleNotConfigured(res);
+    const client = req.query.client === 'mobile' ? 'mobile' : 'web';
+    const deviceId = req.query.device_id;
+    if (client === 'mobile' && !mobileSamlState.isValidDeviceId(deviceId)) {
+      return res.status(400).json({ error: 'device_id is required (8-128 characters)' });
+    }
+    const host = typeof req.query.host === 'string' && req.query.host ? req.query.host : resolveRequestHost(req);
+    const { state, nonce } = googleLoginState.signGoogleState({ client, deviceId, host });
+    res.cookie(GOOGLE_COOKIE, nonce, googleCookieOptions(req, googleLoginState.TTL_MS));
+    res.redirect(googleLogin.buildAuthUrl({ state, nonce }));
+  } catch (err) {
+    logger.error('[GoogleLogin] start failed', { err: err.message });
+    res.status(500).json({ error: 'Google sign-in could not be started.' });
+  }
+});
+
+router.get('/google/callback', injectAuditContext, async (req, res) => {
+  if (!googleLogin.isConfigured()) return googleNotConfigured(res);
+  const st = googleLoginState.verifyGoogleState(req.query.state);
+  const cookieNonce = readCookie(req, GOOGLE_COOKIE);
+  // Clear the one-shot cookie whatever happens next.
+  const { maxAge, ...clearOpts } = googleCookieOptions(req, 0);
+  res.clearCookie(GOOGLE_COOKIE, clearOpts);
+  if (!st || !cookieNonce || cookieNonce !== st.nonce) {
+    logger.warn('[GoogleLogin] invalid state or missing nonce cookie');
+    return res.redirect(googleErrorUrl('web', 'google_state_invalid'));
+  }
+  const fail = (code) => res.redirect(googleErrorUrl(st.client, code, st.host));
+  try {
+    if (req.query.error || typeof req.query.code !== 'string' || !req.query.code) return fail('google_denied');
+
+    let identity;
+    try {
+      identity = await googleLogin.exchangeCodeForIdentity(req.query.code, st.nonce);
+    } catch (err) {
+      logger.warn('[GoogleLogin] code exchange / ID token verification failed', { err: err.message });
+      return fail('google_failed');
+    }
+    if (identity.emailVerified !== true) return fail('email_not_verified');
+
+    const hostTenantId = await resolveTenantIdForHost(st.host);
+    const found = await findGoogleAccounts(identity.email, { hostTenantId, client: st.client });
+    if (found.error) return fail(found.error);
+
+    if (st.client === 'mobile') {
+      const sessions = [];
+      let lastError = null;
+      for (const user of found.accounts) {
+        const s = await issueMobileSession(req, user, { deviceId: st.deviceId, method: 'google_oauth' });
+        if (s.error) lastError = s.error; else sessions.push(s);
+      }
+      if (!sessions.length) return fail(lastError || 'auth_failed');
+      if (sessions.length === 1) return res.redirect(`${MOBILE_SAML_REDIRECT}?${mobileSessionQuery(sessions[0])}`);
+      const accounts = Buffer.from(JSON.stringify(sessions.map((s) => ({
+        tenant_slug: s.tenantSlug, tenant_name: s.tenantName, access_token: s.accessToken, refresh_token: s.refreshToken,
+      })))).toString('base64url');
+      return res.redirect(`${MOBILE_SAML_REDIRECT}?accounts=${accounts}`);
+    }
+
+    const [user] = found.accounts;
+    const accessToken = signAccessToken(user);
+    const { token: refreshToken, hash } = signRefreshToken(user);
+    await saveRefreshToken(user.id, user.tenant_id, hash);
+    await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+    await audit.log({
+      user:      { id: user.id, email: user.email, display_name: user.display_name, tenant_id: user.tenant_id },
+      action:    'user_login',
+      metadata:  { method: 'google_oauth' },
+      ipAddress: req.auditContext?.ipAddress,
+      userAgent: req.auditContext?.userAgent,
+    });
+    return res.redirect(
+      `${googleWebBase(st.host)}/auth/callback?access_token=${encodeURIComponent(accessToken)}&refresh_token=${encodeURIComponent(refreshToken)}`,
+    );
+  } catch (err) {
+    logger.error('[GoogleLogin] callback failed', { err: err.message });
+    return fail('auth_failed');
+  }
+});
 
 // ─── POST /api/auth/refresh — rotacja tokenów ────────────────────────────────
 // The global /api limiter skips /auth/*, so password checks need their own
@@ -321,7 +580,6 @@ router.post('/login', loginLimitByIp, loginLimitByEmail, injectAuditContext, asy
 // against all of them and the response lists every tenant it matched, each
 // with its own device-bound tokens. Tenant names are only revealed after a
 // correct password — never for just an email.
-const MOBILE_ROLES = ['salesperson', 'sales_manager'];
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const mobileLoginRateLimitMessage = { error: 'Zbyt wiele prób logowania. Spróbuj ponownie za kilka minut.', code: 'RATE_LIMITED' };
 const mobileLoginLimitByIp = rateLimit({
@@ -552,7 +810,7 @@ router.get('/me', requireAuth, async (req, res, next) => {
       `SELECT u.id, u.email, u.first_name, u.last_name, u.display_name,
               u.is_admin, u.is_super_admin, u.tenant_id, u.crm_role, u.last_login_at,
               u.must_change_password, u.is_external, u.can_create_projects, u.can_view_ksef_invoices,
-              u.locale, u.project_deadline_notifications_enabled,
+              u.locale, u.theme_mode, u.project_deadline_notifications_enabled,
               (SELECT default_locale FROM tenants WHERE id = u.tenant_id) AS tenant_default_locale,
               json_agg(DISTINCT jsonb_build_object(
                 'group_id',          ugr.group_id,
@@ -590,6 +848,9 @@ if (process.env.NODE_ENV === 'development') {
 
   // GET /api/auth/saml — dev HTML stub zamiast redirectu do Google
   router.get('/saml', async (req, res) => {
+    const mobile = startMobileSaml(req);
+    if (mobile?.error) return res.status(400).json({ error: mobile.error });
+    const relayState = mobile?.relayState ?? '';
     // Scope the picker to the current tenant subdomain when there is one —
     // otherwise the same email on two tenants shows up as two indistinguishable
     // options, and picking either still only logs into the tenant the host
@@ -613,6 +874,7 @@ if (process.env.NODE_ENV === 'development') {
 <html lang="pl">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DEV Login — CRMtree</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -633,9 +895,18 @@ if (process.env.NODE_ENV === 'development') {
     button:hover { background: #2F8F4D; }
     button:disabled { background: #d1d5db; cursor: not-allowed; }
     .err { color: #dc2626; font-size: 12px; margin-top: 10px; display: none; }
+    /* Phones (the mobile app opens this page in the system browser): full width, larger touch targets. */
+    @media (max-width: 480px) {
+      body { align-items: flex-start; padding: 24px 16px; }
+      .card { padding: 28px 22px; border-radius: 18px; }
+      p { font-size: 14px; }
+      label { font-size: 13px; }
+      select, input { padding: 13px 14px; font-size: 16px; border-radius: 12px; }
+      button { padding: 14px; font-size: 16px; border-radius: 12px; }
+    }
   </style>
 </head>
-<body>
+<body data-relay="${relayState}">
   <div class="card">
     <div class="logo">
       <div class="logo-icon">
@@ -668,9 +939,10 @@ if (process.env.NODE_ENV === 'development') {
       if (!email) { err.style.display = 'block'; err.textContent = 'Wybierz lub wpisz e-mail.'; return; }
       btn.disabled = true; btn.textContent = 'Logowanie…'; err.style.display = 'none';
       try {
-        const r = await fetch('/api/auth/dev-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) });
+        const r = await fetch('/api/auth/dev-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, relay_state: document.body.dataset.relay || undefined }) });
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || 'Błąd logowania');
+        if (d.redirect) { window.location.href = d.redirect; return; }
         window.location.href = '/auth/callback?access_token=' + encodeURIComponent(d.access_token) + '&refresh_token=' + encodeURIComponent(d.refresh_token);
       } catch (e) { err.style.display = 'block'; err.textContent = e.message; btn.disabled = false; btn.textContent = 'Zaloguj →'; }
     });
@@ -713,6 +985,14 @@ if (process.env.NODE_ENV === 'development') {
       if (!rows.length) return res.status(404).json({ error: 'User not found or inactive' });
 
       const user = rows[0];
+
+      // Mobile dev flow: same finish as the real SAML callback.
+      if (mobileSamlState.looksLikeMobileRelayState(req.body.relay_state)) {
+        const mobile = mobileSamlState.verifyMobileRelayState(req.body.relay_state);
+        if (!mobile) return res.json({ redirect: mobileSamlError('saml_failed') });
+        return res.json({ redirect: await completeMobileSaml(req, user, mobile) });
+      }
+
       if (await isTenantDeleted(user.tenant_id)) {
         return res.status(404).json({ error: 'User not found or inactive' });
       }

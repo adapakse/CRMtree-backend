@@ -104,6 +104,10 @@ const config = {
     // [B] OAuth2 per-user
     clientId:    optional("GOOGLE_CLIENT_ID"),
     clientSecret: optional("GOOGLE_CLIENT_SECRET"),
+    // "Sign in with Google" (routes/auth.js /google) — own callback URL on the
+    // same OAuth client, e.g. https://app.int.crmtree.pl/api/auth/google/callback.
+    // Unset = the routes answer 503.
+    loginRedirectUri: optional("GOOGLE_LOGIN_REDIRECT_URI"),
     redirectUri:  optional(
       "GOOGLE_REDIRECT_URI",
       "http://localhost:3000/api/crm/gmail/oauth/callback",

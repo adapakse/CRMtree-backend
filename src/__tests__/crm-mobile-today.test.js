@@ -89,9 +89,16 @@ beforeAll(async () => {
      VALUES ($1, 'email', 'Odpowiedź klienta', FALSE, 'new', $2, $3)`,
     [myLead, users.rep.id, tenantId],
   );
+  // My own call that the client didn't pick up is not a missed call from the client.
+  await db.query(
+    `INSERT INTO pbx_call_log (direction, status, caller_number, callee_number, started_at, user_id, lead_id, tenant_id)
+     VALUES ('outbound', 'not_answered', '+48111111111', '+48222222222', '2026-10-05T08:00:00+02:00', $1, $2, $3)`,
+    [users.rep.id, myLead, tenantId],
+  );
 }, 60000);
 
 async function cleanUp() {
+  await db.query(`DELETE FROM pbx_call_log WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM crm_lead_activities WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM crm_leads WHERE tenant_id = $1`, [tenantId]);
   await db.query(`DELETE FROM crm_sales_budgets WHERE tenant_id = $1`, [tenantId]);
@@ -135,6 +142,20 @@ describe("GET /api/crm/mobile/today", () => {
       unread_whatsapp_count: 0,
       missed_call_count: 0,
     }]);
+  });
+
+  test("attention: an inbound missed call counts until someone answers a later call", async () => {
+    const { rows: [missed] } = await db.query(
+      `INSERT INTO pbx_call_log (direction, status, caller_number, callee_number, started_at, user_id, lead_id, tenant_id)
+       VALUES ('inbound', 'missed', '+48222222222', '+48111111111', '2026-10-05T09:00:00+02:00', $1, $2, $3) RETURNING id`,
+      [users.rep.id, users.myLead, tenantId],
+    );
+    try {
+      const res = await getToday(users.rep);
+      expect(res.body.attention[0]).toMatchObject({ lead_id: String(users.myLead), missed_call_count: 1 });
+    } finally {
+      await db.query(`DELETE FROM pbx_call_log WHERE id = $1`, [missed.id]);
+    }
   });
 
   test("a task handed to someone else shows up in their day, not in mine", async () => {
