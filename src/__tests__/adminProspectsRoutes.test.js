@@ -24,7 +24,7 @@ const db = require('../config/database');
 const { signAccessToken } = require('../middleware/auth');
 
 const TEST_TENANT_SLUG = 'zz-prospects-scoring-test';
-const TEST_IMPORT_NIPS = ['9999999901', '9999999902'];
+const TEST_IMPORT_NIPS = ['9999999901', '9999999902', '9999999903', '9999999904'];
 let tenantId, adminToken;
 
 beforeAll(async () => {
@@ -46,6 +46,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await db.query(`DELETE FROM prospect_companies WHERE tenant_id = $1 AND nip = ANY($2)`, [tenantId, TEST_IMPORT_NIPS]);
+  await db.query(`DELETE FROM crm_leads WHERE tenant_id = $1 AND nip = ANY($2)`, [tenantId, TEST_IMPORT_NIPS]);
   // Pool zamykany przez --forceExit; ten plik go nie zamyka.
 });
 
@@ -120,5 +121,28 @@ describe('POST /api/admin/prospects/import — nagłówki z polską diakrytyką 
       [tenantId, TEST_IMPORT_NIPS[1]],
     );
     expect(rows[0].company_size).toBe('srednie');
+  });
+});
+
+describe('POST /api/admin/prospects/import — firmy, które są już w CRM', () => {
+  test('pomija wiersz, którego NIP jest już Leadem tej firmy, i wymienia go w odpowiedzi', async () => {
+    await db.query(`INSERT INTO crm_leads (tenant_id, company, nip) VALUES ($1, 'Testowy Lead w CRM', $2)`, [tenantId, TEST_IMPORT_NIPS[2]]);
+    const csv = [
+      'BAZA,NIP,Nazwa',
+      `zz-test-import,${TEST_IMPORT_NIPS[2]},Testowy Lead w CRM`,
+      `zz-test-import,${TEST_IMPORT_NIPS[3]},Nowa Firma Testowa`,
+    ].join(String.fromCharCode(10));
+
+    const res = await request(app)
+      .post('/api/admin/prospects/import')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('file', Buffer.from(csv, 'utf8'), 'test-in-crm.csv');
+
+    expect(res.status).toBe(200);
+    expect(res.body.added).toBe(1);
+    expect(res.body.skipped_in_crm).toBe(1);
+    expect(res.body.in_crm[0]).toMatchObject({ nip: TEST_IMPORT_NIPS[2], existsAs: 'lead' });
+    const { rows } = await db.query(`SELECT nip FROM prospect_companies WHERE tenant_id = $1 AND nip = ANY($2)`, [tenantId, TEST_IMPORT_NIPS.slice(2)]);
+    expect(rows.map(r => r.nip)).toEqual([TEST_IMPORT_NIPS[3]]);
   });
 });
