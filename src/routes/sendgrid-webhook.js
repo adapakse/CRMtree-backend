@@ -37,7 +37,11 @@ router.post('/:token', async (req, res) => {
   let cfg;
   try {
     tenantId = await sendgrid.findTenantIdByWebhookToken(req.params.token);
-    if (!tenantId) return res.status(404).end();
+    if (!tenantId) {
+      // Rejections are logged: otherwise a wrong URL / key looks as if SendGrid sent nothing
+      logger.warn('[sendgrid-webhook] rejected — unknown webhook token', { tokenPrefix: String(req.params.token || '').slice(0, 6) });
+      return res.status(404).end();
+    }
     cfg = await sendgrid.loadConfig(tenantId);
   } catch (err) {
     logger.error('[sendgrid-webhook] tenant lookup failed', { error: err.message });
@@ -48,42 +52,57 @@ router.post('/:token', async (req, res) => {
   if (cfg.webhookKey) {
     const ok = sendgrid.verifyWebhookSignature(cfg.webhookKey, raw,
       req.get('X-Twilio-Email-Event-Webhook-Signature'), req.get('X-Twilio-Email-Event-Webhook-Timestamp'));
-    if (!ok) return res.status(403).end();
+    if (!ok) {
+      logger.warn('[sendgrid-webhook] rejected — bad signature (is the verification key from this tenant webhook?)', {
+        tenantId, hasSignature: !!req.get('X-Twilio-Email-Event-Webhook-Signature'), bytes: raw.length,
+      });
+      return res.status(403).end();
+    }
   } else {
     // Without the verification key anyone knowing the URL could fake an unsubscribe — needed only for the first setup
     logger.warn('[sendgrid-webhook] unsigned events accepted — the tenant has no webhook verification key yet', { tenantId });
   }
 
   let events;
-  try { events = JSON.parse(raw.toString('utf8')); } catch { return res.status(400).end(); }
-  if (!Array.isArray(events)) return res.status(400).end();
+  try { events = JSON.parse(raw.toString('utf8')); } catch {
+    logger.warn('[sendgrid-webhook] rejected — body is not JSON', { tenantId, bytes: raw.length });
+    return res.status(400).end();
+  }
+  if (!Array.isArray(events)) {
+    logger.warn('[sendgrid-webhook] rejected — body is not an array of events', { tenantId });
+    return res.status(400).end();
+  }
   res.status(200).end();   // SendGrid retries without a 2xx — answer at once, process afterwards
 
   await processEvents(tenantId, events);
 });
 
 async function processEvents(tenantId, events) {
+  const skipped = {};
   for (const e of events) {
     try {
-      await handleEvent(tenantId, e);
+      const reason = await handleEvent(tenantId, e);
+      if (reason) skipped[reason] = (skipped[reason] || 0) + 1;
     } catch (err) {
       logger.error('[sendgrid-webhook] event failed', { tenantId, event: e?.event, error: err.message });
     }
   }
+  const total = Object.values(skipped).reduce((a, b) => a + b, 0);
+  if (total) logger.info('[sendgrid-webhook] events skipped', { tenantId, received: events.length, skipped });
 }
 
 async function handleEvent(tenantId, e) {
   const recipientId = parseInt(e?.recipient_id, 10);
-  if (!recipientId) return;                                     // mail outside CRM campaigns (other systems on the account)
-  if (e.crm && e.crm !== sendgrid.ENV_TAG) return;              // mail from another CRM environment (INT is a copy of PROD)
-  if (String(e.tenant_id || '') !== String(tenantId)) return;   // event of another tenant — never cross tenants
+  if (!recipientId) return 'not_a_campaign_mail';                     // mail outside CRM campaigns (other systems on the account)
+  if (e.crm && e.crm !== sendgrid.ENV_TAG) return 'other_environment'; // mail from another CRM environment (INT is a copy of PROD)
+  if (String(e.tenant_id || '') !== String(tenantId)) return 'other_tenant'; // event of another tenant — never cross tenants
   const { rows } = await db.query(
     `SELECT id, campaign_id, status, partner_id, lead_id, email
        FROM crm_campaign_recipients WHERE id = $1 AND tenant_id = $2`,
     [recipientId, tenantId]);
   const r = rows[0];
   // The recipient must belong to the campaign named in the same mail — otherwise it comes from another database
-  if (!r || String(r.campaign_id) !== String(e.campaign_id)) return;
+  if (!r || String(r.campaign_id) !== String(e.campaign_id)) return 'unknown_recipient';
 
   const at = new Date((parseInt(e.timestamp, 10) || Date.now() / 1000) * 1000);
   const ins = await db.query(`
