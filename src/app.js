@@ -70,6 +70,8 @@ const crmChurnRoutes        = require('./routes/crm-churn');
 const crmDocumentsRoutes    = require('./routes/crm-documents');
 const crmConsentsRoutes     = require('./routes/crm-consents');
 const crmSeoRoutes          = require('./routes/crm-seo');
+const crmEmailCampaignsRoutes = require('./routes/crm-email-campaigns');
+const sendgridWebhookRoutes = require('./routes/sendgrid-webhook');
 
 require('./middleware/auth');
 
@@ -116,6 +118,9 @@ app.use(cors({
 
 // ─── Rate limiter ─────────────────────────────────────────
 app.use('/api/', apiRateLimit);
+
+// ─── SendGrid Event Webhook (e-mail campaigns) — raw body for the signature check, before express.json ──
+app.use('/api/webhooks/sendgrid', express.raw({ type: '*/*', limit: '5mb' }), sendgridWebhookRoutes);
 
 // ─── Request parsing ──────────────────────────────────────
 app.use((req, res, next) => {
@@ -220,6 +225,7 @@ app.use('/api/crm/budgets',      crmBudgetsRoutes);
 app.use('/api/crm/churn',        crmChurnRoutes);
 app.use('/api/crm/documents',    crmDocumentsRoutes);
 app.use('/api/crm/consents',     crmConsentsRoutes);
+app.use('/api/crm/email-campaigns', crmEmailCampaignsRoutes);
 app.use('/api/crm/seo',          crmSeoRoutes);
 app.use('/api/crm/prospects-dashboard', crmProspectsDashboardRoutes);
 

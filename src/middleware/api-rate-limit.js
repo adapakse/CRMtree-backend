@@ -29,7 +29,8 @@ function isExemptFromApiRateLimit(req) {
     config.isDev ||
     req.path.startsWith("/auth/") ||
     req.path === "/signing/webhook" ||
-    req.path === "/crm/whatsapp/webhook"
+    req.path === "/crm/whatsapp/webhook" ||
+    req.path.startsWith("/webhooks/sendgrid/")
   );
 }
 
