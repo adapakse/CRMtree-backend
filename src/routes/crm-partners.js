@@ -12,6 +12,9 @@ const tenantFields = require("../services/tenantFieldService");
 const calendarService = require("../services/calendarService");
 const { autoSavePartnerContacts } = require("../services/gmailProcessor");
 const audit    = require("../services/auditService");
+const onboardingWithdrawal = require("../services/onboardingWithdrawalService");
+const { body } = require("express-validator");
+const { validate } = require("../middleware/errorHandler");
 const config   = require("../config");
 const email    = require("../utils/email");
 const pushService = require("../services/pushService");
@@ -936,6 +939,40 @@ router.delete("/:id", requireAuth, crmAuth, async (req, res) => {
     res.status(500).json({ error: "Błąd serwera" });
   }
 });
+
+// ── POST /:id/withdraw-onboarding — back from onboarding to a funnel stage ──
+// target_stage is validated against the tenant's own lead stages in the service.
+router.post("/:id/withdraw-onboarding",
+  requireAuth, crmAuth,
+  [body("target_stage").isString().trim().notEmpty().withMessage("target_stage is required")],
+  validate,
+  async (req, res, next) => {
+    if (!req.isCrmManager) {
+      return res.status(403).json({ error: "Only a sales manager or an admin can withdraw a partner from onboarding." });
+    }
+    try {
+      const crmId = await resolveCrmPartnerId(req.params.id, pool, req.tenantId, req.dwhPrefix);
+      if (!crmId) return res.status(404).json({ error: "Partner not found" });
+
+      const result = await onboardingWithdrawal.withdrawPartnerFromOnboarding({
+        tenantId: req.tenantId, partnerId: crmId, targetStage: req.body.target_stage,
+      });
+
+      await audit.log({
+        user:        req.user,
+        action:      "crm_partner_onboarding_withdrawn",
+        beforeState: { partner_id: crmId, partner_status: result.partner.status },
+        afterState:  { lead_id: result.leadId, lead_stage: result.stage },
+        metadata:    { partner_id: crmId, lead_id: result.leadId, company: result.partner.company },
+        ipAddress:   req.auditContext?.ipAddress,
+      });
+
+      res.json({ lead_id: result.leadId, stage: result.stage });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AKTYWNOŚCI

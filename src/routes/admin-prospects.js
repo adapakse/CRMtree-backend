@@ -345,6 +345,7 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
 
     let added = 0, skipped = 0;
     const errorDetails = [];
+    const inCrm = [];
 
     for (let i = 0; i < records.length; i++) {
       const row = records[i];
@@ -353,6 +354,22 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
       if (!rawNip) { errorDetails.push(`Wiersz ${i + 2}: pusta wartość NIP`); continue; }
       if (rawNip.length !== 10) {
         errorDetails.push(`Wiersz ${i + 2}: NIP "${rawNip}" ma ${rawNip.length} cyfr (wymagane 10)`);
+        continue;
+      }
+
+      // A firm that is already a Lead or a Partner of this tenant is handled by sales — enriching
+      // it again is pointless, so the row is skipped and listed in the response.
+      const { rows: crmRows } = await db.query(
+        `SELECT 'lead' AS src, id::text AS id, company AS name FROM crm_leads
+           WHERE tenant_id = $2 AND REGEXP_REPLACE(nip, '[^0-9]', '', 'g') = $1
+         UNION ALL
+         SELECT 'partner' AS src, id::text AS id, company AS name FROM crm_partners
+           WHERE tenant_id = $2 AND REGEXP_REPLACE(nip, '[^0-9]', '', 'g') = $1
+         LIMIT 1`,
+        [rawNip, req.user.tenant_id]
+      );
+      if (crmRows.length) {
+        inCrm.push({ row: i + 2, nip: rawNip, existsAs: crmRows[0].src, existingId: crmRows[0].id, existingName: crmRows[0].name });
         continue;
       }
 
@@ -530,6 +547,8 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
       error_details: errorDetails.slice(0, 10),
       linkedin_column_detected: linkedinKey || null,
       facebook_column_detected: facebookKey || null,
+      skipped_in_crm: inCrm.length,
+      in_crm: inCrm.slice(0, 20),
     });
   } catch (err) { next(err); }
 });

@@ -332,7 +332,8 @@ function canOperateForOwner(req, ownerId) {
 // (user_feature_access, migracja 0330). Pozostałe moduły zostają wyłącznie na
 // fladze tenanta — dopisanie tu kolejnej nazwy włącza dla niej drugą bramkę,
 // więc rób to razem z backfillem w migracji, inaczej wszyscy stracą dostęp.
-const USER_MANAGED_FEATURES = new Set(['call_analysis']);
+// 'email_campaigns' is new (migration 0337) — nobody had access before, so no backfill.
+const USER_MANAGED_FEATURES = new Set(['call_analysis', 'email_campaigns']);
 
 /**
  * Middleware factory: blokuje endpoint, jeśli moduł nie jest włączony dla
