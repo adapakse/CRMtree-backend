@@ -46,7 +46,7 @@ jobs:
       - name: Build Docker image
         env:
           DOCKER_BUILDKIT: 0
-        run: docker build -t ${{ env.ACR }}/crmtree-backend:int-${{ github.run_number }} .
+        run: docker build --build-arg BUILD_VERSION=${{ github.run_number }}-${{ github.sha }} -t ${{ env.ACR }}/crmtree-backend:int-${{ github.run_number }} .
 
       - name: Push to ACR
         run: docker push ${{ env.ACR }}/crmtree-backend:int-${{ github.run_number }}

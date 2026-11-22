@@ -216,6 +216,51 @@ describe("GET /api/public/app-config", () => {
     expect(res.status).toBe(200);
     expect(res.body.min_supported_version).toEqual({ android: expect.any(String), ios: expect.any(String) });
   });
+
+  test("tells the app which contract version and build it talks to", async () => {
+    const res = await request(app).get("/api/public/app-config");
+    const { spec } = require("../routes/openapi");
+    expect(res.body.api).toEqual({ version: spec.info.version, build: expect.any(String) });
+  });
+
+  test("lists only features this host is configured for, as booleans", async () => {
+    const res = await request(app).get("/api/public/app-config");
+    expect(Object.keys(res.body.features).sort()).toEqual(["push", "sso_google"]);
+    for (const enabled of Object.values(res.body.features)) expect(typeof enabled).toBe("boolean");
+    const config = require("../config");
+    expect(res.body.features.sso_google).toBe(Boolean(config.saml?.idpCert));
+    expect(res.body.features.push).toBe(Boolean(config.push?.firebaseServiceAccountJson));
+  });
+});
+
+describe("HTTP log of mobile requests", () => {
+  const logger = require("../utils/logger");
+  const loggedLines = async (headers) => {
+    const spy = jest.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      await request(app).get("/api/public/app-config").set(headers);
+      await new Promise((resolve) => setImmediate(resolve));
+      return spy.mock.calls.map(([line]) => String(line));
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
+  test("names the app version and platform that made the request", async () => {
+    const lines = await loggedLines({ "X-App-Version": "1.2.0+7", "X-App-Platform": "android" });
+    expect(lines.some((line) => line.includes("/api/public/app-config") && line.endsWith(" app=1.2.0+7/android"))).toBe(true);
+  });
+
+  test("ignores a header that is not a plain version string", async () => {
+    const lines = await loggedLines({ "X-App-Version": "<script>alert(1)</script>" });
+    expect(lines.some((line) => line.includes("app="))).toBe(false);
+  });
+
+  test("logs web requests as before", async () => {
+    const lines = await loggedLines({});
+    expect(lines.some((line) => line.includes("/api/public/app-config"))).toBe(true);
+    expect(lines.some((line) => line.includes("app="))).toBe(false);
+  });
 });
 
 describe("mobile access token lifetime", () => {

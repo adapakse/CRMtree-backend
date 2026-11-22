@@ -154,8 +154,24 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(compression());
 
 // ─── HTTP logging ─────────────────────────────────────────
+// The mobile app sends its version and platform (X-App-Version, X-App-Platform)
+// so the log tells which builds still call the API before the minimum
+// supported version is raised. Untrusted input: whitelisted characters, cut short.
+const APP_HEADER_SAFE = /^[A-Za-z0-9.+_-]{1,40}$/;
+const safeAppHeader = (req, name) => {
+  const value = req.headers[name];
+  return typeof value === 'string' && APP_HEADER_SAFE.test(value) ? value : undefined;
+};
+morgan.token('mobile-app', (req) => {
+  const version = safeAppHeader(req, 'x-app-version');
+  if (!version) return '';
+  const platform = safeAppHeader(req, 'x-app-platform');
+  return ` app=${version}${platform ? `/${platform}` : ''}`;
+});
+// INT runs with NODE_ENV=development, so the dev format carries the token too.
+morgan.format('dev-mobile', (tokens, req, res) => morgan.dev(tokens, req, res) + tokens['mobile-app'](req, res));
 app.use(morgan(
-  config.isDev ? 'dev' : ':method :url :status :res[content-length] - :response-time ms',
+  config.isDev ? 'dev-mobile' : ':method :url :status :res[content-length] - :response-time ms:mobile-app',
   { stream: { write: msg => logger.info(msg.trim()) } }
 ));
 

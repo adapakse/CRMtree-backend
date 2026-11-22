@@ -44,7 +44,7 @@ paths:
     get:
       tags: [app]
       operationId: getAppConfig
-      summary: Minimum supported app version (read on every start, before login)
+      summary: Minimum supported app version, API version and enabled features (read on every start, before login)
       security: []
       responses:
         '200':
@@ -1765,6 +1765,26 @@ components:
           properties:
             android: { type: string, example: 1.2.0 }
             ios: { type: string, example: 1.2.0 }
+        api:
+          type: object
+          description: What the app is talking to; shown on the profile screen for support
+          required: [version, build]
+          properties:
+            version: { type: string, example: 1.0.0, description: Version of this contract (info.version) }
+            build:
+              type: string
+              example: 144-3f2a9c1
+              description: Deployed backend build (run number and commit); "local" outside CI
+        features:
+          type: object
+          description: |
+            Optional functions this host is configured for. The app hides what is
+            missing instead of calling it. Names are only ever added, never
+            renamed or reused with another meaning; an unknown name is ignored.
+          additionalProperties: { type: boolean }
+          properties:
+            sso_google: { type: boolean, description: Google Workspace SSO (GET /auth/saml?client=mobile) is configured }
+            push: { type: boolean, description: Push notifications are sent (Firebase configured) }
 
     MobileLoginRequest:
       type: object
