@@ -347,6 +347,25 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
     const errorDetails = [];
     const inCrm = [];
 
+    // One lookup for the whole file instead of one per row: a 1000-row import ran
+    // 1000 unindexed REGEXP_REPLACE scans over leads and partners inside the request.
+    const fileNips = [...new Set(records
+      .map(row => String(row[nipKey] || '').replace(/\D/g, ''))
+      .filter(nip => nip.length === 10))];
+    const { rows: crmRows } = await db.query(
+      `SELECT 'lead' AS src, id::text AS id, company AS name, REGEXP_REPLACE(nip, '[^0-9]', '', 'g') AS nip
+         FROM crm_leads
+        WHERE tenant_id = $2 AND REGEXP_REPLACE(nip, '[^0-9]', '', 'g') = ANY($1)
+       UNION ALL
+       SELECT 'partner' AS src, id::text AS id, company AS name, REGEXP_REPLACE(nip, '[^0-9]', '', 'g') AS nip
+         FROM crm_partners
+        WHERE tenant_id = $2 AND REGEXP_REPLACE(nip, '[^0-9]', '', 'g') = ANY($1)`,
+      [fileNips, req.user.tenant_id]
+    );
+    // A lead wins over a partner for the same NIP, as the per-row query did (leads first).
+    const crmRecordByNip = new Map();
+    for (const crmRow of crmRows) if (!crmRecordByNip.has(crmRow.nip)) crmRecordByNip.set(crmRow.nip, crmRow);
+
     for (let i = 0; i < records.length; i++) {
       const row = records[i];
       const rawNip = String(row[nipKey] || '').replace(/\D/g, '');
@@ -359,17 +378,9 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
 
       // A firm that is already a Lead or a Partner of this tenant is handled by sales — enriching
       // it again is pointless, so the row is skipped and listed in the response.
-      const { rows: crmRows } = await db.query(
-        `SELECT 'lead' AS src, id::text AS id, company AS name FROM crm_leads
-           WHERE tenant_id = $2 AND REGEXP_REPLACE(nip, '[^0-9]', '', 'g') = $1
-         UNION ALL
-         SELECT 'partner' AS src, id::text AS id, company AS name FROM crm_partners
-           WHERE tenant_id = $2 AND REGEXP_REPLACE(nip, '[^0-9]', '', 'g') = $1
-         LIMIT 1`,
-        [rawNip, req.user.tenant_id]
-      );
-      if (crmRows.length) {
-        inCrm.push({ row: i + 2, nip: rawNip, existsAs: crmRows[0].src, existingId: crmRows[0].id, existingName: crmRows[0].name });
+      const crmRecord = crmRecordByNip.get(rawNip);
+      if (crmRecord) {
+        inCrm.push({ row: i + 2, nip: rawNip, existsAs: crmRecord.src, existingId: crmRecord.id, existingName: crmRecord.name });
         continue;
       }
 
@@ -432,8 +443,9 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
       const employmentRange = employmentRaw ? employmentRaw.slice(0, 20) : null;
       // Revenue: może być z separatorami tysięcy (spacje lub kropki)
       const revenueRaw = getStr(row, revenueKey);
+      // A range ("5 do 15") keeps its lower bound; gluing the digits gave 515.
       const annualRevenue = revenueRaw
-        ? safeInt(revenueRaw.replace(/[\s.]/g, '').replace(',', '.'))
+        ? safeInt(revenueRaw.replace(/[\s.]/g, '').replace(',', '.').match(/\d+/)?.[0])
         : null;
       const foundingYear   = safeYear(getStr(row, yearKey));
       const companySize    = getStr(row, sizeKey);
@@ -441,8 +453,14 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
       const companyProfile = getStr(row, profileKey);
       const dmName         = getStr(row, dmNameKey);
       const dmTitle        = getStr(row, dmTitleKey);
-      const dmDept         = getStr(row, dmDeptKey);
-      const dmPhone        = getStr(row, phoneKey);
+      // "Komórka" means an organisational unit in some source files and a mobile
+      // number in others (workend files: "48602350630"). A value that is a phone
+      // number goes to the phone field — the decision maker's mobile is worth more
+      // than the company switchboard from "Telefon" — instead of the department.
+      const dmDeptRaw      = getStr(row, dmDeptKey);
+      const isDeptAPhoneNumber = !!dmDeptRaw && /^[\d\s+()./-]{7,}$/.test(dmDeptRaw);
+      const dmDept         = isDeptAPhoneNumber ? null : dmDeptRaw;
+      const dmPhone        = (isDeptAPhoneNumber ? dmDeptRaw : null) || getStr(row, phoneKey);
       const dmEmail        = getStr(row, emailKey);
       const city           = getStr(row, cityKey);
       const voivodeship    = getStr(row, voivodeshipKey);
@@ -467,8 +485,12 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
              regon                = COALESCE(EXCLUDED.regon,         prospect_companies.regon),
              company_name         = COALESCE(EXCLUDED.company_name,  prospect_companies.company_name),
              krs_number           = COALESCE(EXCLUDED.krs_number,    prospect_companies.krs_number),
+             -- An address corrected by hand survives a re-import of the same
+             -- file: the file still carries the wrong address that was fixed.
              website_url          = CASE
-               WHEN EXCLUDED.website_url IS NOT NULL THEN EXCLUDED.website_url
+               WHEN EXCLUDED.website_url IS NOT NULL
+                AND prospect_companies.website_source IS DISTINCT FROM 'manual_correction'
+               THEN EXCLUDED.website_url
                ELSE prospect_companies.website_url
              END,
              -- website_source: tylko gdy import faktycznie NIESIE nowy URL i
@@ -882,6 +904,11 @@ router.post('/:id/re-process',
   validate,
   async (req, res, next) => {
     try {
+      // The update below would be overwritten by the run already in progress,
+      // which finishes on the old address and saves its own result.
+      if (enrichSvc.isCompanyBeingProcessed(req.params.id)) {
+        return res.status(409).json({ error: 'This company is being processed right now. Try again when it finishes.' });
+      }
       const manualUrl      = normalizeWebsiteUrl(
         typeof req.body?.website_url === 'string' ? req.body.website_url : null
       );
@@ -1014,10 +1041,27 @@ router.post('/enrich-batch', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── POST /enrich-stop ──────────────────────────────────────────────
+
+router.post('/enrich-stop', async (req, res, next) => {
+  try {
+    await enrichSvc.requestBatchStop(req.user.tenant_id, req.user.id);
+    res.json({ stopping: true });
+  } catch (err) { next(err); }
+});
+
 // ── GET /enrich-status ─────────────────────────────────────────────
 
-router.get('/enrich-status', (req, res) => {
-  res.json(enrichSvc.getBatchProgress(req.user.tenant_id));
+router.get('/enrich-status', async (req, res, next) => {
+  try {
+    const progress = enrichSvc.getBatchProgress(req.user.tenant_id);
+    // The batch state lives in the replica that runs it. A poll answered by
+    // another replica would otherwise read as "finished".
+    if (!progress.running && await enrichSvc.isBatchRunningOnAnotherReplica(req.user.tenant_id)) {
+      return res.json({ ...progress, running: true, running_on_another_replica: true });
+    }
+    res.json(progress);
+  } catch (err) { next(err); }
 });
 
 // ── GET /scoring-rules — algorytm naliczania icp_score jako dane ────
