@@ -95,7 +95,12 @@ describe('etap 3 — kontrakt w fetchPageForCrawl', () => {
     expect(head).toMatch(/timeout: remaining/);
   });
 
-  test('ścieżka ENOTFOUND (sprzed etapu 3) zostaje nietknięta', () => {
-    expect(SRC).toMatch(/ENOTFOUND on www\. host — tried apex without www instead of retrying/);
+  // Od 23.11 ścieżka ENOTFOUND próbuje drugiego wariantu w OBIE strony (wcześniej
+  // tylko www → apex): domena działająca wyłącznie jako www.firma.pl, zapisana w
+  // imporcie bez www, kończyła jako "Brak WWW".
+  test('ścieżka ENOTFOUND (sprzed etapu 3) nadal istnieje i próbuje drugiego wariantu hosta', () => {
+    expect(SRC).toMatch(/ENOTFOUND — tried the other host variant \(www\/apex\) instead of retrying/);
+    const branch = SRC.slice(SRC.indexOf('if (/ENOTFOUND/.test(err.message)) {'));
+    expect(branch.slice(0, 400)).toMatch(/const swap = swapWwwHost\(currentUrl\);\s+if \(swap\) \{/);
   });
 });

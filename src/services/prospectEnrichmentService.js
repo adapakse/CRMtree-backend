@@ -129,8 +129,11 @@ function normalizeNip(nip) {
 function nipFoundInText(nip, text) {
   const normalizedNip = normalizeNip(nip);
   if (normalizedNip.length !== 10 || !text) return false;
-  const nipPattern = normalizedNip.split('').join('[\\s.-]?');
-  return new RegExp(nipPattern).test(text);
+  // Separatory także z półpauzą/pauzą i ze spacjami wokół ("766 – 000 – 65 – 67").
+  const nipPattern = normalizedNip.split('').join('(?:\\s?[.\\-–—]\\s?|\\s)?');
+  // Not inside a longer run of digits (an account or phone number that happens
+  // to contain the same ten digits).
+  return new RegExp(`(?<!\\d)${nipPattern}(?!\\d)`).test(text);
 }
 
 // KRS/REGON to gołe ciągi cyfr — bez etykiety w pobliżu łatwo o fałszywe
@@ -231,6 +234,11 @@ const GENERIC_NAME_WORDS = new Set([
   'przedsiebiorstwo', 'firma', 'osrodek', 'rozlewnia', 'centrum', 'zaklad', 'zaklady',
   'grupa', 'biuro', 'instytut', 'spolka',
   'badan', 'certyfikacji',
+  // Opis rodzaju placówki, nie marka (23.11, comparme): "Niepubliczny Zakład
+  // Opieki Zdrowotnej Przychodnia Eskulap" dawało token "niepubliczny", którego
+  // na stronie przychodni nie ma — poprawna strona ze zgodnym kodem pocztowym
+  // kończyła jako insufficient_evidence.
+  'niepubliczny', 'publiczny', 'samodzielny', 'opieki', 'zdrowotnej', 'przychodnia', 'spoldzielnia',
   'wod', 'mineralnych',
   // Kolejne opisowe człony po "przedsiębiorstwo" — filtr musi przejść PRZEZ
   // WSZYSTKIE z nich, nie tylko pierwsze słowo, żeby dotrzeć do właściwej
@@ -310,11 +318,52 @@ function firstDistinctiveNameToken(companyName) {
 // Dopasowuje najbardziej charakterystyczne słowo nazwy firmy do title/h1
 // strony — ten sam wzorzec co guessDomainsFromName()/guessFallbackDomains()
 // używają do zgadywania domen.
+//
+// Marka w cudzysłowie ma pierwszeństwo ("… Opieki Zdrowotnej 'czwórka'" →
+// "czworka"): człony przed cudzysłowem to opis działalności, a strona firmy
+// podpisuje się marką. To wciąż tylko sygnał nazwy — do potwierdzenia domeny
+// nadal potrzebny jest drugi, rejestrowy (kod pocztowy/ulica/NIP).
 function nameTokensMatch(companyName, titleText) {
   if (!companyName || !titleText) return false;
+  const title = normalizeName(titleText);
+  const quotedBrand = quotedBrandToken(companyName);
+  if (quotedBrand && title.replace(/[^a-z0-9]/g, '').includes(quotedBrand)) return true;
   const firstWord = firstDistinctiveNameToken(companyName);
   if (!firstWord) return false;
-  return normalizeName(titleText).includes(firstWord);
+  return title.includes(firstWord);
+}
+
+const IMPORTED_DOMAIN_MIN_TEXT_LENGTH = 500;
+const IMPORTED_DOMAIN_MIN_NAME_TOKEN_LENGTH = 5;
+const NOT_A_COMPANY_PAGE_TITLE_RX = /\b(?:[45]\d\d)\b|error|b[łl][aą]d|not found|nothing found|nie znaleziono|w budowie|w przebudowie|under construction|coming soon|wkr[oó]tce|domen/i;
+
+// Adres strony podany w pliku importu, nazwa firmy w tytule/h1 strony, realna
+// treść i brak konfliktu = strona potwierdzona (decyzja Kacpra, 23.11.2026).
+//
+// Do tej pory sama nazwa nie wystarczała (decyzja 20.08: dwa niezależne sygnały)
+// i zasada ta ZOSTAJE dla domen zgadniętych przez resolver — tamte przypadki
+// (Ims R&d → ims.com, Mirol → mirol.com) to cudze strony o tej samej nazwie.
+// Tu drugim sygnałem jest sam import: adres wskazała baza źródłowa, a nie nasze
+// zgadywanie. Pomiar na 928 firmach: 32 takie rekordy kończyły jako "Do
+// weryfikacji" mimo właściwej strony (Fakro, Orlen Paliwa, Reper…), bo strona
+// nie publikuje NIP-u ani adresu.
+//
+// Wywoływane dopiero PO fallbackach, które szukają konfliktu (inny NIP, obcy
+// podmiot) — każdy jawny konflikt ma własny `reason` i tu nie trafia.
+function evaluateImportedDomainNameMatch({ identityCheck, websiteSource, scraped }) {
+  const rejected = { verified: false };
+  if (websiteSource !== 'csv_import') return rejected;
+  if (!identityCheck || identityCheck.verified || identityCheck.reason !== 'insufficient_evidence') return rejected;
+  if (!identityCheck.evidence?.name_hit) return rejected;
+  // A short name ("Its", "Tcs") matches too many unrelated sites to stand alone.
+  const companyName = identityCheck.evidence.company_name || '';
+  const nameToken = quotedBrandToken(companyName) || firstDistinctiveNameToken(companyName) || '';
+  if (nameToken.length < IMPORTED_DOMAIN_MIN_NAME_TOKEN_LENGTH) return rejected;
+  if (!scraped || scraped.deterministicFailure) return rejected;
+  if ((scraped.text || '').trim().length < IMPORTED_DOMAIN_MIN_TEXT_LENGTH) return rejected;
+  const title = `${scraped.identity?.title || ''} ${scraped.identity?.h1 || ''}`;
+  if (NOT_A_COMPANY_PAGE_TITLE_RX.test(title)) return rejected;
+  return { verified: true, reason: 'imported_domain_name_match' };
 }
 
 // Drugi, niezależny od nazwy sygnał tożsamości — TYLKO dane z oficjalnego
@@ -473,7 +522,7 @@ const IDENTITY_PAGE_RANKS = [
   /kontakt|contact/i,
   /o[-_.]?nas|o[-_.]?firmie|o[-_.]?spolce|about/i,
 ];
-const IDENTITY_DEFAULT_PATHS = ['/kontakt', '/o-firmie', '/o-nas', '/polityka-prywatnosci', '/regulamin'];
+const IDENTITY_DEFAULT_PATHS = ['/kontakt', '/o-firmie', '/o-nas', '/polityka-prywatnosci', '/regulamin', '/rodo', '/contact', '/impressum'];
 
 // PEŁNY tekst strony do sprawdzania tożsamości: bez ograniczenia do <main>, bez
 // cięcia do 6000 znaków, z JSON-LD (structured data). To NIE jest tekst dla AI.
@@ -661,8 +710,10 @@ const BRAND_DOWNGRADE_CTX_RX = /partner|klient|dostawc|wykonawc|dystrybutor|spon
 // na realnej implementacji, 21.09).
 const BRAND_IDENTITY_PAGE_RX = new RegExp(`${IDENTITY_PAGE_RANKS[0].source}|${IDENTITY_PAGE_RANKS[1].source}`, 'i');
 const BRAND_ONAS_KONTAKT_PATH_RX = /o[-_.]?nas|o[-_.]?firmie|o[-_.]?spolce|about|kontakt|contact/i;
-const PL_LEGAL_NAME_RX = /([A-ZŁŚŻŹĆŃÓĄĘ][\włśżźćńóąęĄĘŁŃÓŚŹŻ.-]*(?:\s+[A-ZŁŚŻŹĆŃÓĄĘ][\włśżźćńóąęĄĘŁŃÓŚŹŻ.-]*){0,4})\s+(Sp\.\s*z\s*o\.?\s*o\.?|S\.A\.|Sp\.\s*j\.|S\.K\.A\.)/g;
-const FOREIGN_LEGAL_NAME_RX = /([A-ZÄÖÜ][\wÄÖÜäöüß&.-]*(?:\s+[A-ZÄÖÜ][\wÄÖÜäöüß&.-]*){0,4})\s+(SE|AG|GmbH(?:\s*&\s*Co\.?\s*KG)?|Ltd\.?|PLC|LLC|Inc\.?|S\.p\.A\.|B\.V\.|N\.V\.)\b/g;
+// Word length is capped ({0,60}): an unbounded `*` here is quadratic on a long run
+// of word characters without spaces (same class of problem as the e-mail scan).
+const PL_LEGAL_NAME_RX = /([A-ZŁŚŻŹĆŃÓĄĘ][\włśżźćńóąęĄĘŁŃÓŚŹŻ.-]{0,60}(?:\s+[A-ZŁŚŻŹĆŃÓĄĘ][\włśżźćńóąęĄĘŁŃÓŚŹŻ.-]{0,60}){0,4})\s+(Sp\.\s*z\s*o\.?\s*o\.?|S\.A\.|Sp\.\s*j\.|S\.K\.A\.)/g;
+const FOREIGN_LEGAL_NAME_RX = /([A-ZÄÖÜ][\wÄÖÜäöüß&.-]{0,60}(?:\s+[A-ZÄÖÜ][\wÄÖÜäöüß&.-]{0,60}){0,4})\s+(SE|AG|GmbH(?:\s*&\s*Co\.?\s*KG)?|Ltd\.?|PLC|LLC|Inc\.?|S\.p\.A\.|B\.V\.|N\.V\.)\b/g;
 const FOREIGN_REGISTRY_NUMBER_RX = /Companies\s*House|Company\s*(?:Registration|Reg\.?)\s*(?:Number|No\.?)|HRB\s*[0-9]|Handelsregister|I[ČC]O[:\s]*[0-9]{8}|VAT\s*(?:number|no\.?|id)?[:\s]*(?:GB|DE|CZ|SK|NL|FR|IT|ES|CY|IE|LT|RO|HU|AT)[0-9A-Z]{6,}/i;
 const FOREIGN_COUNTRY_NAME_RX = /\b(Cyprus|Cypr(?:u|em|owi)?|Germany|Niemc(?:y|ach|iec|zech)|Deutschland|United Kingdom|UK|Great Britain|United States|USA|France|Francj(?:a|i)|Italy|W[łl]och(?:y|ach)|Spain|Hiszpani(?:a|i)|Netherlands|Holandi(?:a|i)|Czech Republic|Czech(?:y|ach)|Slovakia|S[łl]owacj(?:a|i)|Switzerland|Szwajcari(?:a|i)|Ukraine|Ukrain(?:a|ie)|Lithuania|Litw(?:a|ie)|Ireland|Irlandi(?:a|i)|Belgium|Belgi(?:a|i)|Sweden|Szwecj(?:a|i)|Denmark|Dani(?:a|i)|Norway|Norwegi(?:a|i)|Hungary|W[eę]gr(?:y|ach|zech)|Romania|Rumuni(?:a|i)|China|Chin(?:y|ach)|Austria|Austri(?:a|i)|Portugal|Portugali(?:a|i))\b/;
 const FOREIGN_JSONLD_COUNTRY_RX = /addressCountry"?\s*:\s*"?([A-Za-z]{2,24})"?/gi;
@@ -1015,7 +1066,13 @@ function isDomainTrustedForThisRun(opts) {
 // sprzedaży domeny"/"dzierżawa domeny", żadna z nich nie była wcześniej
 // łapana. Dodane też ogólne "gie[lł]da domen" i "aftermarket" (częste u
 // polskich pośredników sprzedaży domen).
-const DOMAIN_PARKING_HINTS = /domain (?:is )?for sale|this domain is parked|buy this domain|domena (?:jest )?na sprzeda[zż]|kup t[eę] domen[eę]|domena wystawiona na sprzeda[zż]|ofert[ay] sprzeda[zż]y domen|dzier[zż]awa domen|gie[lł]da domen|park(?:owana|ing) domen|sedoparking|dan\.com|godaddy.{0,20}(?:auction|park)|bodis\.com|afternic|aftermarket/i;
+// 23.11: słabe hinty zawężone do nazw hostów — samo "aftermarket" (części
+// zamienne w motoryzacji B2B) i "dan.com" (pasowało do "jordan.com") w kodzie
+// strony dawały fałszywy parking, czyli "Brak WWW" dla działającej firmy.
+// 23.11: "Oferta domeny instalchem.pl" (szablon aftermarket.pl) i "Sprzedam domenę
+// www.expol.pl" nie były łapane — strona-ogłoszenie trafiała do kontroli
+// tożsamości jak zwykła treść i kończyła jako "Do weryfikacji" zamiast "Brak WWW".
+const DOMAIN_PARKING_HINTS = /domain (?:is )?for sale|this domain is parked|buy this domain|domena (?:jest )?na sprzeda[zż]|kup t[eę] domen[eę]|domena wystawiona na sprzeda[zż]|ofert[ay] sprzeda[zż]y domen|oferta domeny\s+[\w-]+\.[a-z]{2,}|sprzedam domen[eę]|dzier[zż]awa domen|gie[lł]da domen|park(?:owana|ing) domen|sedoparking|(?<![\w-])dan\.com|godaddy.{0,20}(?:auction|park)|bodis\.com|afternic\.com|aftermarket\.pl/i;
 
 // Znane hosty giełd/parkingów domen — sprawdzane na FINALNYM (po redirectach)
 // hostname, niezależnie od treści (case: imw.pl → 301 → premium.pl/imw.pl,
@@ -1083,7 +1140,9 @@ function isConfirmedDeadDomain(deterministicFailure) {
   // próba zobaczy dokładnie to samo, tak samo jak przy parkingu.
   if (deterministicFailure.type === 'client_side_redirect_only') return true;
   if (deterministicFailure.type === 'tls_dns') {
-    return !TLS_CERT_ERROR.test(deterministicFailure.reason || '');
+    // EAI_AGAIN is the resolver failing temporarily, not a missing domain.
+    return !TLS_CERT_ERROR.test(deterministicFailure.reason || '')
+      && !/EAI_AGAIN/.test(deterministicFailure.reason || '');
   }
   return false;
 }
@@ -1172,7 +1231,26 @@ async function getCapped(url, config = {}) {
   if (truncated) {
     logger.info('[Prospect] page_truncated — kept first part of oversized page', { url, limitBytes: MAX_PAGE_BYTES });
   }
-  return { ...resp, data: Buffer.concat(chunks).toString('utf8'), truncated };
+  return { ...resp, data: decodePageBody(Buffer.concat(chunks), resp.headers?.['content-type']), truncated };
+}
+
+const CHARSET_DECLARATION_RE = /charset\s*=\s*["']?\s*([\w-]+)/i;
+const CHARSET_SNIFF_BYTES = 2048;
+
+// Older Polish sites are still served as windows-1250 / iso-8859-2. Read as UTF-8
+// they turn "Spółka" into "Sp�ka": the company name and street no longer match
+// in the identity check and the model gets garbage. The charset comes from the
+// Content-Type header, then from the <meta> declaration at the top of the page.
+function decodePageBody(buffer, contentType) {
+  const declared = CHARSET_DECLARATION_RE.exec(contentType || '')?.[1]
+    || CHARSET_DECLARATION_RE.exec(buffer.subarray(0, CHARSET_SNIFF_BYTES).toString('latin1'))?.[1];
+  const charset = (declared || 'utf-8').toLowerCase();
+  if (charset === 'utf-8' || charset === 'utf8') return buffer.toString('utf8');
+  try {
+    return new TextDecoder(charset).decode(buffer);
+  } catch {
+    return buffer.toString('utf8'); // unknown label — keep the previous behaviour
+  }
 }
 
 function sleep(ms) {
@@ -2062,14 +2140,18 @@ async function resolveDomainFallback({ company, krsData, gusData, rejectedUrl })
 // 23.09 dla wszystkich wywołań spoza fallbacku); resolveDomainFallback podaje
 // krótszą wartość, żeby zmieścić kilku kandydatów w swoim budżecie.
 async function verifyUrl(url, { timeoutMs = 6_000 } = {}) {
+  const config = {
+    timeout: timeoutMs, maxRedirects: 4,
+    // Akceptuj 403/406/429 — strona istnieje, ale blokuje boty (WAF/Cloudflare)
+    validateStatus: s => s < 400 || s === 403 || s === 406 || s === 429,
+    headers: { 'User-Agent': UA },
+  };
   for (const method of ['head', 'get']) {
     try {
-      await axios[method](url, {
-        timeout: timeoutMs, maxRedirects: 4,
-        // Akceptuj 403/406/429 — strona istnieje, ale blokuje boty (WAF/Cloudflare)
-        validateStatus: s => s < 400 || s === 403 || s === 406 || s === 429,
-        headers: { 'User-Agent': UA },
-      });
+      // GET through getCapped: size cap and the public-host guard, like every
+      // other page fetch (a guessed domain can answer with anything).
+      if (method === 'get') await getCapped(url, config);
+      else await axios.head(url, config);
       // 404 = nie istnieje (rzucone przez validateStatus); wszystko inne = strona żyje
       return url;
     } catch { /* próbuj dalej */ }
@@ -2438,7 +2520,10 @@ function extractInternalLinks($, baseHostname, baseProtocol = 'https:') {
       } else if (raw.startsWith('/')) {
         full = new URL(`${baseProtocol}//${baseHostname}${raw}`);
       } else {
-        return; // ścieżka względna bez / (rzadkie) — pomijamy
+        // Ścieżka względna ("kontakt.html", "./oferta") — typowa dla starszych
+        // stron; liczona od katalogu głównego hosta. Wcześniej pomijana, przez
+        // co crawler nie docierał do podstrony kontaktowej z NIP-em.
+        full = new URL(raw, `${baseProtocol}//${baseHostname}/`);
       }
     } catch { return; }
 
@@ -2513,6 +2598,10 @@ function scoreLinkRelevance(path, anchor) {
   return score;
 }
 
+// A shop's sitemap can list tens of thousands of URLs; every one of them is scored,
+// audited and written to enrichment_log. Only the top dozen are ever fetched.
+const MAX_SITEMAP_URLS = 2000;
+
 // Pobiera URLe z sitemapy; zwraca { path, fullHref, anchor }
 async function fetchSitemapUrls(effectiveBase, baseHostname) {
   const candidates = [
@@ -2536,6 +2625,7 @@ async function fetchSitemapUrls(effectiveBase, baseHostname) {
           if (/\.(jpg|jpeg|png|gif|svg|pdf|xml|webp)$/i.test(path)) continue;
           const fullHref = `${u.protocol}//${u.hostname}${path}`;
           found.push({ path, fullHref, anchor: '' });
+          if (found.length >= MAX_SITEMAP_URLS) break;
         } catch { /* skip bad URL */ }
       }
       if (found.length > 0) break;
@@ -2612,11 +2702,22 @@ function extractJsonLdText($) {
 // (adresy, miasta, telefony) często siedzą wewnątrz <form>-a strony Kontakt
 // (sekcja z danymi obok pól) albo w <footer> — usuwanie tych tagów w całości
 // razem z widocznym tekstem było zbyt agresywne.
+const OVERLAY_MAX_TEXT_LENGTH = 3000;
+
+// Removes cookie banners / popups, but not a page wrapper that merely carries
+// such a class ("has-cookie-bar", "modal-open" on the main container): removing
+// that one deleted the whole page and the crawl ended as "too_short".
+function removeOverlays($, selector) {
+  $(selector).each((_, el) => {
+    if ($(el).text().length <= OVERLAY_MAX_TEXT_LENGTH) $(el).remove();
+  });
+}
+
 function extractText($) {
   $('script, style, noscript, iframe, nav').remove();
   $('form input, form textarea, form select, form button, form label').remove();
-  $('[class*="cookie"]:not(html):not(body), [class*="Cookie"]:not(html):not(body), [id*="cookie"]:not(html):not(body), [id*="Cookie"]:not(html):not(body)').remove();
-  $('[class*="popup"]:not(html):not(body), [class*="Popup"]:not(html):not(body), [class*="modal"]:not(html):not(body), [class*="Modal"]:not(html):not(body)').remove();
+  removeOverlays($, '[class*="cookie"]:not(html):not(body), [class*="Cookie"]:not(html):not(body), [id*="cookie"]:not(html):not(body), [id*="Cookie"]:not(html):not(body)');
+  removeOverlays($, '[class*="popup"]:not(html):not(body), [class*="Popup"]:not(html):not(body), [class*="modal"]:not(html):not(body), [class*="Modal"]:not(html):not(body)');
   $('[aria-hidden="true"]').remove();
 
   const main = $('main, [role="main"], article, #content, #main, .main-content, .page-content').first();
@@ -2643,7 +2744,9 @@ function extractText($) {
 const PHONE_COUNTRY_PREFIX_RE = /(?:\+48|0048)[\s./-]?(?:\d[\s./-]?){9}/g;
 // Numer poprzedzony etykietą — bez niej ciąg 9 cyfr w tekście to równie dobrze NIP,
 // REGON, numer konta albo data, więc etykieta jest tu jedynym sygnałem.
-const PHONE_LABELLED_RE = /\b(?:tel|telefon|kom|fax|faks)\b\.?\s*:?\s*((?:\+?\d[\s()./-]?){9,15})/gi;
+// `\s*(?::\s*)?` rather than `\s*:?\s*`: two adjacent `\s*` make the match quadratic
+// on a long run of whitespace after the label.
+const PHONE_LABELLED_RE = /\b(?:tel|telefon|kom|fax|faks)\b\.?\s*(?::\s*)?((?:\+?\d[\s()./-]?){9,15})/gi;
 
 // Telefon wpisany jako zwykły tekst (np. w popupie zgody RODO renderowanym przez JS)
 // nie ma linku tel: ani wpisu JSON-LD — bez tego fallbacku ginął, mimo że e-mail
@@ -2665,6 +2768,36 @@ function extractPhonesFromText(text) {
   }
 
   return [...phones];
+}
+
+const EMAIL_LOCAL_PART_MAX = 64;
+const EMAIL_DOMAIN_MAX = 255;
+const EMAIL_LOCAL_PART_TAIL_RE = /[\w.%+-]+$/;
+const EMAIL_DOMAIN_HEAD_RE = /^[\w.-]+\.[a-z]{2,}/i;
+
+// E-mail addresses in plain text, found from each "@" outwards within the length
+// limits of an address. One regex over the whole text (`[\w.%+-]+@…`) is quadratic
+// on a long run of word characters without "@" — page text includes inline scripts
+// (minified code, base64), and an 800 KB page froze the whole backend for minutes,
+// because the scan blocks the event loop.
+function extractEmailsFromText(text) {
+  const emails = new Set();
+  if (!text) return [];
+
+  // Matches do not overlap, as with a global regex: in "a@b.pl@c.pl" the text
+  // "b.pl" belongs to the first address and cannot start a second one.
+  let matchedUpTo = 0;
+  for (let at = text.indexOf('@'); at !== -1; at = text.indexOf('@', at + 1)) {
+    if (at < matchedUpTo) continue;
+    const local = text.slice(Math.max(matchedUpTo, at - EMAIL_LOCAL_PART_MAX), at).match(EMAIL_LOCAL_PART_TAIL_RE);
+    if (!local) continue;
+    const domain = text.slice(at + 1, at + 1 + EMAIL_DOMAIN_MAX).match(EMAIL_DOMAIN_HEAD_RE);
+    if (!domain) continue;
+    emails.add(`${local[0]}@${domain[0]}`.toLowerCase());
+    matchedUpTo = at + 1 + domain[0].length;
+  }
+
+  return [...emails];
 }
 
 // Wyciąga emaile i telefony ze strony: mailto:/tel: linki, Schema.org, regex na tekście
@@ -2701,8 +2834,7 @@ function extractContactsFromHtml(html, $) {
   });
 
   const textForRegex = $('body').text();
-  for (const m of textForRegex.matchAll(/[\w.%+-]+@[\w.-]+\.[a-z]{2,}/gi)) {
-    const e = m[0].toLowerCase();
+  for (const e of extractEmailsFromText(textForRegex)) {
     if (!e.includes('..') && e.length < 100) emails.add(e);
   }
   for (const p of extractPhonesFromText(textForRegex)) phones.add(p);
@@ -3005,11 +3137,13 @@ async function fetchPageForCrawl(url, { maxRetries = 2 } = {}) {
 
       if (/ENOTFOUND/.test(err.message)) {
         const swap = swapWwwHost(currentUrl);
-        if (swap && swap.hostname.startsWith('www.')) {
-          // DNS dla www się nie zmieni w kolejnych sekundach — nie ponawiamy
-          // www, tylko od razu próbujemy apex w pozostałym budżecie.
+        if (swap) {
+          // DNS dla tego hosta się nie zmieni w kolejnych sekundach — nie
+          // ponawiamy go, tylko od razu próbujemy drugi wariant (www ↔ apex) w
+          // pozostałym budżecie. W obie strony: domena działająca wyłącznie jako
+          // www.firma.pl, zapisana w imporcie bez www, kończyła jako "Brak WWW".
           const apexResult = await fetchHostVariant(currentUrl, swap.altUrl, deadline, err.message);
-          logger.warn('[Prospect] ENOTFOUND on www. host — tried apex without www instead of retrying', {
+          logger.warn('[Prospect] ENOTFOUND — tried the other host variant (www/apex) instead of retrying', {
             url: currentUrl, originalError: err.message, finalUrl: apexResult.finalUrl,
             status: apexResult.status, apexError: apexResult.error || null,
           });
@@ -3802,14 +3936,20 @@ function dedupeRepeatedFragments(sections) {
 function buildLinkAudit(state, outcomes) {
   const { allLinks, level2Links, level1SelectedPaths, level2SelectedPaths, fetchedPages, diagnostics } = state;
   const fetchedByPath = new Map(fetchedPages.map(p => [p.path, p]));
+  // Lookups by path, not scans: with a few thousand links the scans were quadratic
+  // and ran synchronously on the request thread.
+  const diagnosticByPath = new Map();
+  for (const d of diagnostics) if (!diagnosticByPath.has(d.path)) diagnosticByPath.set(d.path, d);
+  const auditedPaths = new Set();
   const audit = [];
 
   for (const [path, link] of [...allLinks, ...level2Links]) {
-    if (audit.some(a => a.path === path)) continue; // level2Links nie duplikuje allLinks, ale na wszelki wypadek
+    if (auditedPaths.has(path)) continue; // level2Links nie duplikuje allLinks, ale na wszelki wypadek
+    auditedPaths.add(path);
     const selectedLevel1 = level1SelectedPaths.has(path);
     const selectedLevel2 = level2SelectedPaths.has(path);
     const fetchedPage = fetchedByPath.get(path);
-    const diag = diagnostics.find(d => d.path === path);
+    const diag = diagnosticByPath.get(path);
     const outcome = outcomes.get(path);
 
     let stage, reason, included_chars = 0, extracted_length = null, category = fetchedPage?.category ?? null;
@@ -4520,6 +4660,22 @@ async function enrichOne(prospectId, opts = {}) {
         }
       }
 
+      // Adres podany w imporcie + nazwa firmy w tytule strony, po tym jak oba
+      // fallbacki wyżej NIE znalazły konfliktu (inny NIP, obcy podmiot) — patrz
+      // evaluateImportedDomainNameMatch.
+      if (!trustedByHuman && !identityCheck.verified) {
+        const importedDomainMatch = evaluateImportedDomainNameMatch({
+          identityCheck, websiteSource, scraped: fastScraped,
+        });
+        if (importedDomainMatch.verified) {
+          logger.info('[Prospect] Imported domain accepted on company name match', { prospectId, websiteUrl });
+          identityCheck = {
+            verified: true, reason: importedDomainMatch.reason, evidence: identityCheck.evidence,
+            via_fallback: true, via_imported_domain_name_match: true,
+          };
+        }
+      }
+
       if (fastScraped.deterministicFailure) {
         // Błąd deterministyczny (TLS/DNS, potwierdzony parking domeny, zły
         // URL) — pełny crawl na TEJ domenie zobaczyłby dokładnie to samo,
@@ -5078,11 +5234,26 @@ const BATCH_CONCURRENCY = 5;
 // podwójnym przetwarzaniem tego samego rekordu — id są globalnie unikalne.
 const tenantBatches = new Map();
 
+function newBatchProgress(total, running) {
+  return { total, done: 0, errors: 0, needs_review: 0, no_website: 0, running, stopped: false };
+}
+
+// `done` counts every finished company, whatever the outcome — it drives the
+// "x/total" progress. `errors` is only a real processing failure: needs_review
+// and no_website are normal results, and counting them as errors made a healthy
+// batch look half-broken (22 "errors" out of 40 with no failed company).
+function recordBatchOutcome(progress, status) {
+  progress.done++;
+  if (status === 'needs_review') progress.needs_review++;
+  else if (status === 'no_website') progress.no_website++;
+  else if (status !== 'done') progress.errors++;
+}
+
 function getTenantBatchState(tenantId) {
   if (!tenantBatches.has(tenantId)) {
     tenantBatches.set(tenantId, {
       running: false,
-      progress: { total: 0, done: 0, errors: 0, running: false },
+      progress: newBatchProgress(0, false),
       ownProcessing: new Set(),
     });
   }
@@ -5106,27 +5277,58 @@ async function runBatch(tenantId, { onlyPending = true } = {}) {
 // z wyboru użytkownika (np. firmy zaznaczone w wynikach "Znajdź konkurencję"),
 // a nie z całego backlogu tenanta — runBatch() zaciągnąłby wszystkie rekordy
 // pending/error, więc dodanie jednego konkurenta odpalało enrichment całej bazy.
-async function runBatchForIds(tenantId, ids) {
+//
+// `enrichCompany` and `companyTimeLimitMs` are overridden only by tests, which
+// drive the queue, stop and locking logic without crawling real websites.
+async function runBatchForIds(tenantId, ids, { enrichCompany = enrichOne, companyTimeLimitMs = COMPANY_TIME_LIMIT_MS } = {}) {
   const state = getTenantBatchState(tenantId);
   if (state.running) return { alreadyRunning: true };
   state.running = true;
 
+  // One batch per tenant across replicas: without this a second replica started
+  // its own batch over the same pending companies (double AI cost, racing writes).
+  // A session-level advisory lock belongs to its connection, so the same client
+  // takes and releases it, and holds it for the whole run.
+  let lockClient;
   try {
-    state.progress = { total: ids.length, done: 0, errors: 0, running: true };
+    lockClient = await db.getClient();
+  } catch (err) {
+    state.running = false;
+    throw err;
+  }
+  let isLockHeld = false;
+
+  try {
+    const { rows: [lock] } = await lockClient.query(
+      'SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS is_acquired', [batchLockKey(tenantId)]
+    );
+    isLockHeld = lock.is_acquired;
+    if (!isLockHeld) return { alreadyRunning: true };
+
+    state.progress = newBatchProgress(ids.length, true);
+    // Only a request made after this batch started stops it: a leftover one from
+    // an earlier batch is ignored, and nothing is deleted here — another replica
+    // may be running this tenant's batch and still needs to see its request.
+    const batchStartedAt = await currentDatabaseTime();
 
     // Pula BATCH_CONCURRENCY równoległych workerów ciągnących z kolejki
     let idx = 0;
     const worker = async () => {
-      while (idx < ids.length) {
+      while (idx < ids.length && !state.progress.stopped) {
+        // Taken before the await below — two workers resuming from the same
+        // check would otherwise both read past the end of the list.
         const id = ids[idx++];
+        if (await isBatchStopRequested(tenantId, batchStartedAt)) {
+          state.progress.stopped = true;
+          return;
+        }
         state.ownProcessing.add(id);
         try {
-          const result = await enrichOne(id);
-          if (result?.status === 'done') state.progress.done++;
-          else state.progress.errors++;
+          const result = await withCompanyTimeLimit(enrichCompany(id), companyTimeLimitMs);
+          recordBatchOutcome(state.progress, result?.status);
         } catch (err) {
           logger.warn('[Prospect] enrichOne threw in batch', { id, error: err.message });
-          state.progress.errors++;
+          recordBatchOutcome(state.progress, 'error');
           try {
             await db.query(
               `UPDATE prospect_companies SET enrichment_status='error', enrichment_error=$2 WHERE id=$1 AND tenant_id=$3`,
@@ -5145,13 +5347,90 @@ async function runBatchForIds(tenantId, ids) {
   } finally {
     state.running = false;
     state.progress.running = false;
+    try {
+      if (isLockHeld) await lockClient.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [batchLockKey(tenantId)]);
+    } finally {
+      lockClient.release();
+    }
   }
 
   return state.progress;
 }
 
+function batchLockKey(tenantId) {
+  return `prospect-enrichment-batch:${tenantId}`;
+}
+
+// True when another replica holds this tenant's batch lock. Lets the status
+// endpoint say "running" when the poll lands on a replica that is not the one
+// doing the work, instead of reporting a finished batch.
+async function isBatchRunningOnAnotherReplica(tenantId) {
+  if (getTenantBatchState(tenantId).running) return false;
+  const client = await db.getClient();
+  try {
+    const { rows: [lock] } = await client.query(
+      'SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS is_acquired', [batchLockKey(tenantId)]
+    );
+    if (!lock.is_acquired) return true;
+    await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [batchLockKey(tenantId)]);
+    return false;
+  } finally {
+    client.release();
+  }
+}
+
+const COMPANY_TIME_LIMIT_MS = 5 * 60 * 1000;
+
+// A single company must not hold a batch worker forever (a site that answers
+// slowly on every subpage, a request that never settles). After the limit the
+// worker moves on and the company is recorded as an error, so the next run
+// retries it.
+function withCompanyTimeLimit(enrichment, limitMs) {
+  // The abandoned run keeps going in the background; a late failure there has
+  // nobody waiting for it and must not surface as an unhandled rejection.
+  const run = Promise.resolve(enrichment);
+  run.catch(() => {});
+  let timer;
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Enrichment exceeded the ${Math.round(limitMs / 1000)}s limit for one company`)),
+      limitMs
+    );
+  });
+  return Promise.race([run, limit]).finally(() => clearTimeout(timer));
+}
+
+async function currentDatabaseTime() {
+  const { rows } = await db.query('SELECT NOW() AS now');
+  return rows[0].now;
+}
+
+// Stops the tenant's batch after the companies already being processed finish;
+// the rest stay `pending` and the next "Run enrichment" picks them up. The
+// request goes through the database because the batch may run on another replica.
+async function requestBatchStop(tenantId, userId) {
+  await db.query(
+    `INSERT INTO prospect_enrichment_stop_requests (tenant_id, requested_by)
+     VALUES ($1, $2)
+     ON CONFLICT (tenant_id) DO UPDATE SET requested_by = EXCLUDED.requested_by, requested_at = NOW()`,
+    [tenantId, userId || null]
+  );
+}
+
+async function isBatchStopRequested(tenantId, batchStartedAt) {
+  const { rows } = await db.query(
+    'SELECT 1 FROM prospect_enrichment_stop_requests WHERE tenant_id = $1 AND requested_at >= $2',
+    [tenantId, batchStartedAt]
+  );
+  return rows.length > 0;
+}
+
 // Wzbogaca jedną firmę w tle — może działać równolegle (max BATCH_CONCURRENCY jednocześnie)
 // opts.processLinkedin = true → scrapuj LinkedIn (tylko dla ręcznego re-process, nigdy w batchu)
+function isCompanyBeingProcessed(prospectId) {
+  return currentlyProcessing.has(prospectId);
+}
+
 async function reEnrichOne(tenantId, prospectId, opts = {}) {
   if (currentlyProcessing.has(prospectId)) return; // już w toku
 
@@ -5160,7 +5439,7 @@ async function reEnrichOne(tenantId, prospectId, opts = {}) {
 
   if (!state.running) {
     if (!state.progress.running) {
-      state.progress = { total: 1, done: 0, errors: 0, running: true };
+      state.progress = newBatchProgress(1, true);
     } else {
       state.progress.total++;
     }
@@ -5170,8 +5449,7 @@ async function reEnrichOne(tenantId, prospectId, opts = {}) {
     .then(result => {
       state.ownProcessing.delete(prospectId);
       if (!state.running) {
-        if (result?.status === 'done') state.progress.done++;
-        else state.progress.errors++;
+        recordBatchOutcome(state.progress, result?.status);
         if (state.ownProcessing.size === 0) state.progress.running = false;
       }
     })
@@ -5179,7 +5457,7 @@ async function reEnrichOne(tenantId, prospectId, opts = {}) {
       state.ownProcessing.delete(prospectId);
       logger.warn('[Prospect] reEnrichOne failed', { id: prospectId, error: err.message });
       if (!state.running) {
-        state.progress.errors++;
+        recordBatchOutcome(state.progress, 'error');
         if (state.ownProcessing.size === 0) state.progress.running = false;
       }
     });
@@ -5195,11 +5473,12 @@ function getBatchProgress(tenantId) {
 }
 
 module.exports = {
-  enrichOne, reEnrichOne, runBatch, runBatchForIds, getBatchProgress, buildPromptText,
+  enrichOne, reEnrichOne, runBatch, runBatchForIds, getBatchProgress, requestBatchStop,
+  isBatchRunningOnAnotherReplica, isCompanyBeingProcessed, buildPromptText,
   // Eksport dodatkowy na potrzeby menuAuditTool.js — diagnostyczne narzędzie
   // audytu menu nawigacyjnego, reużywa scrapingu zamiast duplikować go.
   fetchKRS, findWebsiteUrl, scrapeWebsite, normalizeName, fetchPage, extractText, extractInternalLinks, scoreLinkRelevance,
-  extractContactsFromHtml, extractPhonesFromText,
+  extractContactsFromHtml, extractPhonesFromText, extractEmailsFromText,
   checkDomainIdentity, isDomainParkingPage, isDomainTrustedForThisRun,
   matchesIcpBlacklist, getIcpScoringRules, calcIcpScore, buildSignalReasoningMap,
   // Eksport na potrzeby ręcznego/testowego wywołania fallbacku drugiej domeny
@@ -5236,7 +5515,7 @@ module.exports = {
   evaluateIdentityFallback, runIdentityFallback,
   // Eksport na potrzeby domknięcia pokrycia testami (20.09, review przed
   // commitem) — obie funkcje czyste, testowalne bez sieci/AI.
-  isBotChallengePage, buildLinkAudit,
+  isBotChallengePage, buildLinkAudit, decodePageBody, nameTokensMatch, evaluateImportedDomainNameMatch,
   // Level 2 hardened HTTP fallback (21.09) — qualifiesForLevel2 testowalne bez
   // sieci; fetchPageHardened/fetchPageResilient testowane przez mock axios.
   qualifiesForLevel2, fetchPageHardened, fetchPageResilient,
