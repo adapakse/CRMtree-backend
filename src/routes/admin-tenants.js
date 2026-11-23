@@ -36,6 +36,7 @@ const { EMAIL_PROVIDER_KEYS } = require('../config/email-providers');
 const { getMissingRequiredFields } = require('../config/emailProviderRequiredFields');
 const { clearTrainingModeCache } = require('../utils/trainingMode');
 const { isSlugAllowed } = require('../config/tenantHost');
+const { ensureTenantDwhTables } = require('../utils/dwh');
 const whatsappService = require('../services/whatsappService');
 const tenantIcpConfigService = require('../services/tenantIcpConfigService');
 const leadStageService = require('../services/leadStageService');
@@ -134,6 +135,8 @@ router.post('/',
         [name, slug, email_domain || null, dwh_schema_prefix || null, goldId || req.tenantId || null]
       );
       const tenant = rows[0];
+
+      await ensureTenantDwhTables(client, tenant.dwh_schema_prefix);
 
       // ── Feature flags: copy from gold (or all-off if gold missing) ──
       if (goldId) {
@@ -305,6 +308,8 @@ router.patch('/:id',
         vals
       );
       if (!rows.length) return res.status(404).json({ error: 'Tenant not found' });
+
+      if ('dwh_schema_prefix' in req.body) await ensureTenantDwhTables(db, rows[0].dwh_schema_prefix);
 
       logger.info('Super admin updated tenant', { tenantId: req.params.id, by: req.user.email });
       res.json(rows[0]);
