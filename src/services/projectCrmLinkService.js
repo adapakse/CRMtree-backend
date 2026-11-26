@@ -81,7 +81,7 @@ async function moveLeadProjectsToPartner({ tenantId, leadId, partnerId }) {
 
 // `deadlinePlaceholders` — see projectDeadlineService.taskDeadlineColumns.
 const taskSummaryColumns = (deadlinePlaceholders) => `
-  t.id, t.task_number, t.name, t.start_date, t.end_date, t.parent_task_id,
+  t.id, t.task_number, t.name, t.start_date, t.end_date, to_char(t.end_time, 'HH24:MI') AS end_time, t.parent_task_id,
   ${projectDeadlineService.taskDeadlineColumns(deadlinePlaceholders)},
   s.id AS status_id, s.name AS status_name, s.color AS status_color, s.category AS status_category,
   pr.name AS priority_name, pr.color AS priority_color,

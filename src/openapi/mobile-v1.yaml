@@ -997,6 +997,25 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
 
+  /projects/unread-messages:
+    get:
+      tags: [projects]
+      operationId: getUnreadProjectMessages
+      summary: The user's unread chat messages — the total and per project and thread
+      description: |
+        Counts messages written by others, after the user's read marker of the
+        thread, in projects the user is a member of and in threads the user
+        may open. `total` is the number for the menu and for the app icon —
+        the push about a new message carries the same number as the icon badge.
+      responses:
+        '200':
+          description: The unread messages
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectUnreadMessages' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
   /projects/assigned-tasks:
     get:
       tags: [projects]
@@ -1265,6 +1284,30 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
 
+  /projects/{projectId}/messages/read:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+    put:
+      tags: [projects]
+      operationId: markProjectMessagesRead
+      summary: Tell the server the user has read the general chat of the project
+      description: |
+        Moves the user's read marker of the thread forward — to
+        `last_message_id` (the newest message the app has shown) or, without
+        it, to now. The marker never moves back. Call it whenever the thread
+        is on screen and a newer message has been shown.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectMessagesRead' }
+      responses:
+        '204': { description: Marked as read }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
   /projects/{projectId}/tasks:
     parameters:
       - { $ref: '#/components/parameters/ProjectId' }
@@ -1513,6 +1556,31 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+
+  /projects/{projectId}/tasks/{taskId}/messages/read:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+      - { $ref: '#/components/parameters/ProjectTaskId' }
+    put:
+      tags: [projects]
+      operationId: markProjectTaskMessagesRead
+      summary: Tell the server the user has read the chat of the task
+      description: |
+        Moves the user's read marker of the thread forward — to
+        `last_message_id` (the newest message the app has shown) or, without
+        it, to now. The marker never moves back. Call it whenever the thread
+        is on screen and a newer message has been shown.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectMessagesRead' }
+      responses:
+        '204': { description: Marked as read }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
 
   /projects/{projectId}/finance:
     parameters:
@@ -1827,6 +1895,14 @@ components:
         tenant_id: { type: string, format: uuid, nullable: true }
         crm_role: { type: string, nullable: true, enum: [salesperson, sales_manager, null] }
         must_change_password: { type: boolean }
+        locale:
+          type: string
+          nullable: true
+          description: The language the user picked for themselves; null follows the company's
+        tenant_default_locale:
+          type: string
+          nullable: true
+          description: The company's language — what the app speaks unless the user picked another
         tenant_features:
           type: object
           description: Module name → enabled. A missing module counts as enabled.
@@ -2558,6 +2634,7 @@ components:
             name: { type: string }
             start_date: { type: string, format: date, nullable: true }
             end_date: { type: string, format: date, nullable: true, description: 'The due date; a task has no due time' }
+            end_time: { type: string, nullable: true, description: 'Hour the task is due (HH:MM, company time); null = no hour, shown at 09:00' }
             parent_task_id: { type: string, format: uuid, nullable: true }
             parent_task_number: { type: integer, nullable: true, description: Null for a top-level task and when the user may not see the parent }
             parent_task_name: { type: string, nullable: true }
@@ -2618,6 +2695,7 @@ components:
             priority_id: { type: string, format: uuid, nullable: true }
             start_date: { type: string, format: date, nullable: true }
             end_date: { type: string, format: date, nullable: true }
+            end_time: { type: string, nullable: true, description: 'Hour the task is due (HH:MM, company time); null = no hour, shown at 09:00' }
             parent_task_id: { type: string, format: uuid, nullable: true }
             custom_values:
               type: object
@@ -2649,6 +2727,7 @@ components:
         status_id: { type: string, format: uuid, description: 'An active status; without it the first "to do" status' }
         start_date: { type: string, format: date, nullable: true }
         end_date: { type: string, format: date, nullable: true, description: Not before `start_date` }
+        end_time: { type: string, nullable: true, description: 'Hour the task is due (HH:MM, company time); needs `end_date`' }
         parent_task_id: { type: string, format: uuid, nullable: true, description: A task of the same project }
         assignee_ids: { type: array, maxItems: 100, items: { type: string, format: uuid }, description: Members of the project }
         custom_values: { type: object, additionalProperties: true, description: 'Values of the project''s custom fields, keyed by `field_definition_id`; required fields must be present' }
@@ -2666,6 +2745,7 @@ components:
         status_id: { type: string, format: uuid }
         start_date: { type: string, format: date, nullable: true }
         end_date: { type: string, format: date, nullable: true }
+        end_time: { type: string, nullable: true, description: 'Hour the task is due (HH:MM, company time); null = no hour, shown at 09:00' }
         end_date_change_reason: { type: string, nullable: true, maxLength: 500, description: 'Why the due date moves; optional, ignored unless `end_date` really changes' }
         parent_task_id: { type: string, format: uuid, nullable: true }
         assignee_ids: { type: array, maxItems: 100, items: { type: string, format: uuid } }
@@ -2686,6 +2766,7 @@ components:
             name: { type: string }
             start_date: { type: string, format: date, nullable: true }
             end_date: { type: string, format: date, nullable: true }
+            end_time: { type: string, nullable: true, description: 'Hour the task is due (HH:MM, company time); null = no hour, shown at 09:00' }
             parent_task_id: { type: string, format: uuid, nullable: true }
             status_id: { type: string, format: uuid }
             status_name: { type: string }
@@ -3060,6 +3141,52 @@ components:
         created_at: { type: string, format: date-time }
         author_id: { type: string, format: uuid, nullable: true, description: Null once the author's account is deleted }
         author_name: { type: string, nullable: true }
+        read_by:
+          type: array
+          description: The other people of the thread who have read the message
+          items:
+            type: object
+            required: [user_id, display_name]
+            properties:
+              user_id: { type: string, format: uuid }
+              display_name: { type: string, nullable: true }
+        is_read_by_all:
+          type: boolean
+          description: Everyone the thread is addressed to (apart from the author) has read the message
+
+    ProjectMessagesRead:
+      type: object
+      properties:
+        last_message_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The newest message shown to the user; without it everything written so far counts as read
+
+    ProjectUnreadMessages:
+      type: object
+      required: [total, projects]
+      properties:
+        total: { type: integer }
+        projects:
+          type: array
+          description: Only projects with something unread
+          items:
+            type: object
+            required: [project_id, unread, general_unread, tasks]
+            properties:
+              project_id: { type: string, format: uuid }
+              unread: { type: integer, description: The general thread and the task threads together }
+              general_unread: { type: integer, description: The general thread of the project alone }
+              tasks:
+                type: array
+                description: Task threads with something unread
+                items:
+                  type: object
+                  required: [task_id, unread]
+                  properties:
+                    task_id: { type: string, format: uuid }
+                    unread: { type: integer }
 
     ProjectMessageCreate:
       type: object

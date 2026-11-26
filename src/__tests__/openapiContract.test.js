@@ -723,6 +723,17 @@ describe("projects", () => {
     const taskChat = documented(await get(projectUrl(`/tasks/${parentTask.id}/messages`)), "get", `${TASK}/messages`);
     expect(taskChat[0]).toMatchObject({ author_id: participant.id, author_name: "Uczestnik Spec" });
 
+    // The participant wrote in the task thread, so it is unread for the PM.
+    const unread = documented(await get("/projects/unread-messages"), "get", "/projects/unread-messages");
+    expect(unread.projects.find((entry) => entry.project_id === project.id).tasks)
+      .toContainEqual({ task_id: parentTask.id, unread: 1 });
+    documented(await send("put", projectUrl(`/tasks/${parentTask.id}/messages/read`), { last_message_id: taskChat[0].id }),
+      "put", `${TASK}/messages/read`, 204);
+    documented(await send("put", projectUrl("/messages/read"), {}), "put", "/projects/{projectId}/messages/read", 204);
+    documented(await send("put", projectUrl("/messages/read"), {}, outsiderAuth), "put", "/projects/{projectId}/messages/read", 404);
+    const readChat = documented(await get(projectUrl(`/tasks/${parentTask.id}/messages`), participantAuth), "get", `${TASK}/messages`);
+    expect(readChat[0].read_by.length).toBeGreaterThan(0);
+
     documented(await get(projectUrl("/messages"), outsiderAuth), "get", "/projects/{projectId}/messages", 404);
     documented(await get(projectUrl(`/tasks/${UNKNOWN_ID}/messages`)), "get", `${TASK}/messages`, 404);
     documented(await send("post", projectUrl(`/tasks/${parentTask.id}/messages`), {}), "post", `${TASK}/messages`, 400);

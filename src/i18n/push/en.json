@@ -15,6 +15,10 @@
     "body": "{assignerName} assigned this partner to you",
     "title": "New partner: {sourceName}"
   },
+  "projectMessage": {
+    "body": "{authorName}: {excerpt}",
+    "title": "{threadName}"
+  },
   "projectTaskAssigned": {
     "body": "{assignerName} · {projectName}",
     "title": "New task: {taskLabel} {taskName}"

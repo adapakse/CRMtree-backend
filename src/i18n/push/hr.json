@@ -15,6 +15,10 @@
     "body": "{assignerName} vam je dodijelio/la ovog partnera",
     "title": "Novi partner: {sourceName}"
   },
+  "projectMessage": {
+    "body": "{authorName}: {excerpt}",
+    "title": "{threadName}"
+  },
   "projectTaskAssigned": {
     "body": "{assignerName} · {projectName}",
     "title": "Novi zadatak: {taskLabel} {taskName}"

@@ -138,7 +138,7 @@ async function sendDueReminders() {
   // left alone, so their reminder fires if they are reopened later.
   const { rows: projectTasks } = await db.query(`
     SELECT
-      t.id, t.task_number, t.name, t.end_date, t.reminder_type,
+      t.id, t.task_number, t.name, t.end_date, to_char(t.end_time, 'HH24:MI') AS end_time, t.reminder_type,
       p.id AS project_id, p.key AS project_key, p.name AS project_name, p.tenant_id,
       tn.default_locale AS tenant_default_locale,
       COALESCE((
@@ -176,7 +176,7 @@ async function sendDueReminders() {
           taskId:        task.id,
           taskLabel:     `${task.project_key}-${task.task_number}`,
           taskName:      task.name,
-          endDate:       task.end_date,
+          endDate:       [task.end_date, task.end_time].filter(Boolean).join(' '),
           reminderType:  task.reminder_type,
         });
         totalSent++;

@@ -121,6 +121,32 @@ describe("sending", () => {
     });
   });
 
+  test("the number for the app icon goes only to the recipient it was counted for", async () => {
+    await seedToken(anna, TOKEN_A);
+    await seedToken(piotr, TOKEN_B);
+    const transport = fakeTransport();
+
+    await createPushService(transport).sendToUsers({ ...reminder([anna.id, piotr.id]), badgeByUserId: { [anna.id]: 3 } });
+    const byToken = Object.fromEntries(transport.sent.map((message) => [message.token, message]));
+    expect(byToken[TOKEN_A].badge).toBe(3);
+    expect(byToken[TOKEN_B].badge).toBe(0);
+
+    await createPushService(transport).sendToUsers(reminder([anna.id]));
+    expect(transport.sent.at(-1)).not.toHaveProperty("badge");
+  });
+
+  test("the icon badge alone goes to the user's iPhones, without a notification", async () => {
+    await seedToken(anna, TOKEN_A);
+    await db.query(
+      "INSERT INTO mobile_push_tokens (tenant_id, user_id, device_id, token, platform) VALUES ($1, $2, 'iphone', $3, 'ios')",
+      [tenantId, anna.id, TOKEN_B],
+    );
+    const transport = fakeTransport();
+
+    expect(await createPushService(transport).syncIconBadge({ userId: anna.id, badge: 2 })).toEqual({ sent: 1 });
+    expect(transport.sent).toEqual([{ token: TOKEN_B, badge: 2 }]);
+  });
+
   test("a token Firebase no longer knows is forgotten", async () => {
     await seedToken(anna, TOKEN_A);
     const result = await createPushService(fakeTransport({ result: "unregistered" })).sendToUsers(reminder([anna.id]));

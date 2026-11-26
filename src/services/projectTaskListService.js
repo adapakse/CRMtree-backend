@@ -130,7 +130,7 @@ function buildFilteredTasks(scope, filters) {
     WHERE parent_assignee.task_id = parent.id AND parent_assignee.user_id = $2::uuid))`;
   const from = `FROM (
     SELECT t.id, t.project_id, p.key AS project_key, p.name AS project_name,
-           t.task_number, t.name, t.start_date, t.end_date, t.parent_task_id,
+           t.task_number, t.name, t.start_date, t.end_date, to_char(t.end_time, 'HH24:MI') AS end_time, t.parent_task_id,
            CASE WHEN ${mayNameParent} THEN parent.task_number END AS parent_task_number,
            CASE WHEN ${mayNameParent} THEN parent.name END AS parent_task_name,
            t.status_id, s.name AS status_name, s.category AS status_category, s.color AS status_color,

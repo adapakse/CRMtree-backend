@@ -15,6 +15,10 @@
     "body": "{assignerName} v-a atribuit acest partener",
     "title": "Partener nou: {sourceName}"
   },
+  "projectMessage": {
+    "body": "{authorName}: {excerpt}",
+    "title": "{threadName}"
+  },
   "projectTaskAssigned": {
     "body": "{assignerName} · {projectName}",
     "title": "Sarcină nouă: {taskLabel} {taskName}"
