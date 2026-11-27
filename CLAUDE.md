@@ -449,9 +449,12 @@ każdego usera tenanta, niezależnie od roli handlowej. Zobacz też `CRMtree-fro
   partnera (`moveLeadProjectsToPartner` w trasie migracji leada).
 - **Widoczność na karcie leada/partnera:** projekty i ich zadania widzi każdy, kto widzi
   kartę, także bez członkostwa w projekcie (`can_open` mówi, czy może wejść do projektu).
-- **Godzina 09:00:** zadanie ma datę zakończenia bez godziny. Przypomnienia wychodzą o 09:00
-  `Europe/Warsaw` (`REMINDER_LOCAL_TIME` w `projectTaskService.js`), frontend stawia zadanie
-  w kalendarzu o tej samej godzinie.
+- **Godzina zadania jest opcjonalna** (zadanie Adama dla Prismy, 2026-11-25):
+  `project_tasks.end_time` (migracja 0343), w API `end_time` jako `"HH:MM"` albo `null`.
+  Wymaga daty zakończenia i znika razem z nią. Z godziną przypomnienie względne wychodzi o tej
+  godzinie, a kalendarz stawia zadanie o niej; **bez godziny jak dotąd o 09:00**
+  `Europe/Warsaw` (`REMINDER_LOCAL_TIME` w `projectTaskService.js`). Terminowość („po
+  terminie”, „zagrożone”) dalej liczy się wyłącznie po dacie — godzina jej nie zmienia.
 
 ### Kontrola terminów (decyzje biznesowe, 2026-10-06) — nie cofaj bez pytania
 
@@ -864,9 +867,32 @@ backend:
 - **finanse w telefonie są tylko do odczytu** (bez dodawania i edycji kosztów), a **KSeF jest
   wyłącznie w webie**.
 
+### Czat — przeczytane i nieprzeczytane (zadanie Adama dla Prismy, 2026-11-25)
+
+- **Jeden znacznik na osobę i wątek** (`project_message_reads`, migracja 0342): dokąd dana
+  osoba przeczytała czat projektu (`task_id NULL`) albo czat zadania. Znacznik nigdy się nie
+  cofa. Wiadomości sprzed migracji są oznaczone jako przeczytane.
+- **Oznaczanie:** `PUT /api/projects/:id/messages/read` i `…/tasks/:taskId/messages/read`
+  z opcjonalnym `last_message_id` (najnowsza wiadomość pokazana na ekranie; bez niego „teraz”).
+  Autor wiadomości ma wątek przeczytany do swojej wiadomości.
+- **Znaczniki przy wiadomości** (jak w WhatsAppie): każda wiadomość niesie `read_by` (kto z
+  odbiorców wątku ją przeczytał) i `is_read_by_all`. Odbiorcy wątku = członkowie projektu poza
+  autorem; czatu zadania nie dostaje uczestnik zewnętrzny, który nie jest do zadania przypisany.
+- **Licznik:** `GET /api/projects/unread-messages` → `total` (menu i ikona aplikacji) oraz
+  per projekt `unread`, `general_unread` i `tasks[]`. Liczą się tylko projekty, w których
+  pytający jest członkiem (admin tenanta bez członkostwa nie dostaje licznika), i wiadomości
+  nowsze niż jego dołączenie do projektu.
+- **Push o nowej wiadomości** (`projectMessage`) idzie do pozostałych odbiorców wątku i niesie
+  ich `total` jako liczbę na ikonie aplikacji (`apns.aps.badge`, `android.notification_count`).
+  Po oznaczeniu wątku jako przeczytany iPhone’y tej osoby dostają samą nową liczbę, bez
+  powiadomienia (`pushService.syncIconBadge`); na Androidzie znacznik ikony znika razem
+  z powiadomieniem. **Samej aktualizacji liczby na iPhonie nie dało się sprawdzić bez
+  urządzenia — do potwierdzenia przy pierwszym teście na iOS.**
+- Kod: `projectMessageService.js`; testy: `project-tasks.test.js` (grupa `chat`), `push.test.js`.
+
 ### Poza zakresem
 
-Załączniki, zależności między zadaniami, licznik nieprzeczytanych wiadomości, edycja i usuwanie
+Załączniki, zależności między zadaniami, edycja i usuwanie
 wiadomości czatu. W finansach: VAT, wiele walut w jednym projekcie. W KSeF: faktury korygujące,
 faktury sprzedaży jako przychód, integracja z płatnościami.
 

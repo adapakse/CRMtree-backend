@@ -279,6 +279,39 @@ describe('custom fields', () => {
   });
 });
 
+describe('hour of a task', () => {
+  test('is optional, needs a due date and goes away with it', async () => {
+    const created = await api('post', tasksUrl(), pm).send({ name: 'Spotkanie', end_date: '2031-03-10', end_time: '14:30' });
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ end_date: '2031-03-10', end_time: '14:30' });
+    expect((await createTask({ end_date: '2031-03-10' })).end_time).toBeNull();
+
+    expect((await api('post', tasksUrl(), pm).send({ name: 'X', end_time: '10:00' })).status).toBe(400);
+    expect((await api('post', tasksUrl(), pm).send({ name: 'X', end_date: '2031-03-10', end_time: '25:00' })).status).toBe(400);
+
+    const moved = await patchTask(pm, created.body, { end_time: '08:15' });
+    expect(moved.body.end_time).toBe('08:15');
+    const cleared = await patchTask(pm, created.body, { end_date: null });
+    expect(cleared.body).toMatchObject({ end_date: null, end_time: null });
+    expect((await patchTask(pm, created.body, { end_time: '09:00' })).status).toBe(400);
+  });
+
+  test('a reminder relative to the due date fires at the hour of the task, 09:00 without one', async () => {
+    const reminderOf = async (task) => (await db.query(
+      `SELECT to_char(reminder_at AT TIME ZONE 'Europe/Warsaw', 'YYYY-MM-DD HH24:MI') AS at FROM project_tasks WHERE id = $1`,
+      [task.id],
+    )).rows[0].at;
+
+    const timed = (await api('post', tasksUrl(), pm)
+      .send({ name: 'Z godziną', end_date: '2031-03-10', end_time: '14:30', reminder_type: '1d_before' })).body;
+    expect(await reminderOf(timed)).toBe('2031-03-09 14:30');
+    await patchTask(pm, timed, { end_time: '16:00' });
+    expect(await reminderOf(timed)).toBe('2031-03-09 16:00');
+    await patchTask(pm, timed, { end_time: null });
+    expect(await reminderOf(timed)).toBe('2031-03-09 09:00');
+  });
+});
+
 describe('chat', () => {
   test('members talk in the project thread; a non-member cannot read it', async () => {
     const posted = await api('post', `/api/projects/${project.id}/messages`, reader).send({ body: 'Dzień dobry' });
@@ -305,6 +338,99 @@ describe('chat', () => {
 
   test('an empty message is rejected', async () => {
     expect((await api('post', `/api/projects/${project.id}/messages`, pm).send({ body: '   ' })).status).toBe(400);
+  });
+
+  const unreadOf = async (user) => {
+    const summary = (await api('get', '/api/projects/unread-messages', user)).body;
+    return summary.projects.find((entry) => entry.project_id === project.id)
+      || { unread: 0, general_unread: 0, tasks: [] };
+  };
+  const markProjectRead = (user, body = {}) =>
+    api('put', `/api/projects/${project.id}/messages/read`, user).send(body);
+
+  test('a new message is unread for the other members until they open the thread', async () => {
+    await markProjectRead(worker);
+    await markProjectRead(pm);
+    const posted = await api('post', `/api/projects/${project.id}/messages`, pm).send({ body: 'Nowy termin' });
+
+    expect((await unreadOf(worker)).general_unread).toBe(1);
+    expect((await unreadOf(pm)).general_unread).toBe(0);
+    const total = (await api('get', '/api/projects/unread-messages', worker)).body.total;
+    expect(total).toBeGreaterThanOrEqual(1);
+
+    expect((await markProjectRead(worker, { last_message_id: posted.body.id })).status).toBe(204);
+    expect((await unreadOf(worker)).general_unread).toBe(0);
+    expect((await markProjectRead(outsider)).status).toBe(404);
+    expect((await markProjectRead(worker, { last_message_id: 'x' })).status).toBe(400);
+  });
+
+  test('own message shows who has read it and when everyone has', async () => {
+    const posted = await api('post', `/api/projects/${project.id}/messages`, pm).send({ body: 'Czy wszyscy widzą?' });
+    expect(posted.body).toMatchObject({ read_by: [], is_read_by_all: false });
+    const find = async () => (await api('get', `/api/projects/${project.id}/messages`, pm)).body
+      .find((message) => message.id === posted.body.id);
+
+    await markProjectRead(worker);
+    const afterOne = await find();
+    expect(afterOne.read_by.map((reader_) => reader_.user_id)).toEqual([worker.id]);
+    expect(afterOne.is_read_by_all).toBe(false);
+
+    for (const member of [reader, external, controller]) await markProjectRead(member);
+    const afterAll_ = await find();
+    expect(afterAll_.read_by).toHaveLength(4);
+    expect(afterAll_.is_read_by_all).toBe(true);
+  });
+
+  test('a marker set to an older message leaves newer ones unread and never moves back', async () => {
+    await markProjectRead(worker);
+    const first = await api('post', `/api/projects/${project.id}/messages`, pm).send({ body: 'Pierwsza' });
+    await api('post', `/api/projects/${project.id}/messages`, pm).send({ body: 'Druga' });
+
+    await markProjectRead(worker, { last_message_id: first.body.id });
+    expect((await unreadOf(worker)).general_unread).toBe(1);
+    await markProjectRead(worker);
+    await markProjectRead(worker, { last_message_id: first.body.id });
+    expect((await unreadOf(worker)).general_unread).toBe(0);
+  });
+
+  test('a task thread is counted apart and only for those who see the task', async () => {
+    const task = await createTask({ assignee_ids: [worker.id] });
+    await api('post', tasksUrl(`/${task.id}/messages`), pm).send({ body: 'Do zadania' });
+
+    const workerUnread = await unreadOf(worker);
+    expect(workerUnread.tasks).toContainEqual({ task_id: task.id, unread: 1 });
+    expect((await unreadOf(external)).tasks.map((entry) => entry.task_id)).not.toContain(task.id);
+
+    expect((await api('put', tasksUrl(`/${task.id}/messages/read`), external).send({})).status).toBe(404);
+    expect((await api('put', tasksUrl(`/${task.id}/messages/read`), worker).send({})).status).toBe(204);
+    expect((await unreadOf(worker)).tasks.map((entry) => entry.task_id)).not.toContain(task.id);
+  });
+
+  test('a new message is pushed to the others in the thread with their unread total as the icon badge', async () => {
+    const projectMessageService = require('../services/projectMessageService');
+    const task = await createTask({ assignee_ids: [worker.id] });
+    for (const member of [worker, reader, external, controller]) await markProjectRead(member);
+    const calls = [];
+    const push = { isConfigured: () => true, sendToUsers: async (call) => { calls.push(call); } };
+
+    const posted = await api('post', tasksUrl(`/${task.id}/messages`), pm).send({ body: 'Proszę o wycenę' });
+    await projectMessageService.notifyNewMessage({
+      tenantId, project, task, author: pm, message: posted.body, push,
+    });
+
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    expect(call.kind).toBe('projectMessage');
+    // The external participant is not assigned to the task, so the thread is not theirs.
+    expect([...call.userIds].sort()).toEqual([worker.id, reader.id, controller.id].sort());
+    expect(call.params).toMatchObject({
+      threadName: `${project.key}-${task.task_number} ${task.name}`, excerpt: 'Proszę o wycenę',
+    });
+    expect(call.data).toEqual({ source_type: 'project_message', project_id: project.id, task_id: task.id });
+    expect(call.badgeByUserId[worker.id]).toBe((await api('get', '/api/projects/unread-messages', worker)).body.total);
+
+    const unconfigured = { isConfigured: () => false, sendToUsers: async () => { throw new Error('must not send'); } };
+    await projectMessageService.notifyNewMessage({ tenantId, project, author: pm, message: posted.body, push: unconfigured });
   });
 });
 

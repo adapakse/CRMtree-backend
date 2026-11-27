@@ -13,6 +13,7 @@
 // GET   /:taskId/history   — change history
 // GET   /:taskId/messages  — chat thread of the task
 // POST  /:taskId/messages
+// PUT   /:taskId/messages/read — the caller has read the chat of the task
 //
 // Permission rules live in projectTaskService.
 
@@ -73,6 +74,7 @@ function taskBodyRules({ isCreate }) {
     isAnyUUID(body('status_id').optional()),
     isDateOnly(body('start_date').optional({ nullable: true })),
     isDateOnly(body('end_date').optional({ nullable: true })),
+    body('end_time').optional({ nullable: true }).matches(/^([01]\d|2[0-3]):[0-5]\d$/).withMessage('Invalid time, expected HH:MM'),
     isAnyUUID(body('parent_task_id').optional({ nullable: true })),
     body('assignee_ids').optional().isArray({ max: 100 }),
     isAnyUUID(body('assignee_ids.*')),
@@ -243,9 +245,30 @@ router.post(
   requireOpenProject, loadVisibleTask,
   async (req, res, next) => {
     try {
-      res.status(201).json(await projectMessageService.postMessage({
+      const message = await projectMessageService.postMessage({
         tenantId: req.tenantId, projectId: req.project.id, taskId: req.task.id, author: req.user, body: req.body.body,
-      }));
+      });
+      res.status(201).json(message);
+      projectMessageService.notifyNewMessage({
+        tenantId: req.tenantId, project: req.project, task: req.task, author: req.user, message,
+      });
+    } catch (err) { next(err); }
+  },
+);
+
+router.put(
+  '/:taskId/messages/read',
+  [isAnyUUID(param('taskId')), isAnyUUID(body('last_message_id')).optional({ nullable: true })],
+  validate,
+  loadVisibleTask,
+  async (req, res, next) => {
+    try {
+      await projectMessageService.markThreadRead({
+        tenantId: req.tenantId, projectId: req.project.id, taskId: req.task.id, userId: req.user.id,
+        lastMessageId: req.body.last_message_id || null,
+      });
+      res.status(204).end();
+      projectMessageService.syncIconBadge({ tenantId: req.tenantId, userId: req.user.id });
     } catch (err) { next(err); }
   },
 );

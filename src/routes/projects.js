@@ -25,6 +25,8 @@
 // GET    /api/projects/my-tasks                  — tasks assigned to me: paged, filtered, sorted
 // GET    /api/projects/:id/messages              — general project chat
 // POST   /api/projects/:id/messages
+// PUT    /api/projects/:id/messages/read         — the caller has read the general chat
+// GET    /api/projects/unread-messages           — the caller's unread chat messages
 
 const router = require('express').Router();
 const { body, param, query } = require('express-validator');
@@ -78,6 +80,12 @@ router.get('/config', async (req, res, next) => {
       projectPortfolioService.hasAccess({ tenantId: req.tenantId, user: req.user }),
     ]);
     res.json({ ...config, has_cross_project_view: hasCrossProjectView });
+  } catch (err) { next(err); }
+});
+
+router.get('/unread-messages', async (req, res, next) => {
+  try {
+    res.json(await projectMessageService.getUnreadSummary({ tenantId: req.tenantId, userId: req.user.id }));
   } catch (err) { next(err); }
 });
 
@@ -416,9 +424,30 @@ router.post(
   loadProject, requireOpenProject,
   async (req, res, next) => {
     try {
-      res.status(201).json(await projectMessageService.postMessage({
+      const message = await projectMessageService.postMessage({
         tenantId: req.tenantId, projectId: req.project.id, author: req.user, body: req.body.body,
-      }));
+      });
+      res.status(201).json(message);
+      projectMessageService.notifyNewMessage({
+        tenantId: req.tenantId, project: req.project, author: req.user, message,
+      });
+    } catch (err) { next(err); }
+  },
+);
+
+router.put(
+  '/:id/messages/read',
+  [projectId, isAnyUUID(body('last_message_id')).optional({ nullable: true })],
+  validate,
+  loadProject,
+  async (req, res, next) => {
+    try {
+      await projectMessageService.markThreadRead({
+        tenantId: req.tenantId, projectId: req.project.id, userId: req.user.id,
+        lastMessageId: req.body.last_message_id || null,
+      });
+      res.status(204).end();
+      projectMessageService.syncIconBadge({ tenantId: req.tenantId, userId: req.user.id });
     } catch (err) { next(err); }
   },
 );

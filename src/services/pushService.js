@@ -39,13 +39,21 @@ function createFcmTransport(serviceAccountJson) {
   return {
     isConfigured: () => Boolean(auth),
     /** Resolves to 'sent', 'unregistered' (the token is dead) or 'failed'. */
-    async send({ token, title, body, data }) {
+    async send({ token, title, body, data, badge }) {
+      // The number on the app icon: iOS shows `aps.badge`, Android launchers
+      // that show a number take it from `notification_count`.
+      const hasBadge = Number.isInteger(badge);
       const { token: accessToken } = await auth.getAccessToken();
       const response = await fetch(`https://fcm.googleapis.com/v1/projects/${credentials.project_id}/messages:send`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: { token, notification: { title, body }, data, android: { priority: 'high' } },
+          message: {
+            // Without a title the message only updates the icon badge.
+            token, ...(title ? { notification: { title, body } } : {}), data,
+            android: { priority: 'high', ...(hasBadge ? { notification: { notification_count: badge } } : {}) },
+            ...(hasBadge ? { apns: { payload: { aps: { badge } } } } : {}),
+          },
         }),
       });
       if (response.ok) return 'sent';
@@ -68,16 +76,18 @@ function createPushService(transport) {
    *
    * `kind` names the texts in src/i18n/push/<lang>.json; `params` fill them
    * in; `dateParams` are dates written in the recipient's language; `data`
-   * tells the app what to open. The tenant's name ends the body, because one
-   * phone can hold accounts in several companies.
+   * tells the app what to open; `badgeByUserId` is the number to put on the
+   * app icon of each recipient (a recipient without one keeps the icon as it
+   * is). The tenant's name ends the body, because one phone can hold accounts
+   * in several companies.
    */
-  async function sendToUsers({ userIds, kind, params = {}, dateParams = {}, data = {} }) {
+  async function sendToUsers({ userIds, kind, params = {}, dateParams = {}, data = {}, badgeByUserId = null }) {
     const recipients = [...new Set((userIds || []).filter(Boolean))];
     if (!recipients.length || !transport.isConfigured()) return { sent: 0 };
     let sent = 0;
     try {
       const { rows } = await db.query(
-        `SELECT pt.id, pt.token, u.locale AS user_locale,
+        `SELECT pt.id, pt.token, pt.user_id, u.locale AS user_locale,
                 t.default_locale AS tenant_default_locale, t.name AS tenant_name, t.slug AS tenant_slug
            FROM mobile_push_tokens pt
            JOIN users u   ON u.id = pt.user_id AND u.is_active
@@ -99,6 +109,7 @@ function createPushService(transport) {
           data: Object.fromEntries(
             Object.entries({ kind, tenant_slug: row.tenant_slug, ...data }).map(([key, value]) => [key, String(value)]),
           ),
+          ...(badgeByUserId ? { badge: badgeByUserId[row.user_id] ?? 0 } : {}),
         });
         if (result === 'sent') sent++;
         if (result === 'unregistered') await db.query('DELETE FROM mobile_push_tokens WHERE id = $1', [row.id]);
@@ -109,7 +120,35 @@ function createPushService(transport) {
     return { sent };
   }
 
-  return { sendToUsers };
+  /**
+   * Sets the number on the app icon of the user's iPhones without showing a
+   * notification — after the user has read something elsewhere. Android has
+   * no such number of its own: its badge follows the notifications in the
+   * tray and goes away with them.
+   */
+  async function syncIconBadge({ userId, badge }) {
+    if (!transport.isConfigured()) return { sent: 0 };
+    let sent = 0;
+    try {
+      const { rows } = await db.query(
+        `SELECT pt.id, pt.token
+           FROM mobile_push_tokens pt
+           JOIN users u ON u.id = pt.user_id AND u.is_active
+          WHERE pt.user_id = $1 AND pt.platform = 'ios'`,
+        [userId],
+      );
+      for (const row of rows) {
+        const result = await transport.send({ token: row.token, badge });
+        if (result === 'sent') sent++;
+        if (result === 'unregistered') await db.query('DELETE FROM mobile_push_tokens WHERE id = $1', [row.id]);
+      }
+    } catch (error) {
+      logger.warn('[push] Updating the icon badge failed', { error: error.message });
+    }
+    return { sent };
+  }
+
+  return { sendToUsers, syncIconBadge, isConfigured: () => transport.isConfigured() };
 }
 
 module.exports = {

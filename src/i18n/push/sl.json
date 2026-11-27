@@ -15,6 +15,10 @@
     "body": "{assignerName} vam je dodelil(a) tega partnerja",
     "title": "Nov partner: {sourceName}"
   },
+  "projectMessage": {
+    "body": "{authorName}: {excerpt}",
+    "title": "{threadName}"
+  },
   "projectTaskAssigned": {
     "body": "{assignerName} · {projectName}",
     "title": "Nova naloga: {taskLabel} {taskName}"

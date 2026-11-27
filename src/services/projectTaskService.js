@@ -31,11 +31,11 @@ const projectConfigService = require('./projectConfigService');
 const projectDeadlineService = require('./projectDeadlineService');
 
 const CONTENT_FIELDS   = [
-  'name', 'description', 'type_id', 'priority_id', 'start_date', 'end_date', 'custom_values',
+  'name', 'description', 'type_id', 'priority_id', 'start_date', 'end_date', 'end_time', 'custom_values',
   'reminder_type', 'reminder_at',
 ];
-// A project task has a due date but no due time, so relative reminders are
-// sent at the hour the task is shown at in the calendar.
+// The hour of a task is optional. Without it relative reminders are sent at
+// the hour the task is shown at in the calendar.
 const REMINDER_LOCAL_TIME = '09:00';
 const REMINDER_TIME_ZONE  = projectDeadlineService.TIME_ZONE;
 const STRUCTURE_FIELDS = ['parent_task_id', 'assignee_ids'];
@@ -50,6 +50,7 @@ const HISTORY_LIMIT = 200;
 const taskSelect = (deadlinePlaceholders) => `
   SELECT t.id, t.project_id, t.task_number, t.name, t.description,
          t.type_id, t.status_id, t.priority_id, t.start_date, t.end_date,
+         to_char(t.end_time, 'HH24:MI') AS end_time,
          t.parent_task_id, t.custom_values, t.created_by, t.created_at, t.updated_at,
          t.reminder_type, t.reminder_at,
          s.category AS status_category,
@@ -254,6 +255,10 @@ function assertDateOrder(startDate, endDate) {
   }
 }
 
+function assertTimeHasDate(endDate, endTime) {
+  if (endTime && !endDate) throw httpError(400, 'The hour of a task needs a due date');
+}
+
 async function findDefaultStatusId(tenantId) {
   // A task can be the first thing a tenant does in the module, before anyone read the configuration.
   await projectConfigService.ensureDefaults(tenantId);
@@ -283,7 +288,7 @@ async function applyReminder(client, taskId, reminderType, customReminderAt) {
            WHEN $2::text IS NULL THEN NULL
            WHEN $2::text = 'custom' THEN $3::timestamptz
            WHEN end_date IS NULL THEN NULL
-           ELSE ((end_date + $4::time) AT TIME ZONE $5::text)
+           ELSE ((end_date + COALESCE(end_time, $4::time)) AT TIME ZONE $5::text)
                 - make_interval(days => CASE $2::text WHEN '1d_before' THEN 1 WHEN '2d_before' THEN 2
                                                      WHEN '3d_before' THEN 3 ELSE 0 END)
          END
@@ -321,6 +326,7 @@ async function createTask({ tenantId, project, actor, input }) {
   const assigneeIds = input.assignee_ids || [];
   const statusId = input.status_id || await findDefaultStatusId(tenantId);
   assertDateOrder(input.start_date, input.end_date);
+  assertTimeHasDate(input.end_date, input.end_time);
   await Promise.all([
     assertActiveDictionaryItem('project_task_statuses', tenantId, statusId, 'status'),
     assertActiveDictionaryItem('project_task_types', tenantId, input.type_id, 'typ'),
@@ -340,13 +346,13 @@ async function createTask({ tenantId, project, actor, input }) {
     const { rows: [created] } = await client.query(
       `INSERT INTO project_tasks
          (tenant_id, project_id, task_number, name, description, type_id, status_id, priority_id,
-          start_date, end_date, original_end_date, parent_task_id, custom_values, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, $10::date, $11, $12::jsonb, $13)
+          start_date, end_date, original_end_date, parent_task_id, custom_values, created_by, end_time)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, $10::date, $11, $12::jsonb, $13, $14::time)
        RETURNING id`,
       [tenantId, project.id, counter.task_number, input.name, input.description || null,
        input.type_id || null, statusId, input.priority_id || null,
        input.start_date || null, input.end_date || null, input.parent_task_id || null,
-       JSON.stringify(customValues), actor.user.id],
+       JSON.stringify(customValues), actor.user.id, input.end_time || null],
     );
     await replaceAssignees(client, tenantId, created.id, assigneeIds);
     await syncCompletedAt(client, created.id);
@@ -399,9 +405,13 @@ async function updateTask({ tenantId, project, actor, taskId, changes }) {
   if (has('assignee_ids')) await assertAssigneesAreMembers(project.id, changes.assignee_ids);
 
   const next = {};
-  for (const field of ['name', 'description', 'type_id', 'priority_id', 'start_date', 'end_date', 'parent_task_id']) {
+  for (const field of ['name', 'description', 'type_id', 'priority_id', 'start_date', 'end_date', 'end_time', 'parent_task_id']) {
     if (has(field) && changes[field] !== task[field]) next[field] = changes[field];
   }
+  // An hour belongs to a due date: it goes away with it and cannot be set without one.
+  const nextEndDate = has('end_date') ? changes.end_date : task.end_date;
+  if (!nextEndDate && task.end_time && !has('end_time')) next.end_time = null;
+  assertTimeHasDate(nextEndDate, 'end_time' in next ? next.end_time : task.end_time);
   if (isStatusChange) next.status_id = changes.status_id;
   if (has('custom_values')) {
     const projectFields = await projectService.listProjectFields(project.id);
@@ -420,7 +430,7 @@ async function updateTask({ tenantId, project, actor, taskId, changes }) {
         && new Date(changes.reminder_at).getTime() !== new Date(task.reminder_at).getTime());
   // A changed due date moves a relative reminder with it.
   const reminderNeedsRecalculation = reminderSettingsChanged
-    || (Boolean(nextReminderType) && nextReminderType !== 'custom' && 'end_date' in next);
+    || (Boolean(nextReminderType) && nextReminderType !== 'custom' && ('end_date' in next || 'end_time' in next));
 
   const changedFields = Object.keys(next);
   if (!changedFields.length && !assigneesChanged && !reminderNeedsRecalculation) {
@@ -513,7 +523,7 @@ async function notifyNewAssignees({ project, task, assigner, assigneeIds }) {
       taskId: task.id,
       taskLabel: `${project.key}-${task.task_number}`,
       taskName: task.name,
-      endDate: task.end_date,
+      endDate: [task.end_date, task.end_time].filter(Boolean).join(' '),
     })));
   } catch (err) {
     logger.warn('Project task assignment email failed', { taskId: task.id, error: err.message });
